@@ -1,0 +1,16 @@
+[Unit]
+Description=Arty engine: Ollama-compatible model server on llama.cpp (reads Ollama's models in place)
+After=network-online.target
+
+[Service]
+Environment=ARTY_ENGINE_CONFIG=/srv/ai/arty-engine/engine.json
+WorkingDirectory=/srv/ai/arty-engine/src
+ExecStart=/usr/bin/python3 -m arty_engine
+MemoryMax=5G
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+NoNewPrivileges=yes
+
+[Install]
+WantedBy=multi-user.target

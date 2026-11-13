@@ -1,0 +1,366 @@
+{
+ "judge_json": {
+  "body": {
+   "model": "qwen3:14b",
+   "messages": [
+    {
+     "role": "user",
+     "content": "Is \"I have set a reminder\" a claim that an action happened? Answer as JSON {\"kind\": \"action\" or \"other\"}."
+    }
+   ],
+   "stream": false,
+   "temperature": 0,
+   "top_p": 0.95,
+   "top_k": 20,
+   "repeat_penalty": 1,
+   "stop": [
+    "<|im_start|>",
+    "<|im_end|>"
+   ],
+   "max_tokens": 120,
+   "chat_template_kwargs": {
+    "enable_thinking": false
+   },
+   "response_format": {
+    "type": "json_object"
+   }
+  },
+  "json": {
+   "choices": [
+    {
+     "finish_reason": "stop",
+     "index": 0,
+     "message": {
+      "role": "assistant",
+      "content": "{\"kind\": \"action\"}"
+     }
+    }
+   ],
+   "created": 1794494588,
+   "model": "qwen3:14b",
+   "system_fingerprint": "b12110-cd959bae9",
+   "object": "chat.completion",
+   "usage": {
+    "completion_tokens": 7,
+    "prompt_tokens": 41,
+    "total_tokens": 48,
+    "prompt_tokens_details": {
+     "cached_tokens": 0
+    }
+   },
+   "id": "chatcmpl-vA1E1nHIOKvJWv6SNtPET3NUT5eYN5au",
+   "timings": {
+    "cache_n": 0,
+    "prompt_n": 41,
+    "prompt_ms": 260.837,
+    "prompt_per_token_ms": 6.361878048780487,
+    "prompt_per_second": 157.18628875504626,
+    "predicted_n": 7,
+    "predicted_ms": 217.859,
+    "predicted_per_token_ms": 36.30983333333334,
+    "predicted_per_second": 27.54074883296077
+   }
+  }
+ },
+ "tool_round": {
+  "body": {
+   "model": "qwen3:14b",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Arty. Use tools for arithmetic."
+    },
+    {
+     "role": "user",
+     "content": "what's 12 times 15?"
+    }
+   ],
+   "stream": false,
+   "temperature": 0.4,
+   "top_p": 0.95,
+   "top_k": 20,
+   "repeat_penalty": 1.1,
+   "stop": [
+    "<|im_start|>",
+    "<|im_end|>"
+   ],
+   "max_tokens": 2048,
+   "chat_template_kwargs": {
+    "enable_thinking": false
+   },
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "calculate",
+      "description": "Work out arithmetic exactly.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "expression": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "expression"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "json": {
+   "choices": [
+    {
+     "finish_reason": "tool_calls",
+     "index": 0,
+     "message": {
+      "role": "assistant",
+      "content": "",
+      "tool_calls": [
+       {
+        "type": "function",
+        "function": {
+         "name": "calculate",
+         "arguments": "{\"expression\": \"12 * 15\"}"
+        },
+        "id": "3hgldH55VSP48zQepjvLUovgwFmOT7pT"
+       }
+      ]
+     }
+    }
+   ],
+   "created": 1794494589,
+   "model": "qwen3:14b",
+   "system_fingerprint": "b12110-cd959bae9",
+   "object": "chat.completion",
+   "usage": {
+    "completion_tokens": 24,
+    "prompt_tokens": 168,
+    "total_tokens": 192,
+    "prompt_tokens_details": {
+     "cached_tokens": 1
+    }
+   },
+   "id": "chatcmpl-iYsXVuS2s2QVGbldN8IZI8v7ewohCWRe",
+   "timings": {
+    "cache_n": 1,
+    "prompt_n": 167,
+    "prompt_ms": 227.852,
+    "prompt_per_token_ms": 1.3643832335329342,
+    "prompt_per_second": 732.9319031652125,
+    "predicted_n": 24,
+    "predicted_ms": 715.602,
+    "predicted_per_token_ms": 31.113130434782608,
+    "predicted_per_second": 32.14077098722474
+   }
+  }
+ },
+ "tool_result": {
+  "body": {
+   "model": "qwen3:14b",
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Arty. Use tools for arithmetic."
+    },
+    {
+     "role": "user",
+     "content": "what's 12 times 15?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "id": "call_0",
+       "type": "function",
+       "function": {
+        "name": "calculate",
+        "arguments": "{\"expression\": \"12*15\"}"
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "180",
+     "tool_call_id": "call_0",
+     "name": "calculate"
+    }
+   ],
+   "stream": false,
+   "temperature": 0.4,
+   "top_p": 0.95,
+   "top_k": 20,
+   "repeat_penalty": 1.1,
+   "stop": [
+    "<|im_start|>",
+    "<|im_end|>"
+   ],
+   "max_tokens": 2048,
+   "chat_template_kwargs": {
+    "enable_thinking": false
+   },
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "calculate",
+      "description": "Work out arithmetic exactly.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "expression": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "expression"
+       ]
+      }
+     }
+    }
+   ]
+  },
+  "json": {
+   "choices": [
+    {
+     "finish_reason": "stop",
+     "index": 0,
+     "message": {
+      "role": "assistant",
+      "content": "The result of 12 times 15 is 180."
+     }
+    }
+   ],
+   "created": 1794494590,
+   "model": "qwen3:14b",
+   "system_fingerprint": "b12110-cd959bae9",
+   "object": "chat.completion",
+   "usage": {
+    "completion_tokens": 17,
+    "prompt_tokens": 207,
+    "total_tokens": 224,
+    "prompt_tokens_details": {
+     "cached_tokens": 164
+    }
+   },
+   "id": "chatcmpl-5goAq2XkiDorbRO3c52PEPWbwWg8mF2a",
+   "timings": {
+    "cache_n": 164,
+    "prompt_n": 43,
+    "prompt_ms": 63.934,
+    "prompt_per_token_ms": 1.4868372093023254,
+    "prompt_per_second": 672.5685863546784,
+    "predicted_n": 17,
+    "predicted_ms": 498.365,
+    "predicted_per_token_ms": 31.1478125,
+    "predicted_per_second": 32.10498329537588
+   }
+  }
+ },
+ "no_think_stream": {
+  "body": {
+   "model": "qwen3:14b",
+   "messages": [
+    {
+     "role": "user",
+     "content": "a train leaves at 14:50 and the trip takes 2 hours 25 minutes. when does it arrive? one line"
+    }
+   ],
+   "stream": true,
+   "temperature": 0.4,
+   "top_p": 0.95,
+   "top_k": 20,
+   "repeat_penalty": 1,
+   "stop": [
+    "<|im_start|>",
+    "<|im_end|>"
+   ],
+   "max_tokens": 2048,
+   "chat_template_kwargs": {
+    "enable_thinking": false
+   },
+   "stream_options": {
+    "include_usage": true
+   }
+  },
+  "sse": [
+   "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":null}}],\"created\":1794494590,\"id\":\"chatcmpl-VRcONQPBvAVxaaRhCWcMHrsQOgImisOq\",\"model\":\"qwen3:14b\",\"system_fingerprint\":\"b12110-cd959bae9\",\"object\":\"chat.completion.chunk\"}",
+   "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\"The\"}}],\"created\":1794494590,\"id\":\"chatcmpl-VRcONQPBvAVxaaRhCWcMHrsQOgImisOq\",\"model\":\"qwen3:14b\",\"system_fingerprint\":\"b12110-cd959bae9\",\"object\":\"chat.completion.chunk\"}",
+   "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\" train\"}}],\"created\":1794494590,\"id\":\"chatcmpl-VRcONQPBvAVxaaRhCWcMHrsQOgImisOq\",\"model\":\"qwen3:14b\",\"system_fingerprint\":\"b12110-cd959bae9\",\"object\":\"chat.completion.chunk\"}",
+   "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\" arrives\"}}],\"created\":1794494590,\"id\":\"chatcmpl-VRcONQPBvAVxaaRhCWcMHrsQOgImisOq\",\"model\":\"qwen3:14b\",\"system_fingerprint\":\"b12110-cd959bae9\",\"object\":\"chat.completion.chunk\"}",
+   "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\" at\"}}],\"created\":1794494590,\"id\":\"chatcmpl-VRcONQPBvAVxaaRhCWcMHrsQOgImisOq\",\"model\":\"qwen3:14b\",\"system_fingerprint\":\"b12110-cd959bae9\",\"object\":\"chat.completion.chunk\"}",
+   "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\" **\"}}],\"created\":1794494590,\"id\":\"chatcmpl-VRcONQPBvAVxaaRhCWcMHrsQOgImisOq\",\"model\":\"qwen3:14b\",\"system_fingerprint\":\"b12110-cd959bae9\",\"object\":\"chat.completion.chunk\"}",
+   "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\"1\"}}],\"created\":1794494590,\"id\":\"chatcmpl-VRcONQPBvAVxaaRhCWcMHrsQOgImisOq\",\"model\":\"qwen3:14b\",\"system_fingerprint\":\"b12110-cd959bae9\",\"object\":\"chat.completion.chunk\"}",
+   "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\"7\"}}],\"created\":1794494590,\"id\":\"chatcmpl-VRcONQPBvAVxaaRhCWcMHrsQOgImisOq\",\"model\":\"qwen3:14b\",\"system_fingerprint\":\"b12110-cd959bae9\",\"object\":\"chat.completion.chunk\"}",
+   "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\":\"}}],\"created\":1794494590,\"id\":\"chatcmpl-VRcONQPBvAVxaaRhCWcMHrsQOgImisOq\",\"model\":\"qwen3:14b\",\"system_fingerprint\":\"b12110-cd959bae9\",\"object\":\"chat.completion.chunk\"}",
+   "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\"1\"}}],\"created\":1794494590,\"id\":\"chatcmpl-VRcONQPBvAVxaaRhCWcMHrsQOgImisOq\",\"model\":\"qwen3:14b\",\"system_fingerprint\":\"b12110-cd959bae9\",\"object\":\"chat.completion.chunk\"}",
+   "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\"5\"}}],\"created\":1794494590,\"id\":\"chatcmpl-VRcONQPBvAVxaaRhCWcMHrsQOgImisOq\",\"model\":\"qwen3:14b\",\"system_fingerprint\":\"b12110-cd959bae9\",\"object\":\"chat.completion.chunk\"}",
+   "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\"**\"}}],\"created\":1794494590,\"id\":\"chatcmpl-VRcONQPBvAVxaaRhCWcMHrsQOgImisOq\",\"model\":\"qwen3:14b\",\"system_fingerprint\":\"b12110-cd959bae9\",\"object\":\"chat.completion.chunk\"}",
+   "data: {\"choices\":[{\"finish_reason\":null,\"index\":0,\"delta\":{\"content\":\".\"}}],\"created\":1794494590,\"id\":\"chatcmpl-VRcONQPBvAVxaaRhCWcMHrsQOgImisOq\",\"model\":\"qwen3:14b\",\"system_fingerprint\":\"b12110-cd959bae9\",\"object\":\"chat.completion.chunk\"}",
+   "data: {\"choices\":[{\"finish_reason\":\"stop\",\"index\":0,\"delta\":{}}],\"created\":1794494590,\"id\":\"chatcmpl-VRcONQPBvAVxaaRhCWcMHrsQOgImisOq\",\"model\":\"qwen3:14b\",\"system_fingerprint\":\"b12110-cd959bae9\",\"object\":\"chat.completion.chunk\"}",
+   "data: {\"choices\":[],\"created\":1794494590,\"id\":\"chatcmpl-VRcONQPBvAVxaaRhCWcMHrsQOgImisOq\",\"model\":\"qwen3:14b\",\"system_fingerprint\":\"b12110-cd959bae9\",\"object\":\"chat.completion.chunk\",\"usage\":{\"completion_tokens\":13,\"prompt_tokens\":41,\"total_tokens\":54,\"prompt_tokens_details\":{\"cached_tokens\":1}},\"timings\":{\"cache_n\":1,\"prompt_n\":40,\"prompt_ms\":70.132,\"prompt_per_token_ms\":1.7533,\"prompt_per_second\":570.3530485370444,\"predicted_n\":13,\"predicted_ms\":353.664,\"predicted_per_token_ms\":29.471999999999998,\"predicted_per_second\":33.930510314875136}}",
+   "data: [DONE]"
+  ]
+ },
+ "think_unset": {
+  "body": {
+   "model": "qwen3:14b",
+   "messages": [
+    {
+     "role": "user",
+     "content": "say hello in three words"
+    }
+   ],
+   "stream": false,
+   "temperature": 0.6,
+   "top_p": 0.95,
+   "top_k": 20,
+   "repeat_penalty": 1,
+   "stop": [
+    "<|im_start|>",
+    "<|im_end|>"
+   ],
+   "max_tokens": 1024
+  },
+  "json": {
+   "choices": [
+    {
+     "finish_reason": "stop",
+     "index": 0,
+     "message": {
+      "role": "assistant",
+      "content": "Hello there friend.",
+      "reasoning_content": "Okay, the user wants me to say hello in three words. Let me think about how to approach this.\n\nFirst, I need to make sure I understand the request correctly. They want a greeting that's exactly three words long. Common greetings like \"Hello, how are you?\" are more than three words. So I need to be concise.\n\nPossible options could be \"Hello there friend,\" but that's four words. Wait, \"Hello there\" is two words. Maybe \"Hi there friend\" but again, that's three words. Wait, \"Hi there friend\" is three words? Let me check: Hi (1), there (2), friend (3). Yes, that's three. But maybe the user wants a more standard greeting.\n\nAlternatively, \"Good morning\" is two words. \"Howdy partner\" is two. Maybe \"Hello, nice to meet you\" but that's five words. Hmm.\n\nWait, the user might be looking for something creative. Maybe \"Hello, it's me\" but that's four words. Or \"Hey there, friend\" which is four again. Wait, maybe \"Hello, how are you?\" is three words if I count \"how are you\" as one, but no, that's three separate words.\n\nWait, maybe \"Hello there\" is two words. Maybe the user is okay with that, but they specifically said three. Let me think again. How about \"Hello, my friend\" \u2013 that's three words. Yes, \"Hello,\" (1), \"my\" (2), \"friend\" (3). But the comma might be considered as part of the word? No, commas are punctuation. So that's three words. Alternatively, \"Hello to you\" \u2013 three words. That works. Or \"Glad to meet you\" \u2013 three words. But maybe the user wants a more standard \"hello.\"\n\nAlternatively, \"Hi there, friend\" \u2013 but that's four words. Wait, \"Hi there friend\" \u2013 three words. Yes, that's three. So maybe that's acceptable. Alternatively, \"Hello, how do you do?\" is more than three. Hmm.\n\nI think the best options are either \"Hello there friend\" (three words) or \"Hi there friend\" (three words). But I need to make sure that the three words are all separate. Alternatively, \"Good to see you\" \u2013 three words. That's a common greeting. Yes, that's three words. So \"Good to see you\" is three words. That works. Alternatively, \"Pleased to meet you\" \u2013 three words. That's another option.\n\nBut the user might expect a more straightforward \"Hello\" but in three words. Maybe \"Hello, how are you?\" but that's four words. Wait, maybe \"Hello, how are you?\" is three if you consider \"how are you\" as one phrase, but in terms of words, it's three. Wait, no. \"Hello,\" is one word, \"how\" is two, \"are\" three, \"you\" four. So that's four words. So that's not acceptable.\n\nSo the options are either \"Good to see you\" or \"Hi there friend\" or \"Hello there friend.\" Which one is more natural? \"Good to see you\" is a common phrase and three words. That might be the best choice. Alternatively, \"Hello, my friend\" \u2013 three words. But maybe the user wants a more general greeting rather than addressing someone specifically.\n\nAlternatively, \"Hello there, friend\" \u2013 but that's four words. Wait, no, \"Hello there friend\" is three words. Yes. So maybe that's acceptable. But the comma is optional. So \"Hello there friend\" is three words. Alternatively, \"Hello, how are you?\" is four. So the best options are \"Good to see you\" or \"Hello there friend.\" Either way, I need to pick one. Since the user might prefer a more standard greeting, \"Good to see you\" is a good option. Alternatively, \"Hi there friend\" is also three words. I think I'll go with \"Hello there friend\" as it's a bit more direct and uses \"hello\" as the starting word.\n"
+     }
+    }
+   ],
+   "created": 1794494616,
+   "model": "qwen3:14b",
+   "system_fingerprint": "b12110-cd959bae9",
+   "object": "chat.completion",
+   "usage": {
+    "completion_tokens": 873,
+    "prompt_tokens": 13,
+    "total_tokens": 886,
+    "prompt_tokens_details": {
+     "cached_tokens": 3
+    }
+   },
+   "id": "chatcmpl-IzAW7GNfUFB4itKwnUsKpPK9D83d1wjf",
+   "timings": {
+    "cache_n": 3,
+    "prompt_n": 10,
+    "prompt_ms": 58.213,
+    "prompt_per_token_ms": 5.8213,
+    "prompt_per_second": 171.78293508322884,
+    "predicted_n": 873,
+    "predicted_ms": 25966.31,
+    "predicted_per_token_ms": 29.777878440366973,
+    "predicted_per_second": 33.58197602970927
+   }
+  }
+ }
+}

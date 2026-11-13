@@ -1,0 +1,378 @@
+{
+ "judge_json": {
+  "path": "/api/chat",
+  "request": {
+   "model": "qwen3:14b",
+   "stream": false,
+   "format": "json",
+   "think": false,
+   "keep_alive": -1,
+   "options": {
+    "temperature": 0,
+    "num_predict": 120,
+    "num_ctx": 12288
+   },
+   "messages": [
+    {
+     "role": "user",
+     "content": "Is \"I have set a reminder\" a claim that an action happened? Answer as JSON {\"kind\": \"action\" or \"other\"}."
+    }
+   ]
+  },
+  "reply": {
+   "model": "qwen3:14b",
+   "created_at": "2026-11-12T14:38:17.623251288Z",
+   "message": {
+    "role": "assistant",
+    "content": "{\"kind\": \"action\"}"
+   },
+   "done": true,
+   "done_reason": "stop",
+   "total_duration": 324373667,
+   "load_duration": 641157,
+   "prompt_eval_count": 45,
+   "prompt_eval_cached_count": 3,
+   "prompt_eval_duration": 62129000,
+   "eval_count": 7,
+   "eval_duration": 179557000
+  }
+ },
+ "tool_round": {
+  "path": "/api/chat",
+  "request": {
+   "model": "qwen3:14b",
+   "stream": false,
+   "think": false,
+   "keep_alive": -1,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "calculate",
+      "description": "Work out arithmetic exactly.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "expression": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "expression"
+       ]
+      }
+     }
+    }
+   ],
+   "options": {
+    "temperature": 0.4,
+    "num_ctx": 12288,
+    "num_predict": 2048,
+    "repeat_penalty": 1.1
+   },
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Arty. Use tools for arithmetic."
+    },
+    {
+     "role": "user",
+     "content": "what's 12 times 15?"
+    }
+   ]
+  },
+  "reply": {
+   "model": "qwen3:14b",
+   "created_at": "2026-11-12T14:38:18.541060608Z",
+   "message": {
+    "role": "assistant",
+    "content": "",
+    "tool_calls": [
+     {
+      "id": "call_xjpd6ccd",
+      "function": {
+       "index": 0,
+       "name": "calculate",
+       "arguments": {
+        "expression": "12 * 15"
+       }
+      }
+     }
+    ]
+   },
+   "done": true,
+   "done_reason": "stop",
+   "total_duration": 917121686,
+   "load_duration": 8135423,
+   "prompt_eval_count": 154,
+   "prompt_eval_cached_count": 1,
+   "prompt_eval_duration": 172198000,
+   "eval_count": 24,
+   "eval_duration": 729263000
+  }
+ },
+ "tool_result": {
+  "path": "/api/chat",
+  "request": {
+   "model": "qwen3:14b",
+   "stream": false,
+   "think": false,
+   "keep_alive": -1,
+   "tools": [
+    {
+     "type": "function",
+     "function": {
+      "name": "calculate",
+      "description": "Work out arithmetic exactly.",
+      "parameters": {
+       "type": "object",
+       "properties": {
+        "expression": {
+         "type": "string"
+        }
+       },
+       "required": [
+        "expression"
+       ]
+      }
+     }
+    }
+   ],
+   "options": {
+    "temperature": 0.4,
+    "num_ctx": 12288,
+    "num_predict": 2048,
+    "repeat_penalty": 1.1
+   },
+   "messages": [
+    {
+     "role": "system",
+     "content": "You are Arty. Use tools for arithmetic."
+    },
+    {
+     "role": "user",
+     "content": "what's 12 times 15?"
+    },
+    {
+     "role": "assistant",
+     "content": "",
+     "tool_calls": [
+      {
+       "function": {
+        "name": "calculate",
+        "arguments": {
+         "expression": "12*15"
+        }
+       }
+      }
+     ]
+    },
+    {
+     "role": "tool",
+     "content": "180",
+     "tool_name": "calculate"
+    }
+   ]
+  },
+  "reply": {
+   "model": "qwen3:14b",
+   "created_at": "2026-11-12T14:38:19.118970058Z",
+   "message": {
+    "role": "assistant",
+    "content": "The result of 12 times 15 is 180."
+   },
+   "done": true,
+   "done_reason": "stop",
+   "total_duration": 576575653,
+   "load_duration": 2604174,
+   "prompt_eval_count": 192,
+   "prompt_eval_cached_count": 150,
+   "prompt_eval_duration": 63700000,
+   "eval_count": 17,
+   "eval_duration": 503479000
+  }
+ },
+ "no_think_stream": {
+  "path": "/api/chat",
+  "request": {
+   "model": "qwen3:14b",
+   "stream": true,
+   "think": false,
+   "keep_alive": -1,
+   "options": {
+    "temperature": 0.4,
+    "num_ctx": 12288,
+    "num_predict": 2048
+   },
+   "messages": [
+    {
+     "role": "user",
+     "content": "a train leaves at 14:50 and the trip takes 2 hours 25 minutes. when does it arrive? one line"
+    }
+   ]
+  },
+  "stream": [
+   {
+    "model": "qwen3:14b",
+    "created_at": "2026-11-12T14:38:37.399730271Z",
+    "message": {
+     "role": "assistant",
+     "content": "The"
+    },
+    "done": false
+   },
+   {
+    "model": "qwen3:14b",
+    "created_at": "2026-11-12T14:38:37.431474679Z",
+    "message": {
+     "role": "assistant",
+     "content": " train"
+    },
+    "done": false
+   },
+   {
+    "model": "qwen3:14b",
+    "created_at": "2026-11-12T14:38:37.463869472Z",
+    "message": {
+     "role": "assistant",
+     "content": " arrives"
+    },
+    "done": false
+   },
+   {
+    "model": "qwen3:14b",
+    "created_at": "2026-11-12T14:38:37.490671349Z",
+    "message": {
+     "role": "assistant",
+     "content": " at"
+    },
+    "done": false
+   },
+   {
+    "model": "qwen3:14b",
+    "created_at": "2026-11-12T14:38:37.520018045Z",
+    "message": {
+     "role": "assistant",
+     "content": " **"
+    },
+    "done": false
+   },
+   {
+    "model": "qwen3:14b",
+    "created_at": "2026-11-12T14:38:37.550000625Z",
+    "message": {
+     "role": "assistant",
+     "content": "1"
+    },
+    "done": false
+   },
+   {
+    "model": "qwen3:14b",
+    "created_at": "2026-11-12T14:38:37.580879482Z",
+    "message": {
+     "role": "assistant",
+     "content": "7"
+    },
+    "done": false
+   },
+   {
+    "model": "qwen3:14b",
+    "created_at": "2026-11-12T14:38:37.610610304Z",
+    "message": {
+     "role": "assistant",
+     "content": ":"
+    },
+    "done": false
+   },
+   {
+    "model": "qwen3:14b",
+    "created_at": "2026-11-12T14:38:37.639993071Z",
+    "message": {
+     "role": "assistant",
+     "content": "1"
+    },
+    "done": false
+   },
+   {
+    "model": "qwen3:14b",
+    "created_at": "2026-11-12T14:38:37.670082246Z",
+    "message": {
+     "role": "assistant",
+     "content": "5"
+    },
+    "done": false
+   },
+   {
+    "model": "qwen3:14b",
+    "created_at": "2026-11-12T14:38:37.69928189Z",
+    "message": {
+     "role": "assistant",
+     "content": "**"
+    },
+    "done": false
+   },
+   {
+    "model": "qwen3:14b",
+    "created_at": "2026-11-12T14:38:37.728535765Z",
+    "message": {
+     "role": "assistant",
+     "content": "."
+    },
+    "done": false
+   },
+   {
+    "model": "qwen3:14b",
+    "created_at": "2026-11-12T14:38:37.757895304Z",
+    "message": {
+     "role": "assistant",
+     "content": ""
+    },
+    "done": true,
+    "done_reason": "stop",
+    "total_duration": 3317844129,
+    "load_duration": 659366,
+    "prompt_eval_count": 45,
+    "prompt_eval_cached_count": 33,
+    "prompt_eval_duration": 2936488000,
+    "eval_count": 13,
+    "eval_duration": 358037000
+   }
+  ]
+ },
+ "think_unset": {
+  "path": "/api/chat",
+  "request": {
+   "model": "qwen3:14b",
+   "stream": false,
+   "keep_alive": -1,
+   "options": {
+    "num_ctx": 12288,
+    "num_predict": 1024
+   },
+   "messages": [
+    {
+     "role": "user",
+     "content": "say hello in three words"
+    }
+   ]
+  },
+  "reply": {
+   "model": "qwen3:14b",
+   "created_at": "2026-11-12T14:39:01.995316684Z",
+   "message": {
+    "role": "assistant",
+    "content": "How are you?",
+    "thinking": "Okay, the user wants me to say hello in three words. Let me think about this. First, I need to make sure I understand the request correctly. They want a greeting that consists of exactly three words. Common greetings like \"Hello, how are you?\" are more than three words. Maybe something simpler.\n\n\"Hi there\" is two words. \"Good morning\" is two as well. Wait, \"Hello there\" is three words. That works. Alternatively, \"Howdy partner\" is three words, but maybe too informal. \"Hey there\" is two. \"Greetings everyone\" is three, but maybe too long. \"Hello, friend\" has a comma, so maybe not. \"Hello, how are you?\" is more than three. \"Hi, how are you?\" same issue.\n\nWait, \"Hello there\" is exactly three words. Let me check again: \"Hello\" (1), \"there\" (2). Wait, that's two words. Oh, right! I made a mistake. So \"Hello there\" is two words. Hmm. Maybe \"Hello, how are you?\" but that's three words with a comma. Maybe the user doesn't mind punctuation. But the user said \"three words,\" so maybe they want exactly three words without punctuation.\n\nLet me think again. \"Hi there\" is two. \"Good day\" is two. \"How are you?\" is three words. Yes! \"How are you?\" is three words. That's a common greeting. Alternatively, \"I'm fine\" is two. \"Hello, world\" is two. Wait, \"Hello, how are you?\" is three words if we count \"how are you\" as three, but with the comma. Maybe the user is okay with that. But maybe they want exactly three words without any punctuation. In that case, \"How are you\" is three words. But usually, it's \"How are you?\" with a question mark. But the user might not mind. Alternatively, \"Hello, how are you?\" is three words if we consider \"how are you\" as a phrase. But that's three words. Wait, \"how\" (1), \"are\" (2), \"you\" (3). Yes, that's three words. So \"Hello, how are you?\" is three words. But the user might prefer a more concise answer. Alternatively, \"Hi, how are you?\" same structure. But maybe the user wants a more traditional greeting. \"Good morning\" is two words. \"Good afternoon\" is two. \"Good evening\" is two. Hmm. Wait, \"Hello there\" is two words. \"Hello, there\" is two words with a comma. Maybe the user is okay with that. But the user asked for three words. So perhaps \"How are you?\" is the best option. Let me confirm: \"How\" (1), \"are\" (2), \"you\" (3). Yes, three words. That's a common way to greet someone. Alternatively, \"What's up?\" is two words. \"Howdy, partner\" is three words. But maybe too informal. \"Hi, how are you?\" is three words if we count \"how are you\" as three. But the user might be expecting a more direct answer. Maybe \"Hello, how are you?\" is the best fit. Alternatively, the user might want a different approach. Maybe \"Good to see you\" is three words. Yes, that's three. \"Good to see you\" \u2013 that works. So that's another option. The user didn't specify the tone, so maybe a more formal or informal greeting. Let me check both options. \"How are you?\" is concise and commonly used. \"Good to see you\" is more friendly. Either could work. I think \"How are you?\" is the most straightforward three-word greeting. Let me go with that.\n"
+   },
+   "done": true,
+   "done_reason": "stop",
+   "total_duration": 24236821405,
+   "load_duration": 866391,
+   "prompt_eval_count": 15,
+   "prompt_eval_cached_count": 3,
+   "prompt_eval_duration": 46628000,
+   "eval_count": 809,
+   "eval_duration": 24181091000
+  }
+ }
+}

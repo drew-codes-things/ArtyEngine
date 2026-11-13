@@ -1,0 +1,15 @@
+{
+  "listen": "127.0.0.1:11438",
+  "store": "/srv/ai/arty-engine/models",
+  "model_roots": ["/srv/ai/ollama"],
+  "llama_server": "/srv/ai/arty-engine/llama.cpp/current/llama-server",
+  "library_path": ["/srv/ai/arty-engine/cuda-12.8/lib"],
+  "state_dir": "/srv/ai/arty-engine/state",
+  "vram_budget_mb": 11500,
+  "default_ctx": 24576,
+  "kv_cache_type": "q8_0",
+  "default_keep_alive": "-1",
+  "trainer_url": "",
+  "speculative": {"qwen3:14b": {"spec_type": "ngram-mod"}, "mimo-v2.6:9b": {"spec_type": "ngram-mod"}},
+  "internal_models": ["hf.co/Qwen/Qwen3-0.6B-GGUF:Q8_0"]
+}
