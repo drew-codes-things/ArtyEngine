@@ -1,4 +1,5 @@
 import logging
+import math
 import os
 import re
 import socket
@@ -26,6 +27,7 @@ KV_BYTES_PER_ELEMENT = {"f32": 4.0, "f16": 2.0, "bf16": 2.0, "q8_0": 1.0625, "q5
 DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
 DURATION_UNITS = {"ms": 0.001, "s": 1, "m": 60, "h": 3600}
 FOREVER = None
+LONGEST_KEEP_ALIVE_SECONDS = 100 * 365 * 24 * 3600
 TOOL_TO_JSON = re.compile(r"\btool\s*\|\s*tojson(?:\(((?:[^()]|\([^()]*\))*)\))?")
 COMPACT_SEPARATORS = 'separators=(",", ":")'
 
@@ -40,20 +42,28 @@ def parse_keep_alive(value, default) -> float | None:
     if isinstance(value, bool):
         raise ValueError(f"keep_alive must be a duration, got {value!r}")
     if isinstance(value, (int, float)):
-        return FOREVER if value < 0 else float(value)
+        return seconds_or_forever(value)
     text = str(value).strip()
     try:
         number = float(text)
     except ValueError:
         number = None
     if number is not None:
-        return FOREVER if number < 0 else number
+        return seconds_or_forever(number)
     if text.startswith("-"):
         return FOREVER
     parts = DURATION_PART.findall(text)
     if not parts or "".join(amount + unit for amount, unit in parts) != text:
         raise ValueError(f"keep_alive {value!r} is not a duration like 10m, 30s or -1")
-    return sum(float(amount) * DURATION_UNITS[unit] for amount, unit in parts)
+    return seconds_or_forever(sum(float(amount) * DURATION_UNITS[unit] for amount, unit in parts))
+
+
+def seconds_or_forever(seconds) -> float | None:
+    if isinstance(seconds, float) and math.isnan(seconds):
+        raise ValueError("keep_alive can't be NaN")
+    if seconds < 0 or seconds > LONGEST_KEEP_ALIVE_SECONDS:
+        return FOREVER
+    return float(seconds)
 
 
 def _compact_tool_filter(match: re.Match) -> str:

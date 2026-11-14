@@ -28,7 +28,8 @@ BILLION = 1_000_000_000
 TEN_BILLION = 10 * BILLION
 PATH_STEPS = {".", ".."}
 DIGEST_PATTERN = re.compile(r"sha256:[0-9a-f]{64}")
-NAME_PATTERN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]*(:[A-Za-z0-9._-]+)?$")
+NAME_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/-]*(:[A-Za-z0-9._-]+)?")
+LONGEST_FILE_NAME = 255
 FILE_TYPE_NAMES = {
     0: "F32", 1: "F16", 2: "Q4_0", 3: "Q4_1", 7: "Q8_0", 8: "Q5_0", 9: "Q5_1", 10: "Q2_K", 11: "Q3_K_S", 12: "Q3_K_M",
     13: "Q3_K_L", 14: "Q4_K_S", 15: "Q4_K_M", 16: "Q5_K_S", 17: "Q5_K_M", 18: "Q6_K", 19: "IQ2_XXS", 20: "IQ2_XS",
@@ -64,12 +65,11 @@ class ModelName:
 
 
 def parse_name(name: str) -> ModelName:
-    name = (name or "").strip()
-    if not NAME_PATTERN.match(name):
+    if not isinstance(name, str) or not NAME_PATTERN.fullmatch(name):
         raise ModelNotFound(f"invalid model name {name!r}")
     base, _, tag = name.partition(":")
     parts = base.split("/")
-    if any(part in PATH_STEPS for part in (*parts, tag)):
+    if any(part in PATH_STEPS or len(part) > LONGEST_FILE_NAME for part in (*parts, tag)):
         raise ModelNotFound(f"invalid model name {name!r}")
     if len(parts) == 1:
         return ModelName(DEFAULT_HOST, DEFAULT_NAMESPACE, parts[0].lower(), tag or DEFAULT_TAG)

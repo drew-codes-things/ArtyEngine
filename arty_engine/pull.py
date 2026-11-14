@@ -7,6 +7,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from http import HTTPStatus
 from pathlib import Path
 
 from .store import DEFAULT_HOST, LEGACY_HOST, MODEL_LAYER, PROJECTOR_LAYER, ModelName, blob_path, is_digest, parse_name
@@ -22,10 +23,14 @@ REQUEST_TIMEOUT_SECONDS = 60
 SPLIT_FILE = re.compile(r"-\d{5}-of-\d{5}\.gguf$")
 USER_AGENT = "arty-engine/0.1"
 PROJECTOR_PREFERENCE = ("f16", "bf16", "q8_0", "")
+OLLAMA_SOURCE = "the Ollama registry"
+HF_SOURCE = "Hugging Face"
 
 
 class PullError(RuntimeError):
-    pass
+    def __init__(self, message: str, status: int = HTTPStatus.BAD_GATEWAY):
+        super().__init__(message)
+        self.status = int(status)
 
 
 class RateLimiter:
@@ -57,14 +62,53 @@ def _open(url: str, headers: dict | None = None):
     return urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS)
 
 
-def _get_json(url: str, headers: dict | None = None) -> dict:
+def _get_json(url: str, source: str, headers: dict | None = None):
     try:
         with _open(url, headers) as response:
             return json.loads(response.read())
     except urllib.error.HTTPError as error:
-        raise PullError(f"{url} answered {error.code}") from error
-    except (urllib.error.URLError, OSError, ValueError) as error:
-        raise PullError(f"couldn't read {url}: {error}") from error
+        if error.code == HTTPStatus.NOT_FOUND:
+            raise PullError(f"{source} has no such model: {url} answered 404", HTTPStatus.NOT_FOUND) from error
+        raise PullError(f"{source} answered {error.code} for {url}") from error
+    except (urllib.error.URLError, OSError) as error:
+        raise PullError(f"couldn't read {url} from {source}: {error}") from error
+    except ValueError as error:
+        raise PullError(f"{source} sent {url} as something other than JSON") from error
+
+
+def checked_digest(digest, source: str) -> str:
+    if not is_digest(digest):
+        raise PullError(f"{source} sent the blob digest {digest!r:.80}, which isn't sha256: and 64 hex digits; nothing was downloaded")
+    return digest
+
+
+def checked_size(size, source: str) -> int:
+    if isinstance(size, bool) or not isinstance(size, int) or size < 0:
+        raise PullError(f"{source} sent the blob size {size!r:.40}, which isn't a whole number of bytes")
+    return size
+
+
+def registry_blobs(manifest) -> list[tuple[str, int]]:
+    if not isinstance(manifest, dict):
+        raise PullError(f"{OLLAMA_SOURCE} sent a manifest that isn't a JSON object")
+    layers, config = manifest.get("layers", []), manifest.get("config", {})
+    if not isinstance(layers, list) or not isinstance(config, dict) or not all(isinstance(layer, dict) for layer in layers):
+        raise PullError(f"{OLLAMA_SOURCE} sent a manifest whose layers aren't a list of objects")
+    return [(checked_digest(layer["digest"], OLLAMA_SOURCE), checked_size(layer.get("size", 0), OLLAMA_SOURCE))
+            for layer in [*layers, config] if layer.get("digest")]
+
+
+def is_readable_sibling(entry) -> bool:
+    return isinstance(entry, dict) and isinstance(entry.get("rfilename", ""), str) and isinstance(entry.get("lfs") or {}, dict)
+
+
+def hf_siblings(info) -> list[dict]:
+    if not isinstance(info, dict):
+        raise PullError(f"{HF_SOURCE} sent a file list that isn't a JSON object")
+    siblings = info.get("siblings") or []
+    if not isinstance(siblings, list) or not all(is_readable_sibling(entry) for entry in siblings):
+        raise PullError(f"{HF_SOURCE} sent a file list the engine can't read")
+    return siblings
 
 
 def choose_hf_files(siblings: list[dict], quant: str) -> tuple[dict, dict | None]:
@@ -75,10 +119,10 @@ def choose_hf_files(siblings: list[dict], quant: str) -> tuple[dict, dict | None
     matches = [entry for entry in models if wanted in Path(entry["rfilename"]).name.lower()]
     if not matches:
         names = ", ".join(Path(entry["rfilename"]).name for entry in models) or "none"
-        raise PullError(f"no GGUF for {quant or 'Q4_K_M'} in that repo (it has: {names})")
+        raise PullError(f"no GGUF for {quant or 'Q4_K_M'} in that repo (it has: {names})", HTTPStatus.NOT_FOUND)
     single = [entry for entry in matches if not SPLIT_FILE.search(entry["rfilename"])]
     if not single:
-        raise PullError("that quant is split into several files, which the engine can't pull yet")
+        raise PullError("that quant is split into several files, which the engine can't pull yet", HTTPStatus.NOT_IMPLEMENTED)
     chosen = min(single, key=lambda entry: len(entry["rfilename"]))
     projector = None
     for preference in PROJECTOR_PREFERENCE:
@@ -100,15 +144,15 @@ class Puller:
         elif parsed.host in (DEFAULT_HOST, LEGACY_HOST):
             self._pull_ollama(parsed, progress)
         else:
-            raise PullError(f"don't know how to pull from {parsed.host}")
+            raise PullError(f"don't know how to pull from {parsed.host}", HTTPStatus.BAD_REQUEST)
         progress({"status": "success"})
 
     def _pull_hf(self, parsed: ModelName, progress) -> None:
         repo = f"{parsed.namespace}/{parsed.model}"
         quant = "" if parsed.tag == "latest" else parsed.tag
         progress({"status": "pulling manifest"})
-        info = _get_json(HF_API.format(repo=repo))
-        chosen, projector = choose_hf_files(info.get("siblings") or [], quant)
+        info = _get_json(HF_API.format(repo=repo), HF_SOURCE)
+        chosen, projector = choose_hf_files(hf_siblings(info), quant)
         layers = []
         for entry, media_type in ((chosen, MODEL_LAYER), (projector, PROJECTOR_LAYER)):
             if not entry:
@@ -116,10 +160,11 @@ class Puller:
             lfs = entry.get("lfs") or {}
             if not lfs.get("sha256"):
                 raise PullError(f"{entry['rfilename']} has no sha256 on Hugging Face, so it can't be verified")
-            digest = f"sha256:{lfs['sha256']}"
+            digest = checked_digest(f"sha256:{lfs['sha256']}", HF_SOURCE)
+            listed_size = checked_size(lfs.get("size") or 0, HF_SOURCE)
             url = HF_FILE.format(repo=repo, file=urllib.parse.quote(entry["rfilename"]))
-            self._download(url, digest, int(lfs.get("size") or entry.get("size") or 0), progress)
-            layers.append({"mediaType": media_type, "digest": digest, "size": int(lfs.get("size") or 0), "from": entry["rfilename"]})
+            self._download(url, digest, listed_size or checked_size(entry.get("size") or 0, HF_SOURCE), progress)
+            layers.append({"mediaType": media_type, "digest": digest, "size": listed_size, "from": entry["rfilename"]})
         manifest = {"schemaVersion": 2, "mediaType": MANIFEST_ACCEPT, "config": {"mediaType": "application/vnd.docker.container.image.v1+json",
                     "digest": "", "size": 0}, "layers": layers, "runner": "llamacpp", "format": "gguf"}
         self._write_manifest(parsed, manifest, progress)
@@ -127,13 +172,10 @@ class Puller:
     def _pull_ollama(self, parsed: ModelName, progress) -> None:
         progress({"status": "pulling manifest"})
         url = OLLAMA_REGISTRY.format(namespace=parsed.namespace, model=parsed.model, kind="manifests", reference=parsed.tag)
-        manifest = _get_json(url, {"Accept": MANIFEST_ACCEPT})
-        for layer in manifest.get("layers", []) + [manifest.get("config", {})]:
-            digest = layer.get("digest")
-            if not digest:
-                continue
+        manifest = _get_json(url, OLLAMA_SOURCE, {"Accept": MANIFEST_ACCEPT})
+        for digest, size in registry_blobs(manifest):
             blob_url = OLLAMA_REGISTRY.format(namespace=parsed.namespace, model=parsed.model, kind="blobs", reference=digest)
-            self._download(blob_url, digest, int(layer.get("size", 0)), progress)
+            self._download(blob_url, digest, size, progress)
         self._write_manifest(parsed, manifest, progress)
 
     def _download(self, url: str, digest: str, size: int, progress) -> None:

@@ -110,6 +110,103 @@ def test_bad_keep_alive_is_a_400(engine):
     assert status == 400 and "keep_alive" in body["error"]
 
 
+def chat_answer(engine, **fields):
+    body = {"model": "qwen3:14b", "stream": False, "messages": [{"role": "user", "content": "x"}], **fields}
+    return error_of(lambda: http_json(f"{engine.url}/api/chat", body))
+
+
+@pytest.mark.parametrize("messages", [1, 1.5, True, "hi"])
+def test_messages_that_are_not_a_list_are_a_400(engine, messages):
+    status, body = chat_answer(engine, messages=messages)
+    assert status == 400 and "messages" in body["error"]
+
+
+@pytest.mark.parametrize("calls", ["x", [1], [{"function": "x"}], [{"function": {"name": 5}}]])
+def test_tool_calls_of_the_wrong_shape_are_a_400(engine, calls):
+    status, body = chat_answer(engine, messages=[{"role": "assistant", "content": "", "tool_calls": calls}])
+    assert status == 400 and "tool_calls" in body["error"]
+
+
+@pytest.mark.parametrize("option", ["num_predict", "num_ctx"])
+@pytest.mark.parametrize("value", ["abc", "", [], {}, [1], float("nan"), float("inf"), 1.5])
+def test_count_options_that_are_not_whole_numbers_are_a_400(engine, option, value):
+    status, body = chat_answer(engine, options={option: value})
+    assert status == 400 and option in body["error"]
+
+
+@pytest.mark.parametrize("value", [-1, -(2 ** 70), 2 ** 70])
+def test_a_num_ctx_out_of_range_is_a_400(engine, value):
+    status, body = chat_answer(engine, options={"num_ctx": value})
+    assert status == 400 and "num_ctx" in body["error"]
+
+
+@pytest.mark.parametrize("body", [b"[" * 200_000, b'{"a":' * 200_000])
+def test_json_nested_too_deep_is_a_400(engine, body):
+    import urllib.request
+    request = urllib.request.Request(f"{engine.url}/api/chat", data=body, method="POST")
+    status, answer = error_of(lambda: urllib.request.urlopen(request))
+    assert status == 400 and "nested too deeply" in answer["error"]
+
+
+@pytest.mark.parametrize("images", [5, "abc", {"a": 1}])
+def test_images_that_are_not_a_list_are_a_400(engine, images):
+    message = {"role": "user", "content": "x", "images": images}
+    status, body = chat_answer(engine, model="mimo:9b", messages=[message])
+    assert status == 400 and "images" in body["error"]
+    status, body = error_of(lambda: http_json(f"{engine.url}/api/generate", {"model": "mimo:9b", "stream": False, "prompt": "x", "images": images}))
+    assert status == 400 and "images" in body["error"]
+    assert engine.upstream_requests() == []
+
+
+@pytest.mark.parametrize("option, value", [
+    ("temperature", "hot"), ("temperature", float("nan")), ("top_p", [0.9]), ("top_k", {}), ("seed", "x"), ("seed", 1.5),
+    ("repeat_penalty", True), ("stop", 5), ("stop", ["a", 1]), ("num_predict", 2 ** 40), ("min_p", float("inf")),
+])
+def test_sampling_options_of_the_wrong_type_are_a_400(engine, option, value):
+    status, body = chat_answer(engine, options={option: value})
+    assert status == 400 and option in body["error"]
+
+
+def test_sampling_options_of_the_right_type_reach_the_runner(engine):
+    options = {"temperature": 0, "top_p": 0.9, "top_k": 20, "seed": 7, "stop": "END", "num_predict": 12, "repeat_penalty": 1.1}
+    http_json(f"{engine.url}/api/chat", {"model": "qwen3:14b", "stream": False, "messages": [{"role": "user", "content": "x"}], "options": options})
+    sent = engine.upstream_requests()[-1]["body"]
+    assert (sent["temperature"], sent["top_p"], sent["top_k"], sent["seed"], sent["stop"], sent["max_tokens"]) == (0, 0.9, 20, 7, ["END"], 12)
+
+
+@pytest.mark.parametrize("value", ["abc", [], -1, 1.5, float("nan")])
+def test_embed_dimensions_that_are_not_a_positive_whole_number_are_a_400(engine, value):
+    status, body = error_of(lambda: http_json(f"{engine.url}/api/embed", {"model": "nomic-embed-text", "input": "x", "dimensions": value}))
+    assert status == 400 and "dimensions" in body["error"]
+
+
+def test_a_nan_keep_alive_is_a_400(engine):
+    status, body = chat_answer(engine, keep_alive=float("nan"))
+    assert status == 400 and "keep_alive" in body["error"]
+
+
+@pytest.mark.parametrize("value", [2 ** 70, 1e308, float("inf"), "1e308"])
+def test_a_keep_alive_too_long_to_date_keeps_the_model_loaded(engine, value):
+    http_json(f"{engine.url}/api/chat", {"model": "qwen3:14b", "keep_alive": value})
+    loaded = http_json(f"{engine.url}/api/ps")["models"]
+    assert [model["name"] for model in loaded] == ["qwen3:14b"]
+
+
+def test_a_model_name_too_long_for_a_file_name_is_a_client_error(engine):
+    import urllib.request
+    name = "x" * 100_000
+    status, body = error_of(lambda: http_json(f"{engine.url}/api/show", {"model": name}))
+    assert status == 404 and "not found" in body["error"]
+    request = urllib.request.Request(f"{engine.url}/api/delete", data=json.dumps({"model": name}).encode(), method="DELETE")
+    status, body = error_of(lambda: urllib.request.urlopen(request))
+    assert status == 400 and "invalid model name" in body["error"]
+
+
+def test_a_model_name_with_a_trailing_newline_is_not_found(engine):
+    status, body = error_of(lambda: http_json(f"{engine.url}/api/show", {"model": "qwen3:14b\n"}))
+    assert status == 404
+
+
 def test_upstream_errors_come_back_as_ollama_errors(tmp_path):
     running = RunningEngine(tmp_path, {"/v1/chat/completions": lambda body: {"error": "the request exceeds the context size", "status": 400}})
     try:

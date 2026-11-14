@@ -261,6 +261,8 @@ def make_handler(engine: Engine):
                 return {}
             try:
                 body = json.loads(raw)
+            except RecursionError as error:
+                raise ApiError(400, "invalid JSON: nested too deeply") from error
             except ValueError as error:
                 raise ApiError(400, f"invalid JSON: {error}") from error
             if not isinstance(body, dict):
@@ -525,9 +527,9 @@ def make_handler(engine: Engine):
             request = self._body()
             inputs = translate.embed_inputs(request)
             vectors, usage, seconds, model, load_seconds = self._embed_vectors(request, inputs)
-            dimensions = request.get("dimensions")
+            dimensions = translate.embed_dimensions(request)
             if dimensions:
-                vectors = [vector[:int(dimensions)] for vector in vectors]
+                vectors = [vector[:dimensions] for vector in vectors]
             self._send_json(200, {"model": model.name, "embeddings": vectors, "total_duration": int(seconds * 1e9),
                                   "load_duration": int(load_seconds * 1e9), "prompt_eval_count": int(usage.get("prompt_tokens", 0))})
 
@@ -556,7 +558,7 @@ def make_handler(engine: Engine):
                     engine.puller.pull(name, lambda update: None)
                     self._send_json(200, {"status": "success"})
             except PullError as error:
-                raise ApiError(500, str(error)) from error
+                raise ApiError(error.status, str(error)) from error
             except ModelNotFound as error:
                 raise ApiError(400, str(error)) from error
             finally:

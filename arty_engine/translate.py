@@ -1,4 +1,5 @@
 import json
+import math
 import time
 from datetime import datetime, timezone
 
@@ -14,6 +15,9 @@ NO_LIMIT = -1
 THINK_LEVELS = {"low", "medium", "high"}
 FINISH_REASONS = {"stop": "stop", "length": "length", "tool_calls": "stop", "content_filter": "stop"}
 NANOSECONDS_PER_MS = 1_000_000
+LARGEST_TOKEN_COUNT = 2 ** 31 - 1
+INT64_LIMITS = (-(2 ** 63), 2 ** 63 - 1)
+WHOLE_NUMBER_FIELDS = {"top_k", "seed", "repeat_last_n", "mirostat"}
 
 
 class RequestError(ValueError):
@@ -24,24 +28,77 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
 
 
+def whole_number(value, label: str) -> int:
+    if isinstance(value, float) and value.is_integer():
+        return int(value)
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            pass
+    raise RequestError(f"{label} must be a whole number")
+
+
+def bounded_whole_number(value, label: str, lowest: int, highest: int) -> int:
+    number = whole_number(value, label)
+    if not lowest <= number <= highest:
+        raise RequestError(f"{label} must be between {lowest} and {highest}")
+    return number
+
+
+def context_size(value) -> int:
+    return bounded_whole_number(value, "num_ctx", 0, LARGEST_TOKEN_COUNT)
+
+
+def finite_number(value, label: str):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise RequestError(f"{label} must be a number")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        finite = False
+    if not finite:
+        raise RequestError(f"{label} must be a finite number")
+    return value
+
+
+def stop_list(value) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list) and all(isinstance(item, str) for item in value):
+        return value
+    raise RequestError("stop must be a string or a list of strings")
+
+
+def sampling_value(name: str, value):
+    if name == "stop":
+        return stop_list(value)
+    if name in WHOLE_NUMBER_FIELDS:
+        return bounded_whole_number(value, name, *INT64_LIMITS)
+    return finite_number(value, name)
+
+
 def merged_options(model_params: dict, request_options: dict | None) -> dict:
     if request_options is not None and not isinstance(request_options, dict):
         raise RequestError("options must be an object")
-    return {**model_params, **(request_options or {})}
+    merged = {**model_params, **(request_options or {})}
+    if merged.get("num_ctx") is not None:
+        merged["num_ctx"] = context_size(merged["num_ctx"])
+    return merged
 
 
 def sampling_fields(options: dict) -> dict:
     body = {}
     for ollama_name, server_name in OPTION_FIELDS.items():
         if ollama_name in options and options[ollama_name] is not None:
-            body[server_name] = options[ollama_name]
-    if isinstance(body.get("stop"), str):
-        body["stop"] = [body["stop"]]
+            body[server_name] = sampling_value(ollama_name, options[ollama_name])
     predict = options.get("num_predict")
-    if predict is not None and int(predict) not in (NO_LIMIT, FILL_CONTEXT):
-        if int(predict) < 0:
-            raise RequestError("num_predict must be -1, -2 or a positive number")
-        body["max_tokens"] = int(predict)
+    if predict is not None:
+        predict = bounded_whole_number(predict, "num_predict", FILL_CONTEXT, LARGEST_TOKEN_COUNT)
+    if predict is not None and predict not in (NO_LIMIT, FILL_CONTEXT):
+        body["max_tokens"] = predict
     return body
 
 
@@ -88,6 +145,8 @@ def convert_messages(messages, default_system: str = "") -> list[dict]:
             raise RequestError(f"message {index} content must be a string")
         item: dict = {"role": role}
         images = message.get("images") or []
+        if not isinstance(images, list):
+            raise RequestError(f"message {index} images must be a list of base64 strings")
         if images and role == "user":
             item["content"] = ([{"type": "text", "text": content}] if content else []) + [_image_part(image) for image in images]
         else:
@@ -96,7 +155,7 @@ def convert_messages(messages, default_system: str = "") -> list[dict]:
             if message.get("thinking"):
                 item["reasoning_content"] = message["thinking"]
             calls = []
-            for call in message.get("tool_calls") or []:
+            for call in checked_tool_calls(message.get("tool_calls"), index):
                 function = call.get("function") or {}
                 call_id = call.get("id") or f"call_{call_number}"
                 call_number += 1
@@ -113,6 +172,21 @@ def convert_messages(messages, default_system: str = "") -> list[dict]:
     if default_system and not any(item["role"] == "system" for item in converted):
         converted.insert(0, {"role": "system", "content": default_system})
     return converted
+
+
+def is_tool_call(call) -> bool:
+    if not isinstance(call, dict):
+        return False
+    function = call.get("function") or {}
+    return isinstance(function, dict) and isinstance(function.get("name", ""), str)
+
+
+def checked_tool_calls(calls, index: int) -> list:
+    if not calls:
+        return []
+    if not isinstance(calls, list) or not all(is_tool_call(call) for call in calls):
+        raise RequestError(f"message {index} tool_calls must be a list of objects, each with a function object and a string name")
+    return calls
 
 
 def _match_call(pending: list[tuple[str, str]], name: str | None) -> str:
@@ -154,6 +228,8 @@ def chat_body(request: dict, model, stream: bool) -> dict:
     if tools and "tools" not in capabilities:
         raise RequestError(f"{model.name} does not support tools")
     messages = request.get("messages") or []
+    if not isinstance(messages, list):
+        raise RequestError("messages must be a list")
     if any(message.get("images") for message in messages if isinstance(message, dict)) and "vision" not in capabilities:
         raise RequestError(f"{model.name} does not support images")
     if request.get("think") and "thinking" not in capabilities:
@@ -324,6 +400,16 @@ def raw_stream_chunks(model_name: str, event: dict, load_seconds: float, started
     if event.get("stop"):
         chunks.append(raw_reply(model_name, {**event, "content": ""}, load_seconds, started))
     return chunks
+
+
+def embed_dimensions(request: dict) -> int | None:
+    value = request.get("dimensions")
+    if value is None or value == 0:
+        return None
+    size = whole_number(value, "dimensions")
+    if size < 1:
+        raise RequestError("dimensions must be a positive whole number")
+    return size
 
 
 def embed_inputs(request: dict) -> list[str]:

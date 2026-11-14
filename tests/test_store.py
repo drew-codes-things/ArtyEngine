@@ -87,6 +87,27 @@ def test_names_that_walk_out_of_the_manifest_tree_are_refused(name):
         parse_name(name)
 
 
+@pytest.mark.parametrize("name", ["qwen3:14b\n", "qwen3:14b\r\n", "qwen3:14b ", " qwen3:14b", "\tqwen3:14b", "qwen3 :14b", "qwen3:14\nb",
+                                  "qwen3:14b\x00", "qwen3\x7f:14b", "qwen3:14b\u2028", "q\u00e9n3:14b"])
+def test_names_with_whitespace_or_control_characters_are_refused(name):
+    with pytest.raises(ModelNotFound, match="invalid model name"):
+        parse_name(name)
+
+
+def test_names_too_long_for_a_file_name_are_refused():
+    assert parse_name("a" * 255).model == "a" * 255
+    with pytest.raises(ModelNotFound, match="invalid model name"):
+        parse_name("a" * 256)
+    with pytest.raises(ModelNotFound, match="invalid model name"):
+        parse_name("qwen3:" + "b" * 256)
+
+
+@pytest.mark.parametrize("name", [None, 5, ["qwen3:14b"], {"model": "qwen3:14b"}])
+def test_names_that_are_not_text_are_refused(name):
+    with pytest.raises(ModelNotFound, match="invalid model name"):
+        parse_name(name)
+
+
 @pytest.mark.parametrize("digest", ["../../victim.txt", "sha256:../../victim", "", "sha256:" + "a" * 63, "sha256:" + "a" * 64 + "/x"])
 def test_blob_paths_need_a_sha256_digest(tmp_path, digest):
     with pytest.raises(ModelNotFound, match="digest"):
