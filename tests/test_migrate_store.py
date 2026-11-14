@@ -70,9 +70,11 @@ def test_the_newer_manifest_wins_when_a_name_is_in_both_old_folders(old_store, t
 def test_undo_restores_the_old_layout_byte_for_byte(old_store, tmp_path):
     before = migrate_store.describe_tree(old_store, migrate_store.OLD_FOLDERS)
     blobs_before = blob_listing(old_store)
+    store_time_before = old_store.lstat().st_mtime_ns
     migrate_store.migrate(old_store, tmp_path / "backup")
     migrate_store.undo(old_store, tmp_path / "backup")
     assert migrate_store.describe_tree(old_store, migrate_store.OLD_FOLDERS) == before
+    assert old_store.lstat().st_mtime_ns == store_time_before
     assert blob_listing(old_store) == blobs_before
     assert not (old_store / "catalog").exists()
     assert (tmp_path / "backup" / "copy" / "manifests-v2").is_dir()

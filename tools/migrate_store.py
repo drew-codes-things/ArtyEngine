@@ -168,6 +168,7 @@ def migrate(root: Path, backup: Path) -> list[str]:
     root, backup = root.resolve(), backup.absolute()
     check_backup_folder(root, backup)
     planned = plan_migration(root)
+    store_time = root.lstat().st_mtime_ns
     backup.mkdir(exist_ok=True)
     layout = describe_tree(root, OLD_FOLDERS)
     (backup / LAYOUT_BEFORE).write_text(json.dumps(layout, indent=1))
@@ -175,7 +176,7 @@ def migrate(root: Path, backup: Path) -> list[str]:
     record = {"store": str(root), "catalog_before": sorted(catalog_files(root)),
               "written": {name.manifest_path(root).relative_to(root).as_posix(): manifest_digest(manifest)
                           for name, _, manifest in planned},
-              "moved": [folder for folder in OLD_FOLDERS if (root / folder).exists()]}
+              "moved": [folder for folder in OLD_FOLDERS if (root / folder).exists()], "store_mtime_ns": store_time}
     (backup / MIGRATION_RECORD).write_text(json.dumps(record, indent=1))
     for name, old_path, manifest in planned:
         path = write_manifest(root, name, manifest)
@@ -236,6 +237,8 @@ def undo(root: Path, backup: Path) -> list[str]:
         if path.is_file():
             path.unlink()
             prune_empty(path.parent, root / CATALOG_FOLDER)
+    if "store_mtime_ns" in record:
+        os.utime(root, ns=(record["store_mtime_ns"], record["store_mtime_ns"]))
     after = describe_tree(root, OLD_FOLDERS)
     differences = sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
     if differences:
