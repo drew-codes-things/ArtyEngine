@@ -1,7 +1,24 @@
 {
-  "qwen3:14b": "hf.co/Qwen/Qwen3-14B-GGUF:Q4_K_M",
-  "mimo-v2.6:9b": "hf.co/bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF:Q4_K_M",
-  "nomic-embed-text:latest": "hf.co/nomic-ai/nomic-embed-text-v1.5-GGUF:F16",
-  "qwen2.5vl:7b": "hf.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF:Q4_K_M",
-  "qwen2.5:7b": "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"
+  "qwen3:14b": {
+    "source": "hf.co/Qwen/Qwen3-14B-GGUF:Q4_K_M",
+    "model_sha256": "500a8806e85ee9c83f3ae08420295592451379b4f8cf2d0f41c15dffeb6b81f0"
+  },
+  "mimo-v2.6:9b": {
+    "source": "hf.co/bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF:Q4_K_M",
+    "model_sha256": "4bca6f18c73f72270c7a20c2ea2bea581de8246e318714277120369d34048c81",
+    "projector_sha256": "ff348f3180a63188aa7285db85f550fe38acb61dd013c599eb8bad08d2cc2576"
+  },
+  "nomic-embed-text:latest": {
+    "source": "hf.co/nomic-ai/nomic-embed-text-v1.5-GGUF:F16",
+    "model_sha256": "f7af6f66802f4df86eda10fe9bbcfc75c39562bed48ef6ace719a251cf1c2fdb"
+  },
+  "qwen2.5vl:7b": {
+    "source": "hf.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF:Q4_K_M",
+    "model_sha256": "d16776dcd9a28d42758c2958ed3a752aabf20a305252cd64ff2be72b4a78c503",
+    "projector_sha256": "987dd0733033fb5dd9b124d1ca926ae865572e432384eee7618b2eec3e735e17"
+  },
+  "qwen2.5:7b": {
+    "source": "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M",
+    "model_sha256": "65b8fcd92af6b4fefa935c625d1ac27ea29dcb6ee14589c55a8f115ceaaa1423"
+  }
 }

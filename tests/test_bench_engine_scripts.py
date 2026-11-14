@@ -69,8 +69,9 @@ def run(script: Path, arguments: list[str], environment: dict) -> subprocess.Com
                           timeout=SCRIPT_TIMEOUT_SECONDS)
 
 
-def test_the_bench_engine_never_shares_the_live_engine_port():
-    assert json.loads(BENCH_CONFIG.read_text())["listen"] != json.loads(LIVE_CONFIG.read_text())["listen"]
+def test_the_bench_engine_never_shares_the_live_engine_port_or_state():
+    bench, live = json.loads(BENCH_CONFIG.read_text()), json.loads(LIVE_CONFIG.read_text())
+    assert bench["listen"] != live["listen"] and bench["state_dir"] != live["state_dir"]
 
 
 def test_restart_refuses_a_port_another_engine_already_answers_on(bench_world):
@@ -89,7 +90,7 @@ def test_restart_fails_when_the_bench_unit_is_not_running(bench_world):
     folder, environment = bench_world
     (folder / "unit-state").write_text("3")
     result = run(RESTART_SCRIPT, [str(config_on(folder, free_port()))], environment)
-    assert result.returncode != 0 and "arty-engine-test" in result.stderr
+    assert result.returncode != 0 and "arty-engine-test is not running" in result.stderr
 
 
 def test_restart_names_the_bench_url_once_its_own_unit_answers(bench_world):
@@ -129,3 +130,39 @@ def test_a_slice_benches_the_url_the_bench_engine_answers_on(bench_world):
     result = run(SLICE_ENGINE_SCRIPT, ["speed", str(config_on(folder, 12345)), "label"], environment)
     assert result.returncode == 0, result.stderr
     assert "bench/bench.py http://127.0.0.1:12345 label" in (folder / "calls").read_text()
+
+
+def live_engine_holding(models: list[str]):
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_GET(self):
+            data = json.dumps({"models": [{"name": name} for name in models]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.parametrize("held, busy", [([], False), (["qwen3:14b"], True)])
+def test_a_slice_records_whether_the_live_engine_held_a_model_during_the_bench(bench_world, held, busy):
+    folder, environment = bench_world
+    write_fake(folder, "engine-restart.sh", 'echo "http://127.0.0.1:12345"')
+    (folder / "bench-args.sh").write_text("BENCH_ARGS=\n")
+    write_fake(folder / "bin", "timeout", 'while [ "$1" != --output ]; do shift; done; echo \'{"label": "x"}\' > "$2"')
+    live = live_engine_holding(held)
+    try:
+        environment = {**environment, "LIVE_ENGINE_URL": f"http://127.0.0.1:{live.server_address[1]}"}
+        result = run(SLICE_ENGINE_SCRIPT, ["speed", str(config_on(folder, 12345)), "label"], environment)
+    finally:
+        live.shutdown()
+    assert result.returncode == 0, result.stderr
+    recorded = json.loads((folder / "runs" / "bench-label.json").read_text())
+    assert recorded["label"] == "x" and recorded["live_engine"]["busy"] is busy
+    assert recorded["live_engine"]["before"] == held and recorded["live_engine"]["after"] == held

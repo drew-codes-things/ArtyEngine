@@ -1,6 +1,7 @@
 import hashlib
 import json
 import logging
+import os
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -15,6 +16,8 @@ DEFAULT_NAMESPACE = "library"
 DEFAULT_TAG = "latest"
 CATALOG_FOLDER = "catalog"
 MANIFEST_SUFFIX = ".json"
+PARTIAL_SUFFIX = ".partial"
+OLDER_LAYOUT_FOLDERS = ("manifests-v2", "manifests")
 SCHEMA_VERSION = 1
 MEDIA_PREFIX = "application/vnd.arty-engine."
 MANIFEST_MEDIA_TYPE = f"{MEDIA_PREFIX}manifest.v1+json"
@@ -253,9 +256,10 @@ class ModelStore:
     def _layer_json(cls, root: Path, layer: dict | None) -> dict:
         text = cls._layer_text(root, layer)
         try:
-            return json.loads(text) if text else {}
-        except ValueError:
+            value = json.loads(text) if text else {}
+        except (ValueError, RecursionError):
             return {}
+        return value if isinstance(value, dict) else {}
 
     @classmethod
     def _config_json(cls, root: Path, config: dict | None) -> dict:
@@ -356,6 +360,11 @@ def _is_entry(entry) -> bool:
             and isinstance(entry.get("size", 0), int) and not isinstance(entry.get("size", 0), bool))
 
 
+def roots_in_older_layout(roots: list[Path]) -> list[Path]:
+    return [root for root in roots
+            if not (root / CATALOG_FOLDER).is_dir() and any((root / folder).is_dir() for folder in OLDER_LAYOUT_FOLDERS)]
+
+
 def _manifest_files(root: Path) -> list[Path]:
     catalog = root / CATALOG_FOLDER
     if not catalog.is_dir():
@@ -378,7 +387,19 @@ def engine_manifest(layers: list[dict], config: dict | None = None) -> dict:
 def write_manifest(root: Path, name: ModelName, manifest: dict) -> Path:
     path = name.manifest_path(root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(path.name + ".partial")
-    temporary.write_text(json.dumps(manifest))
+    temporary = path.with_name(path.name + PARTIAL_SUFFIX)
+    with open(temporary, "w") as handle:
+        handle.write(json.dumps(manifest))
+        handle.flush()
+        os.fsync(handle.fileno())
     temporary.replace(path)
+    sync_folder(path.parent)
     return path
+
+
+def sync_folder(folder: Path) -> None:
+    descriptor = os.open(folder, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)

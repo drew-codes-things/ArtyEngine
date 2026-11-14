@@ -278,3 +278,33 @@ def test_a_damaged_manifest_never_breaks_the_model_list_or_delete(tmp_path):
         assert not path.exists()
     finally:
         running.close()
+
+
+@pytest.mark.parametrize("text", ["", "{", "\u0000\u0001binary", "[" * 200000])
+def test_a_manifest_that_is_not_json_is_a_clear_error_never_an_engine_error(tmp_path, text):
+    from fake_store import QWEN3, add_model
+    path = add_model(tmp_path / "own", "broken", "1", QWEN3, {"blk.0.w": (4, 4)})
+    path.write_text(text)
+    running = RunningEngine(tmp_path, REPLIES)
+    try:
+        for call in (lambda: http_json(f"{running.url}/api/show", {"model": "broken:1"}),
+                     lambda: http_json(f"{running.url}/api/chat", {"model": "broken:1", "stream": False, "messages": []})):
+            status, body = error_of(call)
+            assert status == 500 and body["error"].startswith("couldn't read broken:1")
+    finally:
+        running.close()
+
+
+@pytest.mark.parametrize("params", ["[1, 2]", "5", "\"text\""])
+def test_params_that_are_not_an_object_are_ignored(tmp_path, params):
+    from fake_store import QWEN3, add_model
+    add_model(tmp_path / "own", "odd", "1", QWEN3, {"blk.0.w": (4, 4)}, params={})
+    store_path = tmp_path / "own"
+    running = RunningEngine(tmp_path, REPLIES)
+    try:
+        model = running.engine.store.get("odd:1")
+        params_layer = next(layer for layer in model.manifest["layers"] if layer["mediaType"].endswith("params"))
+        (store_path / "blobs" / params_layer["digest"].replace(":", "-")).write_text(params)
+        assert http_json(f"{running.url}/api/show", {"model": "odd:1"})["parameters"] == ""
+    finally:
+        running.close()

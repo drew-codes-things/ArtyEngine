@@ -199,3 +199,17 @@ def test_deleting_works_while_another_manifest_is_damaged(tmp_path):
     path.write_text(json.dumps({"layers": [5, {"mediaType": ["x"], "digest": 5}], "config": 5}))
     removed = ModelStore([root]).remove_owned("untemplated:latest")
     assert removed and "untemplated:latest" not in ModelStore([root]).names()
+
+
+@pytest.mark.parametrize("text", ["", "{", "[" * 200000])
+def test_a_manifest_that_is_not_json_is_skipped_deleted_and_never_blocks_another_delete(tmp_path, text, caplog):
+    root = build_store(tmp_path / "own")
+    path = add_model(root, "broken", "1", QWEN3, {"blk.0.w": (4, 4)})
+    path.write_text(text)
+    store = ModelStore([root])
+    assert "broken:1" not in {model.name for model in store.models()}
+    assert store.remove_owned("untemplated:latest")
+    assert "couldn't read" in caplog.text
+    store.remove_owned("broken:1")
+    assert not path.exists() and "broken:1" not in ModelStore([root]).names()
+    assert store.get("qwen3:14b").name == "qwen3:14b"

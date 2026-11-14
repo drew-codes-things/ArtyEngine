@@ -117,12 +117,33 @@ python3 tools/migrate_store.py migrate --store /srv/ai/arty-engine/models --back
 python3 tools/migrate_store.py undo --store /srv/ai/arty-engine/models --backup /srv/ai/arty-engine/store-layout-backup
 ```
 
-`plan` lists every model name and where its manifest will go and changes nothing. `migrate` writes one catalog
-manifest per name (with the old manifest's time, so `/api/tags` keeps its order), keeps a copy of the old folders in
-the backup folder and then moves the old folders there. Blobs are never touched, copied or renamed, and model names
-stay the same. The backup folder must be empty and on the store's file system. `undo` moves the old folders back,
-removes the catalog manifests the migration wrote and checks the old layout byte for byte against the record taken
-before the migration; it refuses when a migrated manifest changed or a model was pulled since.
+`plan` lists every model name, where its manifest will go and which old copies stay behind, and changes nothing.
+`migrate` writes one catalog manifest per name (with the old manifest's time, so `/api/tags` keeps its order), keeps
+a copy of the old folders in the backup folder, then moves the old folders and the old manifest documents in `blobs/`
+there. Model files are never touched, copied or renamed. Short names stay short, and a name with a namespace keeps
+it (`someone/model:tag`); a model from another registry keeps that registry's host in its name. When an old folder
+holds several registries, `--default-host` names the one its short names came from; two old names that would become
+one are refused. A model whose old manifest can't be converted stops the run until it is left out with `--skip
+<name>`. The backup folder must be empty and reachable by a rename (the same mount). Every command that changes the
+store refuses while an engine answers on `--engine-url` (`http://127.0.0.1:11438` unless given, `none` to skip).
+
+`undo` first checks that the backup can bring the old layout back (from `moved/`, or from `copy/` when `moved/` is
+gone) and changes nothing when it can't; then it moves everything back, removes the catalog manifests the migration
+wrote and checks the old layout byte for byte against the record taken before the migration. It refuses when a
+migrated manifest changed or a model was pulled since, and names any model whose blobs were deleted in between.
+`tidy` moves the old manifest documents of a store migrated by an earlier version of this tool into its backup;
+`untidy` puts them back. At startup the engine names every root that is still in the older layout.
+
+### Upgrading an install from before 14 Nov 2026
+
+- `engine.json` names the runtime binary as `runner_binary` now, by default `/srv/ai/arty-engine/runtime/server`
+  (make that a link to the runtime binary). A config that still names it under the older key stops the engine with
+  "unknown settings"; rewrite it with `tools/write_config.py` (`arty-backend.sh engine-config` on a Proxmox
+  install) or rename the key by hand.
+- Arty's parts read the engine's address from `ARTY_ENGINE_URL`, and the trainer controller from its
+  `arty_engine_url` setting.
+- Bench configs need a `listen` of their own (the shipped `engine-test.json` uses 11439).
+- Convert the store as above.
 
 ---
 
@@ -152,6 +173,7 @@ before the migration; it refuses when a migrated manifest changed or a model was
 | `load_timeout_seconds` | `600` | How long a model may take to load |
 | `trainer_url` | empty | A controller that gets `/busy` and `/done` around GPU requests; empty for none |
 | `pull_rate_bytes` | `4000000` | Download cap for pulls in bytes per second; `0` for no cap |
+| `pull_keep_free_mb` | `2048` | A pull is refused (507) before it downloads anything when it would leave less than this free on the store's disk |
 | `speculative` | `{}` | Per model: `{"draft": "<model>", "draft_max": 16, "draft_min": 0, "draft_p_min": 0.75}` or `{"spec_type": "ngram-mod", "ngram_min": 0, "ngram_max": 0}` |
 | `internal_models` | `[]` | Models kept out of `/api/tags` (such as a draft model); they still answer by name |
 | `extra_args` | `{}` | Per model: extra runtime arguments, as a list |
@@ -180,7 +202,7 @@ that is missing, private or gated, and the engine passes that on as 404; a refus
 | `POST /api/chat` | Streamed and not; tools; `think` true, false, unset or a level; `format` `"json"` or a JSON schema; images on vision models; `keep_alive`; sampling options; `num_ctx`; `num_gpu: 0` runs on the CPU; `_debug_render_only` renders the prompt only |
 | `POST /api/generate` | Prompts, streamed and not; an empty prompt loads a model, and with `keep_alive: 0` unloads it; `raw` prompts |
 | `POST /api/embed`, `POST /api/embeddings` | Embeddings |
-| `POST /api/pull` | Hugging Face names (`hf.co/<owner>/<repo>:<quant>`) and the short names in `arty_engine/short_names.json`, with progress; one pull at a time. A short name already in the store is not downloaded again. Any other name answers 400 with the form to use |
+| `POST /api/pull` | Hugging Face names (`hf.co/<owner>/<repo>:<quant>`) and the short names in `arty_engine/short_names.json`, with progress; one pull at a time. A short name already in the store is not downloaded again; one the engine can't run or read answers 409 (delete it, then pull). Each short name is pinned to the sha256 of its files, so a file changed on Hugging Face is refused (502); pulled manifests record the repo and revision. Any other name answers 400 with the form to use |
 | `DELETE /api/delete` | Models in the engine's own store. Models read in place from `model_roots` answer 405, internal models and deletes during a pull answer 409 |
 | `POST /api/generate` with `suffix` | **501** |
 | `POST /api/generate` raw with images or a `format` | **501** |
@@ -213,6 +235,7 @@ copied from `deploy/site.env.example`:
 | `ARTY_CONTROLLER_URL` | The GPU-sharing trainer controller, or `none` |
 | `ARTY_CONTROLLER_SETTINGS`, `ARTY_CONTROLLER_PYTHON`, `ARTY_CONTROLLER_CODE` | The controller's settings file, its Python and its code (only with a controller) |
 | `ARTY_CONTROLLER_UNIT`, `ARTY_CONTROLLER_MODULE` | The controller's systemd unit and the Python module it runs (only with a controller) |
+| `ARTY_CONTROLLER_OLDER_SETTINGS` | Older names of the controller's engine address setting, space separated; the switch removes them from the settings file so only `arty_engine_url` is left (optional) |
 | `ARTY_ENGINE_ALLOWED_HOSTS`, `ARTY_ENGINE_ALLOWED_ORIGINS` | Names, separated by spaces, written into the installed config's `allowed_hosts` and `allowed_origins` (for example the address a reverse proxy passes as `Host`) |
 | `ARTY_ENGINE_MODEL_ROOTS` | Folders, separated by spaces, written into the installed config's `model_roots` (other engine stores read in place); empty means the engine's own store only |
 | `ARTY_MAIN_MODEL` | The model loaded after a switch, `qwen3:14b` by default |
@@ -227,11 +250,15 @@ controller for the card, unloads the engine's models, runs one bench and puts Ar
 `engine-test.json` from `deploy/` (the bench engine's config) and a `bench-support/` folder holding Arty's
 `eval_scoring.py`, `e2e_battery.py` and `eval_images/` from the brain's `tests/` (the folder `bench.py --support`
 reads). `bench-args.sh` also points at the brain's `/srv/ai/brain/system-prompt.md` and at the tool lists in this
-repository's `tests/fixtures/`. `slice-engine.sh` starts the bench engine as `arty-engine-test` through
-`engine-restart.sh` and benches the address in that config's `listen` (`127.0.0.1:11439` in `engine-test.json`, so
-the live engine on 11438 keeps serving); it stops without benching when that port already answers before the start,
-when the unit is not running, or when the unit never answers there. Every bench config needs its own port. `bench/bench.py` measures a server on load time, first token, generation speed,
+repository's `tests/fixtures/`. `bench/bench.py` measures a server on load time, first token, generation speed,
 Arty's chat battery, coding edits and vision.
+
+`slice-engine.sh` starts the bench engine as `arty-engine-test` through `engine-restart.sh` and benches the address
+in that config's `listen` (`127.0.0.1:11439` in `engine-test.json`, so the live engine on 11438 keeps serving). It
+stops without benching when that port already answers before the start, when the unit is not running, or when the
+unit never answers there; every bench config needs its own port and its own `state_dir`. The result file records
+which models the live engine held before and after the bench (`live_engine`); `busy: true` means the two engines
+shared the card and the numbers are not clean.
 
 A Qwen3-0.6B draft model for `qwen3:14b` was slower than no speculation at a 24576 context on a 12 GB card, because
 it pushes some of the 14B's layers off the GPU; n-gram speculation needs no extra memory and is what Arty runs.

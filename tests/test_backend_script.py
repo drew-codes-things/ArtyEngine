@@ -120,3 +120,45 @@ def test_the_status_reads_the_engine_url_setting(tmp_path):
     finished = run_backend(tmp_path, "ARTY_CT=201\nARTY_CONTROLLER_URL=none\n", "status")
     assert finished.returncode == 0, finished.stderr
     assert "ARTY_ENGINE_URL=" in calls(tmp_path) and "11434" not in calls(tmp_path)
+
+
+def run_engine_switch(folder: Path, unit_state: int, extra_site: str = ""):
+    code = folder / "controller.py"
+    code.write_text("def reload_arty(): pass\n")
+    site = folder / "site.env"
+    site.write_text(f"ARTY_CT=201\nARTY_CONTROLLER_URL=http://127.0.0.1:9\nARTY_CONTROLLER_SETTINGS={folder / 'settings.json'}\n"
+                    f"ARTY_CONTROLLER_PYTHON=/opt/trainer/venv/bin/python\nARTY_CONTROLLER_CODE={code}\n"
+                    f"ARTY_CONTROLLER_UNIT=trainer-controller\nARTY_CONTROLLER_MODULE=trainer.controller\n{extra_site}")
+    bin_dir = fake_pct(folder)
+    (bin_dir / "systemctl").write_text(f'#!/bin/sh\necho "systemctl $@" >> {folder / "calls.log"}\n'
+                                       f'[ "$1" = is-active ] && exit {unit_state}\nexit 0\n')
+    (bin_dir / "python3").write_text(f'#!/bin/sh\necho "python3 $@" >> {folder / "calls.log"}\nexit 0\n')
+    (bin_dir / "python3").chmod(0o755)
+    environment = {key: value for key, value in os.environ.items() if not key.startswith("ARTY_")}
+    environment.update(ARTY_ENGINE_SITE=str(site), ARTY_CONTROLLER_SETTLE_SECONDS="0", PATH=f"{bin_dir}:{os.environ['PATH']}")
+    return subprocess.run(["bash", str(SCRIPT), "engine"], env=environment, capture_output=True, text=True,
+                          timeout=SCRIPT_TIMEOUT_SECONDS)
+
+
+def test_the_switch_fails_when_the_controller_does_not_come_back(tmp_path):
+    finished = run_engine_switch(tmp_path, 3)
+    assert finished.returncode != 0
+    assert "trainer-controller is not running" in finished.stderr
+    assert "systemctl is-active" in calls(tmp_path)
+
+
+def test_the_switch_goes_on_when_the_controller_comes_back(tmp_path):
+    finished = run_engine_switch(tmp_path, 0)
+    assert finished.returncode == 0, finished.stderr
+
+
+def test_the_switch_drops_the_older_settings_the_site_names(tmp_path):
+    finished = run_engine_switch(tmp_path, 0, 'ARTY_CONTROLLER_OLDER_SETTINGS="first_old second_old"\n')
+    assert finished.returncode == 0, finished.stderr
+    assert "--drop-setting first_old --drop-setting second_old" in calls(tmp_path)
+
+
+def test_the_switch_drops_nothing_when_the_site_names_nothing(tmp_path):
+    finished = run_engine_switch(tmp_path, 0)
+    assert finished.returncode == 0, finished.stderr
+    assert "--drop-setting" not in calls(tmp_path)

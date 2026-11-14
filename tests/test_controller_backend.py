@@ -14,11 +14,11 @@ MODULE = "trainer.controller"
 RUN_FOLDER = "/opt/trainer/runs/first"
 
 
-def switch(tmp_path, backend):
+def switch(tmp_path, backend, *extra):
     settings, drop_in = tmp_path / "controller-settings.json", tmp_path / "settings.conf"
     finished = subprocess.run([sys.executable, str(SCRIPT), backend, "--settings", str(settings),
                                "--drop-in", str(drop_in), "--python", PYTHON,
-                               "--unit", UNIT, "--module", MODULE], capture_output=True, text=True, timeout=30)
+                               "--unit", UNIT, "--module", MODULE, *extra], capture_output=True, text=True, timeout=30)
     return finished, settings, drop_in
 
 
@@ -36,6 +36,26 @@ def test_the_switch_keeps_the_other_controller_settings(tmp_path):
     assert finished.returncode == 0, finished.stderr
     assert json.loads(settings.read_text()) == {"run_folder": RUN_FOLDER,
                                                 "arty_engine_url": "http://127.0.0.1:11438"}
+
+
+def test_older_settings_named_by_the_site_are_dropped(tmp_path):
+    older = {"older_engine_address": "http://127.0.0.1:9", "run_folder": RUN_FOLDER}
+    (tmp_path / "controller-settings.json").write_text(json.dumps(older))
+    finished, settings, _ = switch(tmp_path, "engine", "--drop-setting", "older_engine_address",
+                                   "--drop-setting", "never_there")
+    assert finished.returncode == 0, finished.stderr
+    assert json.loads(settings.read_text()) == {"run_folder": RUN_FOLDER, "arty_engine_url": "http://127.0.0.1:11438"}
+    assert "older_engine_address removed" in finished.stdout
+    assert "never_there" not in finished.stdout
+
+
+def test_the_engine_url_setting_is_never_dropped(tmp_path):
+    (tmp_path / "controller-settings.json").write_text(json.dumps({"run_folder": RUN_FOLDER}))
+    finished, settings, drop_in = switch(tmp_path, "engine", "--drop-setting", "arty_engine_url")
+    assert finished.returncode != 0
+    assert "arty_engine_url" in finished.stderr
+    assert json.loads(settings.read_text()) == {"run_folder": RUN_FOLDER}
+    assert not drop_in.exists()
 
 
 def test_only_the_engine_is_a_backend(tmp_path):

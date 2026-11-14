@@ -82,4 +82,17 @@ def build_old_store(root: Path) -> Path:
 
 
 EXPECTED_NAMES = {"qwen3:14b", "mimo-v2.6:9b", "qwen2.5vl:7b", "nomic-embed-text:latest", "hf.co/Someone/Tiny-GGUF:Q8_0",
-                  f"{SHORT_HOST}/someone/custom:1"}
+                  "someone/custom:1"}
+
+
+def add_old_model(root: Path, folder: str, host: str, namespace: str, model: str, tag: str, rows: int = 8) -> dict:
+    manifest = _old_manifest(root, QWEN3, {"blk.0.w": (rows, rows)})
+    _file(root, folder, host, namespace, model, tag, manifest)
+    return manifest
+
+
+def write_old(root: Path, folder: str, host: str, namespace: str, model: str, tag: str, manifest) -> Path:
+    path = root / folder / host / namespace / model / tag
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(manifest))
+    return path

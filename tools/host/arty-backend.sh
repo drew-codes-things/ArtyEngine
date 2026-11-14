@@ -11,11 +11,13 @@ CONTROLLER_PYTHON=${ARTY_CONTROLLER_PYTHON:-}
 CONTROLLER_CODE=${ARTY_CONTROLLER_CODE:-}
 CONTROLLER_UNIT=${ARTY_CONTROLLER_UNIT:-}
 CONTROLLER_MODULE=${ARTY_CONTROLLER_MODULE:-}
+CONTROLLER_OLDER_SETTINGS=${ARTY_CONTROLLER_OLDER_SETTINGS:-}
 ALLOWED_HOSTS=${ARTY_ENGINE_ALLOWED_HOSTS:-}
 ALLOWED_ORIGINS=${ARTY_ENGINE_ALLOWED_ORIGINS:-}
 MODEL_ROOTS=${ARTY_ENGINE_MODEL_ROOTS:-}
 CONTROLLER_TOOL=$HERE/controller_backend.py
 NO_CONTROLLER=none
+CONTROLLER_SETTLE_SECONDS=${ARTY_CONTROLLER_SETTLE_SECONDS:-5}
 LOCK_OWNER="arty-backend $(date +%s)"
 
 usage() {
@@ -86,10 +88,18 @@ release_gpu_lock() {
 
 point_controller_at() {
   has_controller || return 0
+  local older_setting drop_settings=()
+  for older_setting in $CONTROLLER_OLDER_SETTINGS; do drop_settings+=(--drop-setting "$older_setting"); done
   python3 "$CONTROLLER_TOOL" "$1" --settings "$CONTROLLER_SETTINGS" --python "$CONTROLLER_PYTHON" \
-    --unit "$CONTROLLER_UNIT" --module "$CONTROLLER_MODULE"
+    --unit "$CONTROLLER_UNIT" --module "$CONTROLLER_MODULE" "${drop_settings[@]}"
   systemctl daemon-reload
   systemctl restart "$CONTROLLER_UNIT"
+  sleep "$CONTROLLER_SETTLE_SECONDS"
+  if ! systemctl is-active --quiet "$CONTROLLER_UNIT"; then
+    echo "$CONTROLLER_UNIT is not running after the restart; see journalctl -u $CONTROLLER_UNIT (an unknown setting in" \
+      "$CONTROLLER_SETTINGS stops it). The engine goes ahead without the trainer until it runs again" >&2
+    exit 1
+  fi
 }
 
 repeated_option() {

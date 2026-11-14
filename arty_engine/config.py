@@ -45,6 +45,7 @@ class Config:
     load_timeout_seconds: int = 600
     trainer_url: str = ""
     pull_rate_bytes: int = 4_000_000
+    pull_keep_free_mb: int = 2048
     speculative: dict = field(default_factory=dict)
     internal_models: list = field(default_factory=list)
     extra_args: dict = field(default_factory=dict)

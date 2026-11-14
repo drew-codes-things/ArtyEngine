@@ -61,15 +61,19 @@ def test_choose_files_explains_what_is_there():
 def fake_hf(tmp_path, monkeypatch):
     model = write_gguf(tmp_path / "Tiny-Q8_0.gguf", {"general.architecture": "qwen3", "tokenizer.chat_template": "{{ tools }}"}, {"w": (4, 4)})
     data = model.read_bytes()
-    state = {"data": data, "sha": hashlib.sha256(data).hexdigest(), "ranges": []}
+    state = {"data": data, "sha": hashlib.sha256(data).hexdigest(), "ranges": [], "paths": [], "listed_size": None,
+             "refuse_ranges": 0, "revision": "a" * 40}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
         def do_GET(self):
+            state["paths"].append(self.path)
             if self.path.startswith("/api/"):
-                payload = json.dumps({"siblings": [{"rfilename": "Tiny-Q8_0.gguf", "lfs": {"sha256": state["sha"], "size": len(state["data"])}}]}).encode()
+                listed = len(state["data"]) if state["listed_size"] is None else state["listed_size"]
+                payload = json.dumps({"sha": state["revision"], "siblings": [
+                    {"rfilename": "Tiny-Q8_0.gguf", "lfs": {"sha256": state["sha"], "size": listed}}]}).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -77,6 +81,12 @@ def fake_hf(tmp_path, monkeypatch):
                 return
             start = int(self.headers.get("Range", "bytes=0-")[6:].rstrip("-") or 0)
             state["ranges"].append(start)
+            if start and state["refuse_ranges"]:
+                state["refuse_ranges"] -= 1
+                self.send_response(416)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return
             body = state["data"][start:]
             self.send_response(206 if start else 200)
             self.send_header("Content-Length", str(len(body)))
@@ -87,7 +97,7 @@ def fake_hf(tmp_path, monkeypatch):
     threading.Thread(target=server.serve_forever, daemon=True).start()
     base = f"http://127.0.0.1:{server.server_address[1]}"
     monkeypatch.setattr(pull, "HF_API", base + "/api/models/{repo}?blobs=true")
-    monkeypatch.setattr(pull, "HF_FILE", base + "/{repo}/resolve/main/{file}")
+    monkeypatch.setattr(pull, "HF_FILE", base + "/{repo}/resolve/{revision}/{file}")
     yield state
     server.shutdown()
 
@@ -200,7 +210,7 @@ def hub_answering(status: int, payload) -> type:
 
 def point_at(monkeypatch, base: str) -> None:
     monkeypatch.setattr(pull, "HF_API", base + "/api/models/{repo}?blobs=true")
-    monkeypatch.setattr(pull, "HF_FILE", base + "/{repo}/resolve/main/{file}")
+    monkeypatch.setattr(pull, "HF_FILE", base + "/{repo}/resolve/{revision}/{file}")
 
 
 @pytest.fixture
@@ -287,7 +297,7 @@ def test_an_unknown_short_name_is_refused_with_the_form_to_use(engine, name):
 
 def test_a_short_name_is_pulled_from_its_hugging_face_repo_and_keeps_its_name(tmp_path, fake_hf):
     updates = []
-    puller = pull.Puller(tmp_path / "own", 0, short_names={"tiny:1": "hf.co/Someone/Tiny-GGUF:Q8_0"})
+    puller = pull.Puller(tmp_path / "own", 0, short_names={"tiny:1": pull.ShortName("hf.co/Someone/Tiny-GGUF:Q8_0")})
     puller.pull("tiny:1", updates.append)
     assert updates[-1] == {"status": "success"}
     store = ModelStore([tmp_path / "own"])
@@ -297,7 +307,7 @@ def test_a_short_name_is_pulled_from_its_hugging_face_repo_and_keeps_its_name(tm
 
 
 def test_an_installed_short_name_is_not_downloaded_again(tmp_path, fake_hf):
-    puller = pull.Puller(tmp_path / "own", 0, short_names={"tiny:1": "hf.co/Someone/Tiny-GGUF:Q8_0"})
+    puller = pull.Puller(tmp_path / "own", 0, short_names={"tiny:1": pull.ShortName("hf.co/Someone/Tiny-GGUF:Q8_0")})
     puller.pull("tiny:1", lambda update: None)
     manifest = (tmp_path / "own" / "catalog" / "local" / "library" / "tiny" / "1.json")
     before = manifest.read_bytes()
@@ -310,14 +320,16 @@ def test_an_installed_short_name_is_not_downloaded_again(tmp_path, fake_hf):
 def test_the_shipped_short_names_point_at_hugging_face_and_cover_what_arty_pulls():
     names = pull.load_short_names()
     assert {"qwen3:14b", "mimo-v2.6:9b", "nomic-embed-text:latest"} <= set(names)
-    for short, source in names.items():
-        assert parse_name(short).host == "local" and parse_name(source).host in pull.HF_HOSTS
-        assert parse_name(source).tag != "latest"
+    for short, entry in names.items():
+        assert parse_name(short).host == "local" and parse_name(entry.source).host in pull.HF_HOSTS
+        assert parse_name(entry.source).tag != "latest"
+        assert len(entry.model_sha256) == 64 and int(entry.model_sha256, 16) >= 0
+    assert all(len(names[name].projector_sha256 or "") == 64 for name in ("mimo-v2.6:9b", "qwen2.5vl:7b"))
 
 
 def test_a_short_name_list_pointing_elsewhere_is_refused(tmp_path):
     listed = tmp_path / "short_names.json"
-    listed.write_text(json.dumps({"tiny:1": "registry.example/library/tiny:1"}))
+    listed.write_text(json.dumps({"tiny:1": {"source": "registry.example/library/tiny:1", "model_sha256": "0" * 64}}))
     with pytest.raises(ValueError, match="Hugging Face"):
         pull.load_short_names(listed)
 
@@ -404,3 +416,97 @@ def test_a_refused_token_is_still_a_502(engine, monkeypatch):
     monkeypatch.setenv("HF_TOKEN", "wrong-token-value")
     status, body = pull_from_hub(engine, monkeypatch, 401, {"error": "Invalid credentials"}, "hf.co/Someone/Hidden-GGUF:Q8_0")
     assert status == 502 and "wrong-token-value" not in body["error"]
+
+
+def tiny_puller(tmp_path, **settings):
+    return pull.Puller(tmp_path / "own", 0, short_names={"tiny:1": pull.ShortName("hf.co/Someone/Tiny-GGUF:Q8_0")}, **settings)
+
+
+def test_an_installed_model_the_engine_cannot_run_is_refused_not_reported_as_pulled(tmp_path, fake_hf):
+    from fake_store import INLINE_VISION, add_model
+    root = tmp_path / "own"
+    add_model(root, "tiny", "1", INLINE_VISION, {"blk.0.w": (4, 4), "v.blk.0.w": (4, 4)})
+    puller = tiny_puller(tmp_path, store=ModelStore([root]))
+    with pytest.raises(pull.PullError, match="delete it first") as refused:
+        puller.pull("tiny:1", lambda update: None)
+    assert refused.value.status == 409 and "not supported" in str(refused.value)
+    assert fake_hf["paths"] == []
+
+
+def test_an_installed_model_whose_manifest_is_unreadable_is_refused(tmp_path, fake_hf):
+    puller = tiny_puller(tmp_path, store=ModelStore([tmp_path / "own"]))
+    puller.pull("tiny:1", lambda update: None)
+    (tmp_path / "own" / "catalog" / "local" / "library" / "tiny" / "1.json").write_text("{")
+    with pytest.raises(pull.PullError, match="delete it first") as refused:
+        puller.pull("tiny:1", lambda update: None)
+    assert refused.value.status == 409 and "can't be read" in str(refused.value)
+
+
+def test_a_pinned_short_name_refuses_a_file_that_changed_on_the_hub(tmp_path, fake_hf):
+    puller = pull.Puller(tmp_path / "own", 0, short_names={"tiny:1": pull.ShortName("hf.co/Someone/Tiny-GGUF:Q8_0", "1" * 64)})
+    with pytest.raises(pull.PullError, match="changed") as refused:
+        puller.pull("tiny:1", lambda update: None)
+    assert refused.value.status == 502 and fake_hf["ranges"] == []
+
+
+def test_a_pulled_manifest_records_its_repo_and_revision_and_downloads_from_that_revision(tmp_path, fake_hf):
+    pinned = pull.ShortName("hf.co/Someone/Tiny-GGUF:Q8_0", fake_hf["sha"])
+    pull.Puller(tmp_path / "own", 0, short_names={"tiny:1": pinned}).pull("tiny:1", lambda update: None)
+    manifest = ModelStore([tmp_path / "own"]).get("tiny:1").manifest
+    assert manifest["source"] == {"name": "hf.co/Someone/Tiny-GGUF:Q8_0", "revision": fake_hf["revision"]}
+    assert any(f"/resolve/{fake_hf['revision']}/Tiny-Q8_0.gguf" in path for path in fake_hf["paths"])
+
+
+def test_the_projector_quant_matches_a_whole_word():
+    siblings = [{"rfilename": "M-Q4_K_M.gguf"}, {"rfilename": "mmproj-M-bf16.gguf"}, {"rfilename": "mmproj-M-F16.gguf"}]
+    assert pull.choose_hf_files(siblings, "Q4_K_M")[1]["rfilename"] == "mmproj-M-F16.gguf"
+    assert pull.choose_hf_files(siblings[:2], "Q4_K_M")[1]["rfilename"] == "mmproj-M-bf16.gguf"
+
+
+def test_a_download_longer_than_listed_is_cut_off_and_thrown_away(tmp_path, fake_hf):
+    fake_hf["listed_size"] = 10
+    with pytest.raises(pull.PullError, match="more than"):
+        pull.Puller(tmp_path / "own", 0).pull("hf.co/Someone/Tiny-GGUF:Q8_0", lambda update: None)
+    assert not list((tmp_path / "own" / "blobs").iterdir())
+
+
+def test_a_pull_that_would_fill_the_disk_is_refused_before_downloading(tmp_path, fake_hf, monkeypatch):
+    monkeypatch.setattr(pull.shutil, "disk_usage", lambda path: pull.shutil._ntuple_diskusage(10**9, 10**9 - 100, 100))
+    with pytest.raises(pull.PullError, match="free") as refused:
+        pull.Puller(tmp_path / "own", 0, keep_free_bytes=50).pull("hf.co/Someone/Tiny-GGUF:Q8_0", lambda update: None)
+    assert refused.value.status == 507 and fake_hf["ranges"] == []
+
+
+def partial_of(tmp_path, fake_hf):
+    blob = tmp_path / "own" / "blobs" / f"sha256-{fake_hf['sha']}"
+    blob.parent.mkdir(parents=True)
+    return blob, blob.with_name(blob.name + "-partial")
+
+
+def test_a_finished_partial_is_checked_and_kept_without_asking_the_hub(tmp_path, fake_hf):
+    blob, partial = partial_of(tmp_path, fake_hf)
+    partial.write_bytes(fake_hf["data"])
+    pull.Puller(tmp_path / "own", 0).pull("hf.co/Someone/Tiny-GGUF:Q8_0", lambda update: None)
+    assert fake_hf["ranges"] == [] and blob.read_bytes() == fake_hf["data"] and not partial.exists()
+
+
+def test_a_partial_longer_than_the_file_starts_over(tmp_path, fake_hf):
+    blob, partial = partial_of(tmp_path, fake_hf)
+    partial.write_bytes(fake_hf["data"] + b"extra")
+    pull.Puller(tmp_path / "own", 0).pull("hf.co/Someone/Tiny-GGUF:Q8_0", lambda update: None)
+    assert fake_hf["ranges"] == [0] and blob.read_bytes() == fake_hf["data"]
+
+
+def test_a_refused_range_starts_the_download_over(tmp_path, fake_hf):
+    blob, partial = partial_of(tmp_path, fake_hf)
+    partial.write_bytes(fake_hf["data"][:10])
+    fake_hf["refuse_ranges"] = 1
+    pull.Puller(tmp_path / "own", 0).pull("hf.co/Someone/Tiny-GGUF:Q8_0", lambda update: None)
+    assert fake_hf["ranges"] == [10, 0] and blob.read_bytes() == fake_hf["data"]
+
+
+def test_an_installed_short_name_that_is_not_supported_answers_409_through_the_api(engine):
+    from fake_store import INLINE_VISION, add_model
+    add_model(engine.config.roots[0], "qwen2.5vl", "7b", INLINE_VISION, {"blk.0.w": (4, 4), "v.blk.0.w": (4, 4)})
+    status, body = pull_answer(engine, "qwen2.5vl:7b")
+    assert status == 409 and "delete it first" in body["error"]

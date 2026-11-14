@@ -18,7 +18,7 @@ from .config import Config, load_config
 from .gguf import GgufError
 from .pull import Puller, PullError
 from .runner import LoadError, Runner, RunnerPool, parse_keep_alive
-from .store import ModelNotFound, ModelStore, NotOwned, iso_time, parse_name
+from .store import ModelNotFound, ModelStore, NotOwned, iso_time, parse_name, roots_in_older_layout
 
 log = logging.getLogger("arty-engine")
 
@@ -74,7 +74,8 @@ class Engine:
         self.store = store or ModelStore(config.roots)
         self.pool = pool or RunnerPool(config, self.store)
         self.trainer = TrainerClient(config.trainer_url)
-        self.puller = Puller(config.roots[0], config.pull_rate_bytes)
+        self.puller = Puller(config.roots[0], config.pull_rate_bytes, store=self.store,
+                             keep_free_bytes=config.pull_keep_free_mb * 1024 * 1024)
         self.pull_lock = threading.Lock()
         self.internal_names = {parse_name(name).display for name in config.internal_models}
 
@@ -88,8 +89,8 @@ class Engine:
             model = self.store.get(name)
         except ModelNotFound as error:
             raise ApiError(404, f"model '{name}' not found") from error
-        except (GgufError, OSError) as error:
-            raise ApiError(500, f"couldn't read {name}: {error}") from error
+        except (GgufError, OSError, ValueError, RecursionError) as error:
+            raise ApiError(500, f"couldn't read {name}: {error!s:.300}") from error
         return model
 
     def runnable_model(self, name):
@@ -586,6 +587,9 @@ def serve(config: Config) -> None:
 
 
 def warn_when_no_models(store: ModelStore, config: Config) -> None:
+    for root in roots_in_older_layout(config.roots):
+        log.warning("%s is in the older layout, so its models are not listed until tools/migrate_store.py converts it "
+                    "(README, Stores in the older layout)", root)
     if store.names():
         return
     log.warning("no models found in %s; a store in the older layout lists nothing until tools/migrate_store.py converts it "

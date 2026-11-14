@@ -10,6 +10,7 @@
   "kv_cache_type": "q8_0",
   "default_keep_alive": "-1",
   "trainer_url": "",
+  "pull_keep_free_mb": 15360,
   "speculative": {"qwen3:14b": {"spec_type": "ngram-mod"}, "mimo-v2.6:9b": {"spec_type": "ngram-mod"}},
   "internal_models": ["hf.co/Qwen/Qwen3-0.6B-GGUF:Q8_0"]
 }

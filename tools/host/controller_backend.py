@@ -63,12 +63,17 @@ def check_drop_in(drop_in: Path, settings: Path) -> bool:
     return True
 
 
-def switch(backend: str, settings: Path, drop_in: Path, python: str, module: str) -> list[str]:
+def switch(backend: str, settings: Path, drop_in: Path, python: str, module: str,
+           older_settings: tuple[str, ...] = ()) -> list[str]:
+    if ENGINE_URL_SETTING in older_settings:
+        raise SwitchError(f"{ENGINE_URL_SETTING} is the setting this tool writes; it can't also be an older one")
     values = read_settings(settings)
     drop_in_present = check_drop_in(drop_in, settings)
+    dropped = [name for name in older_settings if values.pop(name, None) is not None]
     values[ENGINE_URL_SETTING] = BACKEND_URLS[backend]
     write_atomically(settings, json.dumps(values, indent=2) + "\n")
     done = [f"{settings}: {ENGINE_URL_SETTING} = {values[ENGINE_URL_SETTING]}"]
+    done += [f"{settings}: {name} removed" for name in dropped]
     if not drop_in_present:
         write_atomically(drop_in, drop_in_text(python, module, settings))
         done.append(f"{drop_in}: controller now reads {settings}")
@@ -83,11 +88,14 @@ def main() -> int:
     parser.add_argument("--module", required=True, help="the Python module that runs the controller")
     parser.add_argument("--drop-in", default=None, help="the drop-in to write (default: settings.conf in the unit's .d folder)")
     parser.add_argument("--python", required=True, help="the Python that runs the controller")
+    parser.add_argument("--drop-setting", action="append", default=[], metavar="NAME",
+                        help="an older setting to remove from the settings file (repeat for more)")
     arguments = parser.parse_args()
     try:
         check_names(arguments.unit, arguments.module)
         drop_in = Path(arguments.drop_in) if arguments.drop_in else drop_in_path(arguments.unit)
-        done = switch(arguments.backend, Path(arguments.settings), drop_in, arguments.python, arguments.module)
+        done = switch(arguments.backend, Path(arguments.settings), drop_in, arguments.python, arguments.module,
+                      tuple(arguments.drop_setting))
     except (SwitchError, OSError) as error:
         print(f"controller settings not changed: {error}", file=sys.stderr)
         return 1
