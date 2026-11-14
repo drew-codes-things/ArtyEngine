@@ -1,7 +1,12 @@
 #!/bin/bash
-. /srv/ai/arty-engine/bench-args.sh
-CONFIG=${2:-/srv/ai/arty-engine/engine-test.json}
+set -u
+HOME_DIR=${BENCH_HOME:-/srv/ai/arty-engine}
+. $HOME_DIR/bench-args.sh
+CONFIG=${2:-$HOME_DIR/engine-test.json}
 LABEL=${3:-engine}
-mkdir -p /srv/ai/arty-engine/runs
-/srv/ai/arty-engine/engine-restart.sh $CONFIG
-timeout 840 python3 bench/bench.py http://127.0.0.1:11438 $LABEL $BENCH_ARGS --output /srv/ai/arty-engine/runs/bench-$LABEL.json --parts "${1:-speed,chat,code,vision}" ${4:-}
+mkdir -p $HOME_DIR/runs
+url=$($HOME_DIR/engine-restart.sh $CONFIG) || {
+  echo "the bench engine did not start on its own port; no bench was run" >&2
+  exit 1
+}
+timeout 840 python3 bench/bench.py $url $LABEL $BENCH_ARGS --output $HOME_DIR/runs/bench-$LABEL.json --parts "${1:-speed,chat,code,vision}" ${4:-}

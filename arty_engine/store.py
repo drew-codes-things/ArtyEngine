@@ -1,11 +1,14 @@
 import hashlib
 import json
+import logging
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .gguf import GgufError, GgufInfo, plain_metadata, read_gguf
+
+log = logging.getLogger("arty-engine.store")
 
 LOCAL_HOST = "local"
 DEFAULT_NAMESPACE = "library"
@@ -71,7 +74,7 @@ def parse_name(name: str) -> ModelName:
         raise ModelNotFound(f"invalid model name {name!r}")
     base, _, tag = name.partition(":")
     parts = base.split("/")
-    if any(part in PATH_STEPS or len(part) > LONGEST_FILE_NAME for part in (*parts, tag)):
+    if "" in parts or any(part in PATH_STEPS or len(part) > LONGEST_FILE_NAME for part in (*parts, tag)):
         raise ModelNotFound(f"invalid model name {name!r}")
     if len(parts) == 1:
         return ModelName(LOCAL_HOST, DEFAULT_NAMESPACE, parts[0].lower(), tag or DEFAULT_TAG)
@@ -216,9 +219,9 @@ class ModelStore:
             raise ModelNotFound(f"model '{name}' not found")
         root, path = found
         manifest = _read_json(path)
-        if not isinstance(manifest, dict) or manifest.get("mediaType") != MANIFEST_MEDIA_TYPE:
+        if not is_engine_manifest(manifest):
             raise ModelNotFound(f"{path} is not an ArtyEngine manifest")
-        layers = {layer.get("mediaType"): layer for layer in manifest.get("layers", [])}
+        layers = {layer["mediaType"]: layer for layer in manifest["layers"]}
         if MODEL_LAYER not in layers:
             raise ModelNotFound(f"model '{name}' has no model layer")
         model_path = blob_path(root, layers[MODEL_LAYER]["digest"])
@@ -273,8 +276,8 @@ class ModelStore:
         for name in self.names():
             try:
                 listed.append(self.get(name))
-            except (ModelNotFound, GgufError, OSError, ValueError):
-                continue
+            except (ModelNotFound, GgufError, OSError, ValueError, RecursionError) as error:
+                log.warning("left %s out of the model list: %s", name, error)
         return sorted(listed, key=lambda model: model.modified_at, reverse=True)
 
     def template_donor(self, model: Model) -> Model | None:
@@ -315,12 +318,13 @@ class ModelStore:
         return removed
 
     def _blobs_of(self, root: Path, path: Path) -> set[Path]:
-        manifest = _read_json(path)
-        blobs = set()
-        for layer in manifest.get("layers", []) + [manifest.get("config") or {}]:
-            if is_digest(layer.get("digest")):
-                blobs.add(blob_path(root, layer["digest"]))
-        return {blob.resolve() for blob in blobs}
+        try:
+            manifest = _read_json(path)
+        except (OSError, ValueError, RecursionError) as error:
+            log.warning("couldn't read %s, so its blobs count as unused: %s", path, error)
+            return set()
+        digests = {entry.get("digest") for entry in _entries_of(manifest)}
+        return {blob_path(root, digest).resolve() for digest in digests if is_digest(digest)}
 
     @staticmethod
     def _prune_empty_folders(root: Path, folder: Path) -> None:
@@ -328,6 +332,28 @@ class ModelStore:
         while folder != stop and folder.is_dir() and not any(folder.iterdir()):
             folder.rmdir()
             folder = folder.parent
+
+
+def _entries_of(manifest) -> list[dict]:
+    if not isinstance(manifest, dict):
+        return []
+    layers = manifest.get("layers")
+    entries = layers if isinstance(layers, list) else []
+    return [entry for entry in [*entries, manifest.get("config")] if isinstance(entry, dict)]
+
+
+def is_engine_manifest(manifest) -> bool:
+    if not isinstance(manifest, dict) or manifest.get("mediaType") != MANIFEST_MEDIA_TYPE:
+        return False
+    layers = manifest.get("layers")
+    config = manifest.get("config", {})
+    return (isinstance(layers, list) and all(_is_entry(layer) for layer in layers)
+            and isinstance(config, dict) and (not config or _is_entry(config)))
+
+
+def _is_entry(entry) -> bool:
+    return (isinstance(entry, dict) and isinstance(entry.get("mediaType"), str) and is_digest(entry.get("digest"))
+            and isinstance(entry.get("size", 0), int) and not isinstance(entry.get("size", 0), bool))
 
 
 def _manifest_files(root: Path) -> list[Path]:

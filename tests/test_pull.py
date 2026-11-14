@@ -1,5 +1,6 @@
 import hashlib
 import json
+import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -251,7 +252,7 @@ def test_a_repo_hugging_face_does_not_have_is_a_404(engine, monkeypatch):
     assert status == 404 and "Nothere" in body["error"]
 
 
-@pytest.mark.parametrize("hub_status", [500, 503, 401, 429])
+@pytest.mark.parametrize("hub_status", [500, 503, 429])
 def test_other_hugging_face_failures_are_a_502(engine, monkeypatch, hub_status):
     status, body = pull_from_hub(engine, monkeypatch, hub_status, {"error": "x"})
     assert status == 502 and str(hub_status) in body["error"]
@@ -338,3 +339,68 @@ def test_a_quant_the_repo_does_not_have_is_a_404_and_a_split_one_a_501(engine, m
     assert status == 404 and "M-Q8_0.gguf" in body["error"]
     status, body = pull_from_hub(engine, monkeypatch, 200, info, "hf.co/Someone/M-GGUF:Q2_K")
     assert status == 501 and "split" in body["error"]
+
+
+def raw_hub(answer_for_path) -> socketserver.TCPServer:
+    class Handler(socketserver.StreamRequestHandler):
+        def handle(self):
+            request_line = self.rfile.readline().decode("latin-1")
+            while self.rfile.readline() not in (b"\r\n", b"\n", b""):
+                pass
+            self.wfile.write(answer_for_path(request_line.split(" ")[1] if " " in request_line else ""))
+
+    server = socketserver.ThreadingTCPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+GOOD_SHA = hashlib.sha256(b"weights").hexdigest()
+GOOD_INFO = json.dumps({"siblings": [{"rfilename": "M-Q8_0.gguf", "lfs": {"sha256": GOOD_SHA, "size": 7}}]}).encode()
+
+
+def ok(body: bytes) -> bytes:
+    return b"HTTP/1.1 200 OK\r\nContent-Length: " + str(len(body)).encode() + b"\r\nConnection: close\r\n\r\n" + body
+
+
+BROKEN_ANSWERS = {
+    "short body": lambda path: b"HTTP/1.1 200 OK\r\nContent-Length: 500\r\nConnection: close\r\n\r\n{\"siblings\": [",
+    "not http": lambda path: b"SSH-2.0-OpenSSH_9.6\r\n",
+    "bad chunks": lambda path: b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\nzz\r\n",
+    "deep json": lambda path: ok(b"[" * 200000),
+    "blob not http": lambda path: ok(GOOD_INFO) if path.startswith("/api/") else b"garbage\r\n\r\n",
+    "blob short": lambda path: ok(GOOD_INFO) if path.startswith("/api/") else
+                  b"HTTP/1.1 200 OK\r\nContent-Length: 7\r\nConnection: close\r\n\r\nwei",
+}
+
+
+@pytest.mark.parametrize("case", sorted(BROKEN_ANSWERS))
+def test_a_broken_answer_from_hugging_face_is_a_502_never_a_500(engine, monkeypatch, case):
+    hub = raw_hub(BROKEN_ANSWERS[case])
+    point_at(monkeypatch, f"http://127.0.0.1:{hub.server_address[1]}")
+    try:
+        status, body = pull_answer(engine, "hf.co/Someone/M-GGUF:Q8_0")
+    finally:
+        hub.shutdown()
+    assert status == 502, body
+    assert "engine error" not in body["error"]
+
+
+@pytest.mark.parametrize("name", ["bad name", "example.invalid/a/b:c", "nothere:1"])
+def test_a_streamed_pull_of_a_name_it_refuses_answers_400(engine, name):
+    import urllib.request
+    request = urllib.request.Request(f"{engine.url}/api/pull", data=json.dumps({"model": name}).encode(), method="POST")
+    status, body = error_of(lambda: urllib.request.urlopen(request, timeout=30))
+    assert status == 400 and body["error"]
+
+
+def test_a_repo_hugging_face_hides_without_a_token_is_a_404(engine, monkeypatch):
+    monkeypatch.delenv("HF_TOKEN", raising=False)
+    status, body = pull_from_hub(engine, monkeypatch, 401, {"error": "Invalid username or password."}, "hf.co/Someone/Hidden-GGUF:Q8_0")
+    assert status == 404 and "HF_TOKEN" in body["error"]
+
+
+def test_a_refused_token_is_still_a_502(engine, monkeypatch):
+    monkeypatch.setenv("HF_TOKEN", "wrong-token-value")
+    status, body = pull_from_hub(engine, monkeypatch, 401, {"error": "Invalid credentials"}, "hf.co/Someone/Hidden-GGUF:Q8_0")
+    assert status == 502 and "wrong-token-value" not in body["error"]

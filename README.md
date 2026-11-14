@@ -163,7 +163,8 @@ The shipped `deploy/engine.json` is Arty's setup, not these defaults: a 24576 co
 as an internal model.
 
 `draft_ctx` is accepted in `speculative` but not passed to the runtime yet. Pulls from Hugging Face send `HF_TOKEN`
-from the environment when it is set, for gated repositories.
+from the environment when it is set, for gated repositories. Without it, Hugging Face answers 401 for a repository
+that is missing, private or gated, and the engine passes that on as 404; a refused token is a 502.
 
 ---
 
@@ -226,7 +227,10 @@ controller for the card, unloads the engine's models, runs one bench and puts Ar
 `engine-test.json` from `deploy/` (the bench engine's config) and a `bench-support/` folder holding Arty's
 `eval_scoring.py`, `e2e_battery.py` and `eval_images/` from the brain's `tests/` (the folder `bench.py --support`
 reads). `bench-args.sh` also points at the brain's `/srv/ai/brain/system-prompt.md` and at the tool lists in this
-repository's `tests/fixtures/`. `bench/bench.py` measures a server on load time, first token, generation speed,
+repository's `tests/fixtures/`. `slice-engine.sh` starts the bench engine as `arty-engine-test` through
+`engine-restart.sh` and benches the address in that config's `listen` (`127.0.0.1:11439` in `engine-test.json`, so
+the live engine on 11438 keeps serving); it stops without benching when that port already answers before the start,
+when the unit is not running, or when the unit never answers there. Every bench config needs its own port. `bench/bench.py` measures a server on load time, first token, generation speed,
 Arty's chat battery, coding edits and vision.
 
 A Qwen3-0.6B draft model for `qwen3:14b` was slower than no speculation at a 24576 context on a 12 GB card, because

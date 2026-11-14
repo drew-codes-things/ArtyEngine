@@ -550,6 +550,7 @@ def make_handler(engine: Engine):
             if not engine.pull_lock.acquire(blocking=False):
                 raise ApiError(409, "another pull is running; the engine pulls one model at a time to spare the link")
             try:
+                engine.puller.check(name)
                 if stream:
                     self._start_stream()
                     engine.puller.pull(name, self._stream_line)
@@ -574,6 +575,7 @@ def serve(config: Config) -> None:
     server = ThreadingHTTPServer((host, int(port)), make_handler(engine))
     server.daemon_threads = True
     signal.signal(signal.SIGTERM, exit_on_terminate)
+    warn_when_no_models(engine.store, config)
     log.info("arty-engine %s on %s, models from %s, model runner %s, VRAM budget %d MiB", VERSION, config.listen,
              ", ".join(str(root) for root in config.roots), config.runner_binary, config.vram_budget_mb)
     try:
@@ -581,6 +583,13 @@ def serve(config: Config) -> None:
     finally:
         log.info("arty-engine stopping; unloading %d models", len(engine.pool.loaded()))
         engine.pool.shutdown()
+
+
+def warn_when_no_models(store: ModelStore, config: Config) -> None:
+    if store.names():
+        return
+    log.warning("no models found in %s; a store in the older layout lists nothing until tools/migrate_store.py converts it "
+                "(README, Stores in the older layout)", ", ".join(str(root) for root in config.roots))
 
 
 def exit_on_terminate(*_) -> None:

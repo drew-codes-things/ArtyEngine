@@ -1,4 +1,5 @@
 import json
+import urllib.request
 
 import pytest
 
@@ -260,3 +261,20 @@ def test_internal_models_stay_out_of_the_model_list_but_still_answer(tmp_path):
 def test_an_unsupported_model_points_at_a_build_with_a_projector_file(engine):
     status, body = error_of(lambda: http_json(f"{engine.url}/api/generate", {"model": "qwen2.5vl:7b", "prompt": "hi", "stream": False}))
     assert status == 501 and "projector file from Hugging Face" in body["error"]
+
+
+def test_a_damaged_manifest_never_breaks_the_model_list_or_delete(tmp_path):
+    from arty_engine.store import MANIFEST_MEDIA_TYPE
+    from fake_store import QWEN3, add_model
+    path = add_model(tmp_path / "own", "broken", "1", QWEN3, {"blk.0.w": (4, 4)})
+    path.write_text(json.dumps({"mediaType": MANIFEST_MEDIA_TYPE, "layers": [{"mediaType": ["x"], "digest": 5}, 5], "manifests": [5]}))
+    running = RunningEngine(tmp_path, REPLIES)
+    try:
+        names = [model["name"] for model in http_json(f"{running.url}/api/tags")["models"]]
+        assert "qwen3:14b" in names and "broken:1" not in names
+        request = urllib.request.Request(f"{running.url}/api/delete", data=b'{"model":"broken:1"}', method="DELETE")
+        with urllib.request.urlopen(request, timeout=30) as response:
+            assert response.status == 200
+        assert not path.exists()
+    finally:
+        running.close()

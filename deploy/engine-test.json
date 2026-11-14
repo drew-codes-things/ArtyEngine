@@ -1,5 +1,5 @@
 {
-  "listen": "127.0.0.1:11438",
+  "listen": "127.0.0.1:11439",
   "store": "/srv/ai/arty-engine/models",
   "model_roots": [],
   "runner_binary": "/srv/ai/arty-engine/runtime/server",

@@ -159,3 +159,43 @@ def test_a_manifest_in_another_format_is_not_read(tmp_path):
 def test_written_manifests_are_found_by_name(tmp_path):
     write_manifest(tmp_path, parse_name("hf.co/Someone/M-GGUF:Q8_0"), engine_manifest([]))
     assert ModelStore([tmp_path]).names() == ["hf.co/Someone/M-GGUF:Q8_0"]
+
+
+@pytest.mark.parametrize("name", ["a//b", "a/", "x/:t", "hf.co//x", "/a", "a//b/c:d"])
+def test_names_with_an_empty_part_are_refused(name):
+    with pytest.raises(ModelNotFound, match="invalid model name"):
+        parse_name(name)
+
+
+DAMAGED_MANIFESTS = {
+    "text media type": lambda good: {**good, "layers": good["layers"] + [{**good["layers"][-1], "mediaType": 5}]},
+    "list media type": lambda good: {**good, "layers": good["layers"] + [{**good["layers"][-1], "mediaType": ["x"]}]},
+    "layer not an object": lambda good: {**good, "layers": good["layers"] + [5]},
+    "layers not a list": lambda good: {**good, "layers": "x"},
+    "config not an object": lambda good: {**good, "config": 5},
+    "manifest not an object": lambda good: [good],
+    "list entries": lambda good: {"manifests": [5]},
+    "size not a number": lambda good: {**good, "layers": [{**layer, "size": "big"} for layer in good["layers"]]},
+}
+
+
+@pytest.mark.parametrize("damage", sorted(DAMAGED_MANIFESTS))
+def test_a_damaged_manifest_hides_only_its_own_model_and_can_be_deleted(tmp_path, damage, caplog):
+    root = build_store(tmp_path / "own")
+    path = add_model(root, "broken", "1", QWEN3, {"blk.0.w": (4, 4)})
+    path.write_text(json.dumps(DAMAGED_MANIFESTS[damage](json.loads(path.read_text()))))
+    store = ModelStore([root])
+    assert {model.name for model in store.models()} == set(store.names()) - {"broken:1"}
+    assert "broken:1" in caplog.text
+    store.remove_owned("broken:1")
+    assert "broken:1" not in store.names()
+    store.remove_owned("untemplated:latest")
+    assert store.get("qwen3:14b").name == "qwen3:14b"
+
+
+def test_deleting_works_while_another_manifest_is_damaged(tmp_path):
+    root = build_store(tmp_path / "own")
+    path = add_model(root, "broken", "1", QWEN3, {"blk.0.w": (4, 4)})
+    path.write_text(json.dumps({"layers": [5, {"mediaType": ["x"], "digest": 5}], "config": 5}))
+    removed = ModelStore([root]).remove_owned("untemplated:latest")
+    assert removed and "untemplated:latest" not in ModelStore([root]).names()

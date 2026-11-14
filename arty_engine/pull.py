@@ -1,4 +1,5 @@
 import hashlib
+import http.client
 import json
 import os
 import re
@@ -61,18 +62,27 @@ def _open(url: str, headers: dict | None = None):
     return urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT_SECONDS)
 
 
+def _refusal_of(error: urllib.error.HTTPError, url: str, source: str) -> PullError:
+    if error.code == HTTPStatus.NOT_FOUND:
+        return PullError(f"{source} has no such model: {url} answered 404", HTTPStatus.NOT_FOUND)
+    if error.code == HTTPStatus.UNAUTHORIZED and not os.environ.get("HF_TOKEN"):
+        return PullError(f"{source} has no public model at {url} (it answered 401): the repo is missing, private or gated; "
+                         "for a private or gated repo set HF_TOKEN for the engine", HTTPStatus.NOT_FOUND)
+    if error.code == HTTPStatus.UNAUTHORIZED:
+        return PullError(f"{source} refused the engine's HF_TOKEN for {url} (it answered 401)")
+    return PullError(f"{source} answered {error.code} for {url}")
+
+
 def _get_json(url: str, source: str):
     try:
         with _open(url) as response:
             return json.loads(response.read())
     except urllib.error.HTTPError as error:
-        if error.code == HTTPStatus.NOT_FOUND:
-            raise PullError(f"{source} has no such model: {url} answered 404", HTTPStatus.NOT_FOUND) from error
-        raise PullError(f"{source} answered {error.code} for {url}") from error
-    except (urllib.error.URLError, OSError) as error:
-        raise PullError(f"couldn't read {url} from {source}: {error}") from error
-    except ValueError as error:
-        raise PullError(f"{source} sent {url} as something other than JSON") from error
+        raise _refusal_of(error, url, source) from error
+    except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
+        raise PullError(f"couldn't read {url} from {source}: {error!r:.200}") from error
+    except (ValueError, RecursionError) as error:
+        raise PullError(f"{source} sent {url} as something other than JSON the engine can read") from error
 
 
 def checked_digest(digest, source: str) -> str:
@@ -138,26 +148,30 @@ class Puller:
         self.limiter = RateLimiter(rate_bytes)
         self.short_names = load_short_names() if short_names is None else short_names
 
+    def check(self, name: str) -> None:
+        self._source_of(name)
+
     def pull(self, name: str, progress) -> None:
-        parsed = parse_name(name)
-        if parsed.host == LOCAL_HOST:
-            self._pull_short_name(parsed, progress)
-        elif parsed.host in HF_HOSTS:
-            self._pull_hf(parsed, parsed, progress)
-        else:
-            raise PullError(f"the engine pulls from Hugging Face only: name the model as {HF_NAME_FORM}, not {name}",
-                            HTTPStatus.BAD_REQUEST)
+        source, target = self._source_of(name)
+        if source:
+            self._pull_hf(source, target, progress)
         progress({"status": "success"})
 
-    def _pull_short_name(self, parsed: ModelName, progress) -> None:
-        if parsed.manifest_path(self.root).is_file():
-            return
-        source = self.short_names.get(parsed.display)
+    def _source_of(self, name: str) -> tuple[ModelName | None, ModelName]:
+        target = parse_name(name)
+        if target.host in HF_HOSTS:
+            return target, target
+        if target.host != LOCAL_HOST:
+            raise PullError(f"the engine pulls from Hugging Face only: name the model as {HF_NAME_FORM}, not {name}",
+                            HTTPStatus.BAD_REQUEST)
+        if target.manifest_path(self.root).is_file():
+            return None, target
+        source = self.short_names.get(target.display)
         if not source:
             known = ", ".join(sorted(self.short_names)) or "none"
-            raise PullError(f"{parsed.display} is not one of the engine's short names ({known}); name the model as "
+            raise PullError(f"{target.display} is not one of the engine's short names ({known}); name the model as "
                             f"{HF_NAME_FORM}", HTTPStatus.BAD_REQUEST)
-        self._pull_hf(parse_name(source), parsed, progress)
+        return parse_name(source), target
 
     def _pull_hf(self, parsed: ModelName, target: ModelName, progress) -> None:
         repo = f"{parsed.namespace}/{parsed.model}"
@@ -211,9 +225,9 @@ class Puller:
                         progress({"status": f"pulling {digest[7:19]}", "digest": digest, "total": size, "completed": have})
                         last_report = time.monotonic()
         except urllib.error.HTTPError as error:
-            raise PullError(f"{url} answered {error.code}") from error
-        except (urllib.error.URLError, OSError) as error:
-            raise PullError(f"download of {digest} stopped at {have} bytes: {error}; pull again to resume") from error
+            raise _refusal_of(error, url, HF_SOURCE) from error
+        except (urllib.error.URLError, OSError, http.client.HTTPException) as error:
+            raise PullError(f"download of {digest} stopped at {have} bytes: {error!r:.200}; pull again to resume") from error
         progress({"status": "verifying sha256 digest"})
         if f"sha256:{hasher.hexdigest()}" != digest:
             partial.unlink()
