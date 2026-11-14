@@ -1,5 +1,5 @@
 [Unit]
-Description=Arty engine: Ollama-compatible model server on llama.cpp (reads Ollama's models in place)
+Description=Arty engine: Ollama-compatible model server on llama.cpp
 After=network-online.target
 
 [Service]

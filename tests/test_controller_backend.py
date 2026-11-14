@@ -36,10 +36,14 @@ def test_the_switch_keeps_the_other_controller_settings(tmp_path):
     assert finished.returncode == 0, finished.stderr
     assert json.loads(settings.read_text()) == {"run_folder": RUN_FOLDER,
                                                 "ollama_url": "http://127.0.0.1:11438"}
-    finished, settings, _ = switch(tmp_path, "ollama")
-    assert finished.returncode == 0, finished.stderr
-    assert json.loads(settings.read_text()) == {"run_folder": RUN_FOLDER,
-                                                "ollama_url": "http://127.0.0.1:11434"}
+
+
+def test_the_controller_can_no_longer_be_pointed_at_ollama(tmp_path):
+    (tmp_path / "controller-settings.json").write_text(json.dumps({"ollama_url": "http://127.0.0.1:11438"}))
+    finished, settings, drop_in = switch(tmp_path, "ollama")
+    assert finished.returncode != 0
+    assert json.loads(settings.read_text()) == {"ollama_url": "http://127.0.0.1:11438"}
+    assert not drop_in.exists()
 
 
 def test_a_drop_in_that_reads_another_settings_file_is_not_overwritten(tmp_path):

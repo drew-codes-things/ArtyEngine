@@ -2,8 +2,9 @@
 
 # Arty engine
 
-**An Ollama-compatible model server built on llama.cpp's `llama-server`. It reads the models you already have in
-Ollama's store, keeps them inside a VRAM budget, pulls new ones from Hugging Face, and runs speculative decoding.**
+**An Ollama-compatible model server built on llama.cpp's `llama-server`. It serves models from its own store (or
+reads the ones you already have in Ollama's), keeps them inside a VRAM budget, pulls new ones from Hugging Face and
+ollama.com, and runs speculative decoding.**
 
 [![Python](https://img.shields.io/badge/python-3.10%2B-blue?style=flat-square&logo=python&logoColor=white)](https://www.python.org/)
 [![llama.cpp](https://img.shields.io/badge/llama.cpp-llama--server-000000?style=flat-square)](https://github.com/ggml-org/llama.cpp)
@@ -20,8 +21,9 @@ Arty is a self-hosted assistant that talks to its models through Ollama's API. T
 that API: any client that speaks to Ollama (Arty's brain, the `ollama` CLI with `OLLAMA_HOST`, other apps) can talk
 to the engine instead, without downloading its models again.
 
-- **Reuses Ollama's model store in place.** It reads Ollama's manifests and blobs (read only) and lists the same
-  models with the same names, digests, sizes and capabilities. Nothing is copied or converted.
+- **Its own model store, in Ollama's layout.** The store holds manifests and blobs the way Ollama does, so an
+  Ollama models folder can be moved into it and every model keeps its name, digest, size and capabilities. Nothing
+  is converted, and Ollama itself is not needed. An Ollama store can also be read in place (`model_roots`).
 - **One `llama-server` per model.** Each loaded model runs in its own llama.cpp process on a local port, so a crash
   takes down one model, not the server, and llama.cpp is never built into this repository.
 - **VRAM budget swapping.** Before a model loads, the engine estimates what it needs (weights, KV cache, overhead)
@@ -51,14 +53,15 @@ free memory with `nvidia-smi` when it is there.
 - **A llama.cpp `llama-server` build** from [llama.cpp's releases](https://github.com/ggml-org/llama.cpp/releases).
   The engine was tested with release b12110 built for CUDA 12.8. If the CUDA runtime libraries the build needs
   (`libcudart`, `libcublas`) are not on the system, put them in a folder and list it in `library_path`.
-- **Optional: an Ollama model store** to read from. Ollama itself does not have to be running.
+- **Optional: models you already have in Ollama.** Move its models folder into the engine's store, or read it in
+  place with `model_roots`. Ollama itself does not have to be installed.
 
 ---
 
 ## Install
 
-The defaults expect everything under `/srv/ai/arty-engine` and Ollama's models in `/srv/ai/ollama`, the layout Arty
-uses. Any other folders work; set them in the config.
+The defaults expect everything under `/srv/ai/arty-engine`, with the models in `/srv/ai/arty-engine/models`, the
+layout Arty uses. Any other folders work; set them in the config.
 
 ```bash
 sudo mkdir -p /srv/ai/arty-engine
@@ -73,9 +76,11 @@ sudo cp /srv/ai/arty-engine/src/deploy/engine.json /srv/ai/arty-engine/engine.js
 sudo nano /srv/ai/arty-engine/engine.json
 ```
 
-Set at least `model_roots` to your Ollama store (whatever `OLLAMA_MODELS` points at; Ollama's Linux service keeps
-it in `/usr/share/ollama/.ollama/models` by default), `vram_budget_mb` to a little under your card's memory, and
-remove the `speculative` and `internal_models` entries for models you do not have.
+Set at least `vram_budget_mb` to a little under your card's memory, and remove the `speculative` and
+`internal_models` entries for models you do not have. To use models from Ollama, either move the contents of its
+models folder (whatever `OLLAMA_MODELS` points at; Ollama's Linux service keeps it in
+`/usr/share/ollama/.ollama/models` by default) into `store`, keeping its `blobs` and `manifests` folders, or list that
+folder in `model_roots` to read it in place.
 
 Then install and start the service:
 
@@ -115,8 +120,8 @@ name, or a web app you trust, goes in `allowed_hosts` or `allowed_origins`.
 | Key | Default | What it does |
 |---|---|---|
 | `listen` | `127.0.0.1:11438` | Address and port the API listens on |
-| `store` | `/srv/ai/arty-engine/models` | The engine's own store: pulls go here, and only these models can be deleted |
-| `model_roots` | `["/srv/ai/ollama"]` | Ollama stores read in place, read only |
+| `store` | `/srv/ai/arty-engine/models` | The engine's own store, in Ollama's layout: pulls go here, and only these models can be deleted |
+| `model_roots` | `[]` | Other stores, such as Ollama's, read in place, read only |
 | `llama_server` | `/srv/ai/arty-engine/llama.cpp/current/llama-server` | The `llama-server` binary |
 | `library_path` | `["/srv/ai/arty-engine/cuda-12.8/lib"]` | Folders added to `LD_LIBRARY_PATH` for `llama-server` (its own folder is always added) |
 | `state_dir` | `/srv/ai/arty-engine/state` | Logs of each `llama-server` and borrowed chat templates |
@@ -155,17 +160,17 @@ as an internal model.
 |---|---|
 | `GET /`, `HEAD /` | Answers that the engine is running |
 | `GET /api/version` | The engine's own version |
-| `GET /api/tags` | Every model in the store and the Ollama stores, minus `internal_models` |
+| `GET /api/tags` | Every model in the store and in `model_roots`, minus `internal_models` |
 | `GET /api/ps` | Loaded models, their context and VRAM |
 | `POST /api/show` | Details, parameters, template, capabilities, model info |
 | `POST /api/chat` | Streamed and not; tools; `think` true, false, unset or a level; `format` `"json"` or a JSON schema; images on vision models; `keep_alive`; sampling options; `num_ctx`; `num_gpu: 0` runs on the CPU; `_debug_render_only` renders the prompt only |
 | `POST /api/generate` | Prompts, streamed and not; an empty prompt loads a model, and with `keep_alive: 0` unloads it; `raw` prompts |
 | `POST /api/embed`, `POST /api/embeddings` | Embeddings |
 | `POST /api/pull` | Hugging Face (`hf.co/...`) and ollama.com names, with progress; one pull at a time |
-| `DELETE /api/delete` | Models the engine pulled itself. Ollama's models answer 405 (use `ollama rm`), internal models and deletes during a pull answer 409 |
+| `DELETE /api/delete` | Models in the engine's own store. Models read in place from `model_roots` answer 405, internal models and deletes during a pull answer 409 |
 | `POST /api/generate` with `suffix` | **501** |
 | `POST /api/generate` raw with images or a `format` | **501** |
-| `POST /api/create`, `/api/copy`, `/api/push` | **501**, use Ollama |
+| `POST /api/create`, `/api/copy`, `/api/push` | **501** |
 | Vision models stored in Ollama's own engine format (such as `qwen2.5vl:7b`) | **501**, naming a llama.cpp build with a separate projector to pull instead |
 | Split GGUF files on Hugging Face | Refused by `/api/pull` |
 | Anything else (`/api/blobs`, the `/v1` OpenAI-style routes) | 404 |
@@ -177,11 +182,12 @@ as an internal model.
 Arty's brain, its tool hub and its web chat send their model requests to `OLLAMA_URL`. Pointing that at the engine
 (`http://127.0.0.1:11438`) is the whole switch; `deploy/brain-through-engine.conf` and
 `deploy/tool-hub-through-engine.conf` are the systemd drop-ins for it, and `deploy/arty-backend.env` points Arty's
-`ai-pull` and `ai-models` scripts at the engine. Ollama can stay installed, empty, as the way back.
+`ai-pull` and `ai-models` scripts at the engine. Arty runs without Ollama: its models live in the engine's store.
 
-On a Proxmox install, `tools/host/arty-backend.sh` does the switch in both directions from the host, in an order that
-never leaves two servers on the card: `engine` starts the engine, moves the brain, the tool hub and the web chat's
-route over and loads the main model; `ollama` puts everything back; `status` shows where each part points;
+On a Proxmox install, `tools/host/arty-backend.sh` does the switch from the host, in an order that never leaves two
+servers on the card: `engine` starts the engine, moves the brain, the tool hub and the web chat's route over and
+loads the main model; `ollama` is retired and only says so, since Ollama is no longer installed; `status` shows where
+each part points;
 `settings` prints what it resolved and changes nothing; `engine-config` only rewrites the installed `engine.json`,
 which the engine reads when it next starts. It reads `site.env` from the folder above `src`
 (`/srv/ai/arty-engine/site.env` in the container), copied from `deploy/site.env.example`:
@@ -193,10 +199,11 @@ which the engine reads when it next starts. It reads `site.env` from the folder 
 | `ARTY_CONTROLLER_SETTINGS`, `ARTY_CONTROLLER_PYTHON`, `ARTY_CONTROLLER_CODE` | The controller's settings file, its Python and its code (only with a controller) |
 | `ARTY_CONTROLLER_UNIT`, `ARTY_CONTROLLER_MODULE` | The controller's systemd unit and the Python module it runs (only with a controller) |
 | `ARTY_ENGINE_ALLOWED_HOSTS`, `ARTY_ENGINE_ALLOWED_ORIGINS` | Names, separated by spaces, written into the installed config's `allowed_hosts` and `allowed_origins` (for example the address a reverse proxy passes as `Host`) |
+| `ARTY_ENGINE_MODEL_ROOTS` | Folders, separated by spaces, written into the installed config's `model_roots` (other stores read in place); empty means the engine's own store only |
 | `ARTY_MAIN_MODEL` | The model loaded after a switch, `qwen3:14b` by default |
 
 The script stops before changing anything when a setting it needs is missing. When a controller is set, the switch
-writes it into the installed `engine.json` as `trainer_url`, with the allowed hosts and origins
+writes it into the installed `engine.json` as `trainer_url`, with the allowed hosts and origins and the model roots
 (`tools/write_config.py`).
 
 `tools/container/` holds the bench helpers that run inside the container: `slice.sh` takes the GPU lock, asks the

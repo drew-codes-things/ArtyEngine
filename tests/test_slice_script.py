@@ -92,7 +92,7 @@ def test_a_slice_holds_training_off_from_before_the_unload_until_after_the_reloa
     events = recorder.events
     first_unload = next(index for index, event in enumerate(events) if event[3] and event[3].get("keep_alive") == 0)
     reload = next(index for index, event in enumerate(events)
-                  if event[0] == "ollama" and event[3] and "keep_alive" not in event[3])
+                  if event[0] == "engine" and event[3] and "keep_alive" not in event[3])
     assert events.index(("controller", "POST", "/busy", busy[2])) < first_unload
     assert reload < events.index(("controller", "POST", "/done", done[2]))
     assert not (folder / "gpu-lock").exists()
@@ -175,5 +175,16 @@ def test_a_slice_puts_back_the_main_model_the_site_names(slice_world):
     (folder / "site.env").write_text("ARTY_MAIN_MODEL=mimo-v2.6:9b\n")
     finished = run_slice(environment, "true")
     assert finished.returncode == 0, finished.stdout + finished.stderr
-    reloads = [body for method, path, body in recorder.calls("ollama") if body and "keep_alive" not in body]
+    reloads = [body for method, path, body in recorder.calls("engine") if body and "keep_alive" not in body]
     assert reloads == [{"model": "mimo-v2.6:9b"}]
+
+
+def test_without_an_ollama_port_a_slice_leaves_ollama_alone(slice_world):
+    recorder, environment, folder = slice_world
+    del environment["SLICE_OLLAMA_PORT"]
+    finished = run_slice(environment, "true")
+    assert finished.returncode == 0, finished.stdout + finished.stderr
+    assert recorder.calls("ollama") == []
+    shown = run_slice(environment, "--show-settings")
+    assert "ollama port: (none)" in shown.stdout.splitlines()
+    assert f"reload port: {environment['SLICE_ENGINE_PORT']}" in shown.stdout.splitlines()

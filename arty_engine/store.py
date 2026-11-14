@@ -315,7 +315,7 @@ class ModelStore:
             raise ModelNotFound(f"model '{name}' not found")
         root, path = found
         if root != self.own_root:
-            raise NotOwned(f"{parsed.display} is in Ollama's store ({root}); the engine never changes it, use ollama rm with Ollama running")
+            raise NotOwned(f"{parsed.display} is read in place from {root} (model_roots); the engine never changes that store")
         return path
 
     def remove_owned(self, name: str) -> list[Path]:

@@ -13,16 +13,22 @@ CONTROLLER_UNIT=${ARTY_CONTROLLER_UNIT:-}
 CONTROLLER_MODULE=${ARTY_CONTROLLER_MODULE:-}
 ALLOWED_HOSTS=${ARTY_ENGINE_ALLOWED_HOSTS:-}
 ALLOWED_ORIGINS=${ARTY_ENGINE_ALLOWED_ORIGINS:-}
+MODEL_ROOTS=${ARTY_ENGINE_MODEL_ROOTS:-}
 CONTROLLER_TOOL=$HERE/controller_backend.py
 NO_CONTROLLER=none
 LOCK_OWNER="arty-backend $(date +%s)"
 
 usage() {
-  echo "usage: $0 engine|ollama|status|settings|engine-config" >&2
+  echo "usage: $0 engine|status|settings|engine-config" >&2
   echo "  engine: Arty's brain, tool hub, the web chat's route and the trainer controller use arty-engine (port 11438)" >&2
-  echo "  ollama: all of them go back to Ollama through the GPU gate (port 11436); arty-engine stops" >&2
   echo "  settings: show what $SITE sets, change nothing" >&2
   echo "  engine-config: write the engine's installed engine.json from deploy/ and $SITE; the engine reads it when it next starts" >&2
+  exit 2
+}
+
+refuse_ollama() {
+  echo "Ollama is not installed any more: arty-engine serves every model from its own store, so there is nothing to switch back to." >&2
+  echo "Nothing was changed. To run Ollama again, reinstall it from its install archive first." >&2
   exit 2
 }
 
@@ -65,6 +71,7 @@ show_settings() {
   echo "engine trainer_url: ${url:-(none)}"
   echo "engine allowed hosts: ${ALLOWED_HOSTS:-(none)}"
   echo "engine allowed origins: ${ALLOWED_ORIGINS:-(none)}"
+  echo "engine model roots besides its own store: ${MODEL_ROOTS:-(none)}"
 }
 
 in_ct() {
@@ -97,7 +104,7 @@ repeated_option() {
 }
 
 install_engine_config() {
-  in_ct "python3 /srv/ai/arty-engine/src/tools/write_config.py /srv/ai/arty-engine/src/deploy/engine.json /srv/ai/arty-engine/engine.json --trainer-url '$(trainer_url)'$(repeated_option --allowed-host "$ALLOWED_HOSTS")$(repeated_option --allowed-origin "$ALLOWED_ORIGINS")"
+  in_ct "python3 /srv/ai/arty-engine/src/tools/write_config.py /srv/ai/arty-engine/src/deploy/engine.json /srv/ai/arty-engine/engine.json --trainer-url '$(trainer_url)'$(repeated_option --allowed-host "$ALLOWED_HOSTS")$(repeated_option --allowed-origin "$ALLOWED_ORIGINS")$(repeated_option --model-root "$MODEL_ROOTS")"
 }
 
 start_engine() {
@@ -110,19 +117,12 @@ for attempt in $(seq 1 40); do curl -sf localhost:11438/api/version >/dev/null &
 echo "arty-engine did not answer on 11438" >&2; exit 1'
 }
 
-empty_ollama() {
-  in_ct 'for model in $(curl -s localhost:11434/api/ps | python3 -c "import json,sys; print(\" \".join(m[\"name\"] for m in json.load(sys.stdin)[\"models\"]))"); do
-  curl -s -m 120 localhost:11434/api/generate -d "{\"model\":\"$model\",\"keep_alive\":0}" >/dev/null
-done'
-}
-
 move_ct_to_engine() {
-  empty_ollama
   in_ct 'set -e
 sed -i "s#reverse_proxy 127.0.0.1:11436 #reverse_proxy 127.0.0.1:11438 #" /etc/caddy/Caddyfile
 if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
   sed -i "s#reverse_proxy 127.0.0.1:11438 #reverse_proxy 127.0.0.1:11436 #" /etc/caddy/Caddyfile
-  echo "Caddy refused the change; nothing else moved. Run this script with ollama to put the controller back." >&2
+  echo "Caddy refused the change; nothing else in the container moved. The controller already points at the engine." >&2
   exit 1
 fi
 systemctl reload caddy
@@ -134,23 +134,7 @@ install -m 644 /srv/ai/arty-engine/src/deploy/tool-hub-through-engine.conf /etc/
 install -m 644 /srv/ai/arty-engine/src/deploy/arty-backend.env /etc/default/arty-backend
 systemctl daemon-reload
 systemctl restart tool-hub brain'
-  empty_ollama
   in_ct "curl -s -m 600 localhost:11438/api/generate -d '{\"model\":\"$MAIN_MODEL\",\"keep_alive\":-1}' >/dev/null"
-}
-
-move_ct_to_ollama() {
-  in_ct 'set -e
-sed -i "s#reverse_proxy 127.0.0.1:11438 #reverse_proxy 127.0.0.1:11436 #" /etc/caddy/Caddyfile
-caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || { echo "Caddy refused the Caddyfile; fix it, then run this again" >&2; exit 1; }
-systemctl reload caddy
-rm -f /etc/systemd/system/brain.service.d/brain-through-engine.conf /etc/systemd/system/tool-hub.service.d/tool-hub-through-engine.conf
-rm -f /etc/default/arty-backend
-gate=/etc/systemd/system/brain.service.d/ollama-through-gate.conf
-[ ! -f "$gate.off" ] || mv "$gate.off" "$gate"
-if systemctl list-unit-files arty-engine.service >/dev/null 2>&1; then systemctl disable --now arty-engine; fi
-systemctl daemon-reload
-systemctl restart tool-hub brain'
-  in_ct "curl -s -m 600 localhost:11436/api/generate -d '{\"model\":\"$MAIN_MODEL\",\"keep_alive\":-1}' >/dev/null"
 }
 
 show_controller_status() {
@@ -162,16 +146,16 @@ show_controller_status() {
 show_status() {
   show_controller_status
   in_ct 'echo "brain: $(systemctl show brain -p Environment | grep -o "OLLAMA_URL=[^ ]*")"
-echo "tool hub: $(systemctl show tool-hub -p Environment | grep -o "OLLAMA_URL=[^ ]*" || echo "OLLAMA_URL unset (Ollama 11434)")"
+echo "tool hub: $(systemctl show tool-hub -p Environment | grep -o "OLLAMA_URL=[^ ]*" || echo "OLLAMA_URL unset")"
 echo "starfire route: $(grep -o "reverse_proxy 127.0.0.1:114[0-9]*" /etc/caddy/Caddyfile)"
-echo "ai-pull and friends: $(cat /etc/default/arty-backend 2>/dev/null || echo "Ollama (11434)")"
+echo "ai-pull and friends: $(cat /etc/default/arty-backend 2>/dev/null || echo "OLLAMA_HOST unset")"
 echo "arty-engine: $(systemctl is-active arty-engine 2>/dev/null)"
-echo "ollama holds: $(curl -s localhost:11434/api/ps | python3 -c "import json,sys; print([m[\"name\"] for m in json.load(sys.stdin)[\"models\"]])")"
 echo "engine holds: $(curl -s localhost:11438/api/ps 2>/dev/null | python3 -c "import json,sys; print([m[\"name\"] for m in json.load(sys.stdin)[\"models\"]])" 2>/dev/null || echo "not running")"'
 }
 
 case "${1:-}" in
-  engine|ollama|status|settings|engine-config) check_settings ;;
+  ollama) refuse_ollama ;;
+  engine|status|settings|engine-config) check_settings ;;
   *) usage ;;
 esac
 
@@ -185,12 +169,6 @@ case "$1" in
     start_engine
     point_controller_at engine
     move_ct_to_engine
-    show_status
-    ;;
-  ollama)
-    take_gpu_lock
-    point_controller_at ollama
-    move_ct_to_ollama
     show_status
     ;;
   status) show_status ;;

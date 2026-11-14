@@ -18,6 +18,17 @@ def test_the_shipped_config_names_no_trainer():
     assert json.loads(SHIPPED_CONFIG.read_text())["trainer_url"] == ""
 
 
+def test_the_shipped_config_reads_only_the_engines_own_store():
+    assert json.loads(SHIPPED_CONFIG.read_text())["model_roots"] == []
+
+
+def test_the_site_model_roots_go_into_the_installed_config(tmp_path):
+    target = tmp_path / "engine.json"
+    finished = write(SHIPPED_CONFIG, target, "--trainer-url", "", "--model-root", "/srv/other/models", "--model-root", "/mnt/more")
+    assert finished.returncode == 0, finished.stderr
+    assert json.loads(target.read_text())["model_roots"] == ["/srv/other/models", "/mnt/more"]
+
+
 def test_the_site_trainer_goes_into_the_installed_config(tmp_path):
     target = tmp_path / "engine.json"
     finished = write(SHIPPED_CONFIG, target, "--trainer-url", TRAINER)

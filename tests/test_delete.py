@@ -65,7 +65,7 @@ def test_deleting_a_pulled_model_removes_it_and_only_its_own_blobs(engine):
 def test_ollamas_models_are_left_to_ollama(engine):
     ollama_before = tree_fingerprint(engine.config.roots[1])
     status, body = error_of(lambda: delete(engine.url, "qwen3:14b"))
-    assert status == 405 and "Ollama's store" in body["error"]
+    assert status == 405 and "read in place" in body["error"] and "model_roots" in body["error"]
     assert tree_fingerprint(engine.config.roots[1]) == ollama_before
 
 

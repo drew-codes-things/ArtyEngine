@@ -11,13 +11,15 @@ from arty_engine.config import load_config
 INSTALLED_FILE_MODE = 0o644
 
 
-def site_config(source: Path, trainer_url: str, hosts: list[str], origins: list[str]) -> str:
+def site_config(source: Path, trainer_url: str, hosts: list[str], origins: list[str], roots: list[str]) -> str:
     values = json.loads(source.read_text())
     values["trainer_url"] = trainer_url
     if hosts:
         values["allowed_hosts"] = hosts
     if origins:
         values["allowed_origins"] = origins
+    if roots:
+        values["model_roots"] = roots
     return json.dumps(values, indent=2) + "\n"
 
 
@@ -40,15 +42,16 @@ def main() -> int:
     parser.add_argument("--trainer-url", required=True, help="the trainer controller's address, or an empty string for none")
     parser.add_argument("--allowed-host", action="append", default=[], help="a Host name to serve besides localhost (repeat for more)")
     parser.add_argument("--allowed-origin", action="append", default=[], help="a web page host to serve besides localhost (repeat for more)")
+    parser.add_argument("--model-root", action="append", default=[], help="another model store to read in place, such as Ollama's (repeat for more)")
     arguments = parser.parse_args()
     try:
-        install(site_config(arguments.source, arguments.trainer_url, arguments.allowed_host, arguments.allowed_origin),
-                arguments.target)
+        install(site_config(arguments.source, arguments.trainer_url, arguments.allowed_host, arguments.allowed_origin,
+                            arguments.model_root), arguments.target)
     except (OSError, ValueError) as error:
         print(f"{arguments.target} not changed: {error}", file=sys.stderr)
         return 1
     print(f"{arguments.target}: trainer_url = {arguments.trainer_url or '(none)'}, "
-          f"allowed_hosts = {arguments.allowed_host}, allowed_origins = {arguments.allowed_origin}")
+          f"allowed_hosts = {arguments.allowed_host}, allowed_origins = {arguments.allowed_origin}, model_roots = {arguments.model_root}")
     return 0
 
 

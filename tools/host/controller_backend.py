@@ -5,7 +5,7 @@ import re
 import sys
 from pathlib import Path
 
-BACKEND_URLS = {"engine": "http://127.0.0.1:11438", "ollama": "http://127.0.0.1:11434"}
+BACKEND_URLS = {"engine": "http://127.0.0.1:11438"}
 SYSTEMD_FOLDER = Path("/etc/systemd/system")
 DROP_IN_NAME = "settings.conf"
 UNIT_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9@._-]*")
@@ -75,7 +75,7 @@ def switch(backend: str, settings: Path, drop_in: Path, python: str, module: str
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Point the trainer controller at the engine or at Ollama")
+    parser = argparse.ArgumentParser(description="Point the trainer controller at the engine")
     parser.add_argument("backend", choices=sorted(BACKEND_URLS))
     parser.add_argument("--settings", required=True, help="the controller's JSON settings file")
     parser.add_argument("--unit", required=True, help="the controller's systemd unit, without .service")

@@ -130,3 +130,12 @@ def test_a_manifest_pointing_outside_the_store_is_not_read_or_deleted(tmp_path):
     store.remove_owned("evil:1")
     assert victim.read_text() == "precious"
     assert not path.exists()
+
+
+def test_an_ollama_store_moved_into_the_engines_store_keeps_every_name_and_digest(tmp_path):
+    read_in_place = ModelStore([tmp_path / "own", build_store(tmp_path / "ollama")])
+    before = {model.name: (model.digest, model.size) for model in read_in_place.models()}
+    (tmp_path / "ollama").rename(tmp_path / "moved")
+    own_store_only = ModelStore([tmp_path / "moved"])
+    assert {model.name: (model.digest, model.size) for model in own_store_only.models()} == before
+    assert own_store_only.owned_manifest("qwen3:14b").is_file()

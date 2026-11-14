@@ -12,6 +12,7 @@ ARTY_CONTROLLER_CODE=/opt/trainer/app/controller.py
 ARTY_CONTROLLER_UNIT=trainer-controller
 ARTY_CONTROLLER_MODULE=trainer.controller
 ARTY_ENGINE_ALLOWED_HOSTS="192.0.2.13 arty.lan"
+ARTY_ENGINE_MODEL_ROOTS="/srv/other/models /mnt/more"
 """
 
 
@@ -54,6 +55,7 @@ def test_the_settings_come_from_the_site_file(tmp_path):
     assert "controller module: trainer.controller" in lines
     assert "engine allowed hosts: 192.0.2.13 arty.lan" in lines
     assert "engine allowed origins: (none)" in lines
+    assert "engine model roots besides its own store: /srv/other/models /mnt/more" in lines
     assert calls(tmp_path) == ""
 
 
@@ -71,7 +73,7 @@ def test_nothing_runs_without_a_container(tmp_path):
 
 
 def test_a_controller_needs_its_files_named(tmp_path):
-    finished = run_backend(tmp_path, "ARTY_CT=201\nARTY_CONTROLLER_URL=http://192.0.2.10:8790\n", "ollama")
+    finished = run_backend(tmp_path, "ARTY_CT=201\nARTY_CONTROLLER_URL=http://192.0.2.10:8790\n", "engine")
     assert finished.returncode != 0
     assert "ARTY_CONTROLLER_SETTINGS" in finished.stderr
     assert calls(tmp_path) == ""
@@ -98,3 +100,23 @@ def test_the_engine_config_is_written_with_the_site_values(tmp_path):
     assert "--trainer-url 'http://192.0.2.10:8790'" in written
     assert "--allowed-host '192.0.2.13' --allowed-host 'arty.lan'" in written
     assert "--allowed-origin" not in written
+    assert "--model-root '/srv/other/models' --model-root '/mnt/more'" in written
+
+
+def test_without_model_roots_the_engine_reads_only_its_own_store(tmp_path):
+    finished = run_backend(tmp_path, "ARTY_CT=201\nARTY_CONTROLLER_URL=none\n", "engine-config")
+    assert finished.returncode == 0, finished.stderr
+    assert "--model-root" not in calls(tmp_path)
+
+
+def test_the_ollama_switch_is_retired_and_changes_nothing(tmp_path):
+    finished = run_backend(tmp_path, SITE_WITH_CONTROLLER, "ollama")
+    assert finished.returncode == 2
+    assert "Ollama is not installed" in finished.stderr
+    assert calls(tmp_path) == ""
+
+
+def test_the_status_no_longer_asks_ollama(tmp_path):
+    finished = run_backend(tmp_path, "ARTY_CT=201\nARTY_CONTROLLER_URL=none\n", "status")
+    assert finished.returncode == 0, finished.stderr
+    assert "11434" not in calls(tmp_path) and "ollama holds" not in calls(tmp_path)
