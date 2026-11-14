@@ -6,8 +6,8 @@ import pytest
 from engine_harness import RunningEngine, http_json, stream_chat
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-OLLAMA = json.loads((FIXTURES / "ollama_recorded.json").read_text())
-UPSTREAM = json.loads((FIXTURES / "llama_server_recorded.json").read_text())
+API_RECORDED = json.loads((FIXTURES / "api_recorded.json").read_text())
+UPSTREAM = json.loads((FIXTURES / "runner_recorded.json").read_text())
 
 
 REQUEST_FIELDS = ("messages", "tools", "response_format", "chat_template_kwargs", "max_tokens", "stream")
@@ -40,16 +40,16 @@ def shape(value):
 
 
 @pytest.mark.parametrize("case", ["judge_json", "tool_round", "tool_result", "think_unset"])
-def test_recorded_brain_requests_get_ollamas_reply_shape(engine, case):
-    recorded = OLLAMA[case]
+def test_recorded_brain_requests_get_the_recorded_reply_shape(engine, case):
+    recorded = API_RECORDED[case]
     reply = http_json(f"{engine.url}/api/chat", recorded["request"])
     assert shape(reply) == shape(recorded["reply"])
     sent = engine.upstream_requests()[-1]["body"]
     assert request_part(sent) == request_part(UPSTREAM[case]["body"])
 
 
-def test_recorded_stream_matches_ollamas_chunks(engine):
-    recorded = OLLAMA["no_think_stream"]
+def test_recorded_stream_matches_the_recorded_chunks(engine):
+    recorded = API_RECORDED["no_think_stream"]
     pieces = []
     reply, lines = stream_chat(engine.url, recorded["request"], pieces.append)
     assert reply["message"]["content"] == "The train arrives at **17:15**."
@@ -58,11 +58,11 @@ def test_recorded_stream_matches_ollamas_chunks(engine):
 
 
 def test_tool_call_arguments_come_back_as_objects(engine):
-    reply = http_json(f"{engine.url}/api/chat", OLLAMA["tool_round"]["request"])
+    reply = http_json(f"{engine.url}/api/chat", API_RECORDED["tool_round"]["request"])
     assert reply["message"]["tool_calls"][0]["function"]["arguments"] == {"expression": "12 * 15"}
 
 
-def test_think_unset_returns_thinking_separately_like_ollama(engine):
-    reply = http_json(f"{engine.url}/api/chat", OLLAMA["think_unset"]["request"])
+def test_think_unset_returns_thinking_separately(engine):
+    reply = http_json(f"{engine.url}/api/chat", API_RECORDED["think_unset"]["request"])
     assert reply["message"]["thinking"] and "<think>" not in reply["message"]["content"]
-    assert "thinking" in OLLAMA["think_unset"]["reply"]["message"]
+    assert "thinking" in API_RECORDED["think_unset"]["reply"]["message"]

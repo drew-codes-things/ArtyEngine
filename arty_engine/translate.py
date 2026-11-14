@@ -91,9 +91,9 @@ def merged_options(model_params: dict, request_options: dict | None) -> dict:
 
 def sampling_fields(options: dict) -> dict:
     body = {}
-    for ollama_name, server_name in OPTION_FIELDS.items():
-        if ollama_name in options and options[ollama_name] is not None:
-            body[server_name] = sampling_value(ollama_name, options[ollama_name])
+    for option_name, runner_name in OPTION_FIELDS.items():
+        if option_name in options and options[option_name] is not None:
+            body[runner_name] = sampling_value(option_name, options[option_name])
     predict = options.get("num_predict")
     if predict is not None:
         predict = bounded_whole_number(predict, "num_predict", FILL_CONTEXT, LARGEST_TOKEN_COUNT)
@@ -258,7 +258,7 @@ def parse_arguments(text):
     return value
 
 
-def ollama_tool_calls(calls) -> list[dict]:
+def reply_tool_calls(calls) -> list[dict]:
     converted = []
     for index, call in enumerate(calls or []):
         function = call.get("function") or {}
@@ -291,7 +291,7 @@ def chat_reply(model_name: str, completion: dict, load_seconds: float, started: 
     reply_message = {"role": "assistant", "content": message.get("content") or ""}
     if message.get("reasoning_content"):
         reply_message["thinking"] = message["reasoning_content"]
-    calls = ollama_tool_calls(message.get("tool_calls"))
+    calls = reply_tool_calls(message.get("tool_calls"))
     if calls:
         reply_message["tool_calls"] = calls
     return {"model": model_name, "created_at": now_iso(), "message": reply_message,
@@ -344,7 +344,7 @@ class StreamTranslator:
         out = []
         if self.calls:
             ordered = [self.calls[index] for index in sorted(self.calls)]
-            out.append(self._chunk({"content": "", "tool_calls": ollama_tool_calls(ordered)}))
+            out.append(self._chunk({"content": "", "tool_calls": reply_tool_calls(ordered)}))
         out.append({"model": self.model_name, "created_at": now_iso(), "message": {"role": "assistant", "content": ""},
                     "done_reason": finish_reason(self.finish), "done": True,
                     **timing_fields(self.timings, self.usage, self.load_seconds, time.monotonic() - self.started)})

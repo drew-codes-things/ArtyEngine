@@ -347,7 +347,7 @@ def make_handler(engine: Engine):
             params = "\n".join(f"{key:<30} {json.dumps(value) if not isinstance(value, str) else value}"
                                for key, value in model.params.items())
             self._send_json(200, {"license": model.license, "modelfile": f"FROM {model.model_path}\n", "parameters": params,
-                                  "template": model.ollama_template or model.gguf.chat_template, "system": model.system,
+                                  "template": model.stored_template or model.gguf.chat_template, "system": model.system,
                                   "details": model.details, "model_info": engine.store.gguf_metadata(model),
                                   "capabilities": model.capabilities, "modified_at": iso_time(model.modified_at),
                                   "runnable": model.runnable})
@@ -382,8 +382,8 @@ def make_handler(engine: Engine):
             self.end_headers()
 
         def not_in_engine(self):
-            raise ApiError(501, f"the engine doesn't do {urlsplit(self.path).path} (it pulls from Hugging Face and ollama.com and "
-                                "deletes its own models); use Ollama for creating, copying or pushing models")
+            raise ApiError(501, f"the engine doesn't do {urlsplit(self.path).path}: it pulls models from Hugging Face and "
+                                "deletes its own, and does not create, copy or push models")
 
         def _load_or_unload(self, request: dict, model, keep_alive, generate: bool) -> bool:
             if request.get("messages") or request.get("prompt"):
@@ -573,9 +573,9 @@ def serve(config: Config) -> None:
     host, port = config.listen.rsplit(":", 1)
     server = ThreadingHTTPServer((host, int(port)), make_handler(engine))
     server.daemon_threads = True
-    log.info("arty-engine %s on %s, models from %s, llama-server %s, VRAM budget %d MiB", VERSION, config.listen,
-             ", ".join(str(root) for root in config.roots), config.llama_server, config.vram_budget_mb)
     signal.signal(signal.SIGTERM, exit_on_terminate)
+    log.info("arty-engine %s on %s, models from %s, model runner %s, VRAM budget %d MiB", VERSION, config.listen,
+             ", ".join(str(root) for root in config.roots), config.runner_binary, config.vram_budget_mb)
     try:
         server.serve_forever()
     finally:
@@ -588,7 +588,7 @@ def exit_on_terminate(*_) -> None:
 
 
 def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(description="Ollama-compatible model server on llama.cpp for Arty")
+    parser = argparse.ArgumentParser(description="ArtyEngine, Arty's own model engine")
     parser.add_argument("--config", default=None, help="JSON settings file (default: $ARTY_ENGINE_CONFIG or built-in defaults)")
     parser.add_argument("--listen", default=None, help="host:port to listen on")
     parser.add_argument("--verbose", action="store_true")

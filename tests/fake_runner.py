@@ -3,7 +3,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
-class FakeLlamaServer:
+class FakeRunnerServer:
     def __init__(self, port: int, replies: dict):
         self.replies = replies
         self.requests: list[dict] = []
@@ -56,7 +56,7 @@ class FakeProcess:
         FakeProcess.next_pid += 1
         self.pid = FakeProcess.next_pid
         self.returncode = 1 if fail else None
-        self.server = None if fail else FakeLlamaServer(int(arguments[arguments.index("--port") + 1]), replies)
+        self.server = None if fail else FakeRunnerServer(int(arguments[arguments.index("--port") + 1]), replies)
 
     def poll(self):
         return self.returncode

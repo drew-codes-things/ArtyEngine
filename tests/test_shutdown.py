@@ -14,8 +14,8 @@ START_TIMEOUT_SECONDS = 20
 def test_sigterm_stops_the_engine_through_its_cleanup(tmp_path):
     config = tmp_path / "engine.json"
     config.write_text(json.dumps({"listen": "127.0.0.1:0", "store": str(tmp_path / "own"),
-                                  "model_roots": [str(build_store(tmp_path / "ollama"))],
-                                  "llama_server": "/nonexistent/llama-server", "state_dir": str(tmp_path / "state")}))
+                                  "model_roots": [str(build_store(tmp_path / "other"))],
+                                  "runner_binary": "/nonexistent/server", "state_dir": str(tmp_path / "state")}))
     engine = subprocess.Popen([sys.executable, "-m", "arty_engine", "--config", str(config)], cwd=REPO,
                               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
     try:

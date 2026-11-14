@@ -1,0 +1,7 @@
+{
+  "qwen3:14b": "hf.co/Qwen/Qwen3-14B-GGUF:Q4_K_M",
+  "mimo-v2.6:9b": "hf.co/bartowski/MiMo-V2.6-Distill-Qwen-9B-GGUF:Q4_K_M",
+  "nomic-embed-text:latest": "hf.co/nomic-ai/nomic-embed-text-v1.5-GGUF:F16",
+  "qwen2.5vl:7b": "hf.co/unsloth/Qwen2.5-VL-7B-Instruct-GGUF:Q4_K_M",
+  "qwen2.5:7b": "hf.co/bartowski/Qwen2.5-7B-Instruct-GGUF:Q4_K_M"
+}

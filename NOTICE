@@ -2,14 +2,8 @@ Required Notice: Copyright 2026 The Arty author
 
 Third-party software
 
-llama.cpp (https://github.com/ggml-org/llama.cpp), MIT License, Copyright (c) 2023-2026 The ggml authors.
-arty-engine starts llama.cpp's llama-server for every model it runs. llama.cpp is not copied into this repository;
-it is downloaded separately as an official release build (the deploy used build 12110, version 0.9.0-dev, commit
-cd959bae9), whose LICENSE file ships beside the binaries. The CUDA runtime libraries that build loads are
-NVIDIA's and are not part of this repository.
+llama.cpp (https://github.com/ggml-org/llama.cpp), MIT License, Copyright (c) 2023-2026 The ggml authors: the model runtime binary ArtyEngine starts for each model it runs, downloaded separately as an official release build (the deploy used build 12110) and not copied into this repository.
 
-Ollama (https://github.com/ollama/ollama), MIT License. arty-engine reads model stores written by Ollama and answers
-Ollama's HTTP API; it contains no Ollama code.
+The CUDA runtime libraries that build loads are NVIDIA's and are not part of this repository.
 
-The prompts and answers in tests/fixtures were recorded from Qwen3 models (Apache License 2.0) served by llama.cpp and Ollama.
-No model weights are included.
+The prompts and answers in tests/fixtures were recorded from Qwen3 models (Apache License 2.0). No model weights are included.

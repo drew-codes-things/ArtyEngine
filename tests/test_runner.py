@@ -6,15 +6,15 @@ from arty_engine.config import Config
 from arty_engine.gpu import GpuMemory
 from arty_engine.runner import FOREVER, LoadError, RunnerPool, build_arguments, compact_tool_definitions, kv_cache_mb
 from arty_engine.store import ModelStore
-from fake_llama import FakeLauncher
+from fake_runner import FakeLauncher
 from fake_store import build_store
 
 
 def make_pool(tmp_path, launcher=None, budget=11500, free_mb=12000, **settings):
-    config = Config(store=str(tmp_path / "own"), model_roots=[str(tmp_path / "ollama")], state_dir=str(tmp_path / "state"),
-                    llama_server="/opt/llama/llama-server", vram_budget_mb=budget, load_overhead_mb=100, **settings)
+    config = Config(store=str(tmp_path / "own"), model_roots=[str(tmp_path / "other")], state_dir=str(tmp_path / "state"),
+                    runner_binary="/opt/runtime/server", vram_budget_mb=budget, load_overhead_mb=100, **settings)
     store = ModelStore(config.roots)
-    build_store(tmp_path / "ollama")
+    build_store(tmp_path / "other")
     launcher = launcher or FakeLauncher()
     pool = RunnerPool(config, store, launcher=launcher, memory=lambda: GpuMemory(total_mb=12288, used_mb=12288 - free_mb))
     return pool, store, launcher
@@ -101,7 +101,7 @@ def test_arguments_for_a_chat_model(tmp_path):
     pool, store, _ = make_pool(tmp_path)
     plan = pool.plan(store.get("qwen3:14b"), None)
     arguments = build_arguments(pool.config, plan, 4321)
-    assert arguments[0] == "/opt/llama/llama-server"
+    assert arguments[0] == "/opt/runtime/server"
     for pair in (["--port", "4321"], ["-c", "12288"], ["-ctk", "q8_0"], ["--reasoning-format", "deepseek"], ["-a", "qwen3:14b"]):
         assert arguments[arguments.index(pair[0]) + 1] == pair[1]
     assert "--jinja" in arguments and "--mmproj" not in arguments and "--model-draft" not in arguments
@@ -134,7 +134,7 @@ def test_a_borrowed_template_also_gets_compact_tool_definitions(tmp_path):
     assert plan.template_file.read_text() == compact_tool_definitions(store.get("qwen3:14b").gguf.chat_template)
 
 
-def test_tool_definitions_are_written_without_spaces_as_ollama_writes_them(tmp_path):
+def test_tool_definitions_are_written_without_spaces(tmp_path):
     pool, store, _ = make_pool(tmp_path)
     plan = pool.plan(store.get("qwen3:14b"), None)
     template = plan.template_file.read_text()

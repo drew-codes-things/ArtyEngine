@@ -30,7 +30,7 @@ def engine(tmp_path):
     running.close()
 
 
-def test_tags_lists_models_like_ollama(engine):
+def test_tags_lists_every_model(engine):
     models = http_json(f"{engine.url}/api/tags")["models"]
     assert {model["name"] for model in models} >= {"qwen3:14b", "mimo:9b", "nomic-embed-text:latest"}
     assert all(set(model) == {"name", "model", "modified_at", "size", "digest", "details", "capabilities"} for model in models)
@@ -52,7 +52,7 @@ def test_judge_call_shape(engine):
     assert sent["response_format"] == {"type": "json_object"} and sent["chat_template_kwargs"] == {"enable_thinking": False}
 
 
-def test_tool_round_returns_ollama_tool_calls(engine):
+def test_tool_round_returns_tool_calls_with_object_arguments(engine):
     reply = http_json(f"{engine.url}/api/chat", {"model": "qwen3:14b", "stream": False, "messages": [{"role": "user", "content": "12x15"}],
                                                  "tools": [{"type": "function", "function": {"name": "calculate", "parameters": {}}}]})
     assert reply["message"]["tool_calls"][0]["function"] == {"index": 0, "name": "calculate", "arguments": {"expression": "12*15"}}
@@ -81,15 +81,15 @@ def test_embed_and_legacy_embeddings(engine):
     assert http_json(f"{engine.url}/api/embeddings", {"model": "nomic-embed-text", "prompt": "a"})["embedding"] == [0.0, 0.2]
 
 
-def test_unknown_model_is_404_like_ollama(engine):
+def test_unknown_model_is_404(engine):
     status, body = error_of(lambda: http_json(f"{engine.url}/api/chat", {"model": "nope:1b", "messages": []}))
     assert status == 404 and body == {"error": "model 'nope:1b' not found"}
 
 
-def test_ollama_engine_only_model_says_why(engine):
+def test_an_unsupported_model_says_why(engine):
     status, body = error_of(lambda: http_json(f"{engine.url}/api/chat", {"model": "qwen2.5vl:7b", "stream": False,
                                                                            "messages": [{"role": "user", "content": "hi"}]}))
-    assert status == 501 and "Ollama's own engine format" in body["error"]
+    assert status == 501 and "not supported by ArtyEngine" in body["error"]
 
 
 def test_chatting_with_an_embedding_model_is_refused(engine):
@@ -207,7 +207,7 @@ def test_a_model_name_with_a_trailing_newline_is_not_found(engine):
     assert status == 404
 
 
-def test_upstream_errors_come_back_as_ollama_errors(tmp_path):
+def test_runner_errors_come_back_as_api_errors(tmp_path):
     running = RunningEngine(tmp_path, {"/v1/chat/completions": lambda body: {"error": "the request exceeds the context size", "status": 400}})
     try:
         status, body = error_of(lambda: http_json(f"{running.url}/api/chat", {"model": "qwen3:14b", "stream": False,
@@ -217,7 +217,7 @@ def test_upstream_errors_come_back_as_ollama_errors(tmp_path):
         running.close()
 
 
-def test_delete_never_touches_ollamas_store(engine):
+def test_delete_never_touches_a_store_read_in_place(engine):
     import urllib.request
     request = urllib.request.Request(f"{engine.url}/api/delete", data=b'{"model":"qwen3:14b"}', method="DELETE")
     status, _ = error_of(lambda: urllib.request.urlopen(request))
@@ -238,7 +238,7 @@ def test_cpu_embeddings_skip_the_trainer_and_the_gpu(tmp_path):
         running.close()
 
 
-def test_generate_load_reply_matches_ollama(engine):
+def test_generate_load_reply_has_no_message(engine):
     loaded = http_json(f"{engine.url}/api/generate", {"model": "qwen3:14b"})
     assert loaded["response"] == "" and "message" not in loaded
     chat_loaded = http_json(f"{engine.url}/api/chat", {"model": "qwen3:14b", "messages": []})
@@ -257,6 +257,6 @@ def test_internal_models_stay_out_of_the_model_list_but_still_answer(tmp_path):
         running.close()
 
 
-def test_ollama_engine_only_model_points_at_a_llama_cpp_build(engine):
+def test_an_unsupported_model_points_at_a_build_with_a_projector_file(engine):
     status, body = error_of(lambda: http_json(f"{engine.url}/api/generate", {"model": "qwen2.5vl:7b", "prompt": "hi", "stream": False}))
-    assert status == 501 and "hf.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF:Q4_K_M" in body["error"]
+    assert status == 501 and "projector file from Hugging Face" in body["error"]

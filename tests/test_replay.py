@@ -6,7 +6,7 @@ import pytest
 from engine_harness import RunningEngine, error_of, http_json
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
-RECORDED = json.loads((FIXTURES / "llama_server_raw_recorded.json").read_text())
+RECORDED = json.loads((FIXTURES / "runner_raw_recorded.json").read_text())
 RENDERED = RECORDED["apply_template"]["json"]["prompt"]
 WRITTEN = RECORDED["completion"]["json"]["content"]
 IMAGE_REFUSAL = json.loads(RECORDED["apply_template_image"]["error"])["error"]["message"]
@@ -49,7 +49,7 @@ def upstream(engine, path):
     return [request["body"] for request in engine.upstream_requests() if request["path"] == path]
 
 
-def test_render_only_returns_the_template_llama_server_rendered(engine):
+def test_render_only_returns_the_template_the_runner_rendered(engine):
     shown = http_json(f"{engine.url}/api/chat", {**BRAIN_BODY, "stream": False, "_debug_render_only": True})
     assert shown["_debug_info"] == {"rendered_template": RENDERED}
     assert shown["model"] == "qwen3:14b" and shown["done"] is True
@@ -59,14 +59,14 @@ def test_render_only_returns_the_template_llama_server_rendered(engine):
     assert upstream(engine, "/v1/chat/completions") == []
 
 
-def test_render_only_counts_images_like_ollama(engine):
+def test_render_only_counts_images(engine):
     shown = http_json(f"{engine.url}/api/chat", {"model": "mimo:9b", "stream": False, "_debug_render_only": True,
                                                  "messages": [{"role": "user", "content": "what", "images": ["iVBORw0KGgo="]}]})
     assert shown["_debug_info"] == {"rendered_template": RENDERED, "image_count": 1}
     assert upstream(engine, "/apply-template")[-1]["messages"][0]["content"][1]["type"] == "image_url"
 
 
-def test_render_only_passes_llama_server_refusals_on(engine):
+def test_render_only_passes_runner_refusals_on(engine):
     status, body = error_of(lambda: http_json(f"{engine.url}/api/chat", {"model": "untemplated", "stream": False, "_debug_render_only": True,
                                                                            "messages": [{"role": "user", "content": "hi"}]}))
     assert status == 500 and body["error"] == IMAGE_REFUSAL
@@ -88,7 +88,7 @@ def test_raw_generate_hitting_the_limit_says_length(engine):
     assert reply["done_reason"] == "length"
 
 
-def test_raw_generate_streams_ollama_chunks(engine):
+def test_raw_generate_streams_api_chunks(engine):
     import urllib.request
     request = urllib.request.Request(f"{engine.url}/api/generate", method="POST",
                                      data=json.dumps({"model": "qwen3:14b", "prompt": RENDERED, "raw": True,

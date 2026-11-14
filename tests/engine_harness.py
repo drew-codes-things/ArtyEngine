@@ -9,15 +9,15 @@ from arty_engine.gpu import GpuMemory
 from arty_engine.runner import RunnerPool
 from arty_engine.server import Engine, make_handler
 from arty_engine.store import ModelStore
-from fake_llama import FakeLauncher
+from fake_runner import FakeLauncher
 from fake_store import build_store
 
 
 class RunningEngine:
     def __init__(self, tmp_path, replies: dict, **settings):
-        build_store(tmp_path / "ollama")
-        self.config = Config(store=str(tmp_path / "own"), model_roots=[str(tmp_path / "ollama")], state_dir=str(tmp_path / "state"),
-                             llama_server="/opt/llama/llama-server", load_overhead_mb=100, **settings)
+        build_store(tmp_path / "other")
+        self.config = Config(store=str(tmp_path / "own"), model_roots=[str(tmp_path / "other")], state_dir=str(tmp_path / "state"),
+                             runner_binary="/opt/runtime/server", load_overhead_mb=100, **settings)
         store = ModelStore(self.config.roots)
         self.launcher = FakeLauncher(replies)
         pool = RunnerPool(self.config, store, launcher=self.launcher, memory=lambda: GpuMemory(total_mb=12288, used_mb=0))

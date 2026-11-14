@@ -10,7 +10,7 @@ from fake_store import build_store
 
 @pytest.fixture
 def store(tmp_path):
-    return ModelStore([build_store(tmp_path / "ollama")])
+    return ModelStore([build_store(tmp_path / "other")])
 
 
 @pytest.mark.parametrize("value, expected", [
@@ -112,7 +112,7 @@ def test_tools_on_a_model_without_tool_support_are_refused(store):
         translate.chat_body({"messages": [], "tools": [{"type": "function"}]}, store.get("nomic-embed-text"), stream=False)
 
 
-def test_non_streamed_reply_has_the_ollama_shape():
+def test_non_streamed_reply_has_the_api_shape():
     completion = {"choices": [{"finish_reason": "tool_calls", "message": {"role": "assistant", "content": "", "reasoning_content": "hmm",
                   "tool_calls": [{"id": "abc", "type": "function", "function": {"name": "calculate", "arguments": "{\"expression\": \"12*15\"}"}}]}}],
                   "timings": {"prompt_n": 30, "prompt_ms": 15.5, "predicted_n": 12, "predicted_ms": 240.0}}
@@ -124,7 +124,7 @@ def test_non_streamed_reply_has_the_ollama_shape():
     assert reply["eval_duration"] == 240_000_000 and reply["load_duration"] == 2_500_000_000
 
 
-def test_length_finish_is_reported_like_ollama():
+def test_length_finish_is_reported_as_length():
     reply = translate.chat_reply("m", {"choices": [{"finish_reason": "length", "message": {"content": "cut"}}]}, 0, 0)
     assert reply["done_reason"] == "length"
 
@@ -166,6 +166,6 @@ def test_embed_inputs_accept_text_or_lists():
         translate.embed_inputs({"input": [1]})
 
 
-def test_cached_prompt_tokens_are_counted_like_ollama():
+def test_cached_prompt_tokens_are_counted_in_the_prompt():
     reply = translate.chat_reply("m", {"choices": [{"message": {"content": "x"}}], "timings": {"prompt_n": 12, "cache_n": 150}}, 0, 0)
     assert reply["prompt_eval_count"] == 162 and reply["prompt_eval_cached_count"] == 150

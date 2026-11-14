@@ -6,7 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from arty_engine import pull
-from arty_engine.store import ModelStore
+from arty_engine.store import MANIFEST_MEDIA_TYPE, MODEL_LAYER, ModelStore, parse_name
 from engine_harness import RunningEngine, error_of, http_json
 from gguf_writer import write_gguf
 
@@ -97,6 +97,8 @@ def test_pull_from_hugging_face_lands_in_the_engine_store(tmp_path, fake_hf):
     assert updates[0] == {"status": "pulling manifest"} and updates[-1] == {"status": "success"}
     model = ModelStore([tmp_path / "own"]).get("hf.co/Someone/Tiny-GGUF:Q8_0")
     assert model.model_path.read_bytes() == fake_hf["data"] and model.capabilities == ["completion", "tools"]
+    manifest = json.loads((tmp_path / "own" / "catalog" / "hf.co" / "Someone" / "Tiny-GGUF" / "Q8_0.json").read_text())
+    assert manifest["mediaType"] == MANIFEST_MEDIA_TYPE and [layer["mediaType"] for layer in manifest["layers"]] == [MODEL_LAYER]
 
 
 def test_pull_resumes_a_partial_download(tmp_path, fake_hf):
@@ -164,39 +166,24 @@ def test_the_hugging_face_token_does_not_follow_a_redirect(monkeypatch):
     assert seen == {"hub": "Bearer test-token-value", "cdn": None}
 
 
-@pytest.mark.parametrize("digest", ["../../victim.txt", "sha256:../../victim", "sha256:" + "A" * 64, "sha256:" + "0" * 63])
-def test_a_registry_digest_that_is_not_a_sha256_is_refused(tmp_path, monkeypatch, digest):
+@pytest.mark.parametrize("sha", ["../../victim.txt", "A" * 64, "0" * 63])
+def test_a_hugging_face_sha256_that_is_not_one_is_refused(tmp_path, monkeypatch, sha):
     victim = tmp_path / "victim.txt"
     victim.write_text("precious")
-    manifest = {"schemaVersion": 2, "config": {}, "layers": [{"mediaType": "application/vnd.ollama.image.template", "digest": digest, "size": 8}]}
-
-    class Registry(BaseHTTPRequestHandler):
-        def log_message(self, *args):
-            pass
-
-        def do_GET(self):
-            data = json.dumps(manifest).encode() if "/manifests/" in self.path else b"precious"
-            self.send_response(200)
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
-
-    registry = serve(Registry)
-    monkeypatch.setattr(pull, "OLLAMA_REGISTRY", f"http://127.0.0.1:{registry.server_address[1]}" + "/v2/{namespace}/{model}/{kind}/{reference}")
+    info = {"siblings": [{"rfilename": "M-Q8_0.gguf", "lfs": {"sha256": sha, "size": 8}}]}
+    hub = serve(hub_answering(200, info))
+    point_at(monkeypatch, f"http://127.0.0.1:{hub.server_address[1]}")
     try:
         with pytest.raises(pull.PullError, match="digest"):
-            pull.Puller(tmp_path / "own" / "store", 0).pull("evil:1", lambda update: None)
+            pull.Puller(tmp_path / "own" / "store", 0).pull("hf.co/Someone/M-GGUF:Q8_0", lambda update: None)
     finally:
-        registry.shutdown()
+        hub.shutdown()
     assert victim.read_text() == "precious"
-    assert not (tmp_path / "own" / "store" / "manifests-v2").exists()
+    assert not (tmp_path / "own" / "store" / "catalog").exists()
 
 
-GOOD_DIGEST = "sha256:" + "0" * 64
-
-
-def registry_answering(status: int, payload) -> type:
-    class Registry(BaseHTTPRequestHandler):
+def hub_answering(status: int, payload) -> type:
+    class Hub(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
 
@@ -207,7 +194,12 @@ def registry_answering(status: int, payload) -> type:
             self.end_headers()
             self.wfile.write(data)
 
-    return Registry
+    return Hub
+
+
+def point_at(monkeypatch, base: str) -> None:
+    monkeypatch.setattr(pull, "HF_API", base + "/api/models/{repo}?blobs=true")
+    monkeypatch.setattr(pull, "HF_FILE", base + "/{repo}/resolve/main/{file}")
 
 
 @pytest.fixture
@@ -221,70 +213,112 @@ def pull_answer(engine, model: str):
     return error_of(lambda: http_json(f"{engine.url}/api/pull", {"model": model, "stream": False}))
 
 
-def pull_from_registry(engine, monkeypatch, status: int, payload, model: str = "evil:1"):
-    registry = serve(registry_answering(status, payload))
-    base = f"http://127.0.0.1:{registry.server_address[1]}"
-    monkeypatch.setattr(pull, "OLLAMA_REGISTRY", base + "/v2/{namespace}/{model}/{kind}/{reference}")
-    monkeypatch.setattr(pull, "HF_API", base + "/api/models/{repo}?blobs=true")
-    monkeypatch.setattr(pull, "HF_FILE", base + "/{repo}/resolve/main/{file}")
+def pull_from_hub(engine, monkeypatch, status: int, payload, model: str = "hf.co/Someone/M-GGUF:Q8_0"):
+    hub = serve(hub_answering(status, payload))
+    point_at(monkeypatch, f"http://127.0.0.1:{hub.server_address[1]}")
     try:
         return pull_answer(engine, model)
     finally:
-        registry.shutdown()
+        hub.shutdown()
 
 
-def test_a_bad_blob_digest_from_the_registry_is_a_502_not_a_500(engine, monkeypatch, caplog):
-    manifest = {"schemaVersion": 2, "config": {}, "layers": [{"mediaType": "application/vnd.ollama.image.model", "digest": "../../x", "size": 1}]}
-    status, body = pull_from_registry(engine, monkeypatch, 200, manifest)
+BAD_DIGEST_INFO = {"siblings": [{"rfilename": "M-Q8_0.gguf", "lfs": {"sha256": "../../x", "size": 1}}]}
+
+
+def test_a_bad_blob_digest_from_hugging_face_is_a_502_not_a_500(engine, monkeypatch, caplog):
+    status, body = pull_from_hub(engine, monkeypatch, 200, BAD_DIGEST_INFO)
     assert status == 502
-    assert "registry" in body["error"] and "digest" in body["error"] and "Traceback" not in body["error"]
+    assert "Hugging Face" in body["error"] and "digest" in body["error"] and "Traceback" not in body["error"]
     assert not [record for record in caplog.records if record.exc_info]
 
 
 def test_a_bad_blob_digest_while_streaming_ends_the_stream_with_the_error(engine, monkeypatch):
-    manifest = {"schemaVersion": 2, "config": {}, "layers": [{"mediaType": "application/vnd.ollama.image.model", "digest": "sha256:zz", "size": 1}]}
-    registry = serve(registry_answering(200, manifest))
-    monkeypatch.setattr(pull, "OLLAMA_REGISTRY", f"http://127.0.0.1:{registry.server_address[1]}" + "/v2/{namespace}/{model}/{kind}/{reference}")
+    hub = serve(hub_answering(200, BAD_DIGEST_INFO))
+    point_at(monkeypatch, f"http://127.0.0.1:{hub.server_address[1]}")
     import urllib.request
-    request = urllib.request.Request(f"{engine.url}/api/pull", data=json.dumps({"model": "evil:1"}).encode(), method="POST")
+    request = urllib.request.Request(f"{engine.url}/api/pull", data=json.dumps({"model": "hf.co/Someone/M-GGUF:Q8_0"}).encode(),
+                                     method="POST")
     try:
         with urllib.request.urlopen(request, timeout=30) as response:
             lines = [json.loads(line) for line in response if line.strip()]
     finally:
-        registry.shutdown()
+        hub.shutdown()
     assert "digest" in lines[-1]["error"]
 
 
-def test_a_model_the_registry_does_not_have_is_a_404(engine, monkeypatch):
-    status, body = pull_from_registry(engine, monkeypatch, 404, {"errors": [{"code": "MANIFEST_UNKNOWN"}]}, "nothere:1")
-    assert status == 404 and "nothere" in body["error"]
+def test_a_repo_hugging_face_does_not_have_is_a_404(engine, monkeypatch):
+    status, body = pull_from_hub(engine, monkeypatch, 404, {"error": "Repository not found"}, "hf.co/Someone/Nothere-GGUF:Q8_0")
+    assert status == 404 and "Nothere" in body["error"]
 
 
-@pytest.mark.parametrize("registry_status", [500, 503, 401, 429])
-def test_other_registry_failures_are_a_502(engine, monkeypatch, registry_status):
-    status, body = pull_from_registry(engine, monkeypatch, registry_status, {"errors": []})
-    assert status == 502 and str(registry_status) in body["error"]
+@pytest.mark.parametrize("hub_status", [500, 503, 401, 429])
+def test_other_hugging_face_failures_are_a_502(engine, monkeypatch, hub_status):
+    status, body = pull_from_hub(engine, monkeypatch, hub_status, {"error": "x"})
+    assert status == 502 and str(hub_status) in body["error"]
 
 
-def test_an_unreachable_registry_is_a_502(engine, monkeypatch):
-    monkeypatch.setattr(pull, "OLLAMA_REGISTRY", "http://127.0.0.1:9/v2/{namespace}/{model}/{kind}/{reference}")
-    status, body = pull_answer(engine, "evil:1")
+def test_an_unreachable_hugging_face_is_a_502(engine, monkeypatch):
+    point_at(monkeypatch, "http://127.0.0.1:9")
+    status, body = pull_answer(engine, "hf.co/Someone/M-GGUF:Q8_0")
     assert status == 502 and "couldn't read" in body["error"]
 
 
-def test_an_unknown_registry_host_is_a_400(engine):
+def test_an_unknown_host_is_a_400(engine):
     status, body = pull_answer(engine, "example.invalid/a/b:c")
     assert status == 400 and "example.invalid" in body["error"]
 
 
-@pytest.mark.parametrize("manifest", [
-    b"not json", [], {"layers": "x"}, {"layers": [1]}, {"layers": [{"digest": GOOD_DIGEST, "size": "big"}]},
-    {"layers": [{"digest": 5, "size": 1}]}, {"layers": [], "config": "x"}, {"layers": [{"digest": GOOD_DIGEST, "size": -1}]},
-    {"layers": [{"digest": GOOD_DIGEST, "size": 1e308}]},
-])
-def test_a_registry_manifest_the_engine_cannot_read_is_a_502(engine, monkeypatch, manifest):
-    status, body = pull_from_registry(engine, monkeypatch, 200, manifest)
-    assert status == 502 and "registry" in body["error"]
+@pytest.mark.parametrize("name", ["registry.example/library/qwen3:14b", "example.com/a/b:c"])
+def test_names_from_other_hosts_are_refused_with_the_form_to_use(engine, name):
+    status, body = pull_answer(engine, name)
+    assert status == 400
+    assert "Hugging Face only" in body["error"] and "hf.co/<owner>/<repo>:<quant>" in body["error"] and name in body["error"]
+    assert not (engine.config.roots[0] / "catalog").exists()
+
+
+@pytest.mark.parametrize("name", ["nothere:1", "someone/custom:1"])
+def test_an_unknown_short_name_is_refused_with_the_form_to_use(engine, name):
+    status, body = pull_answer(engine, name)
+    assert status == 400
+    assert "short name" in body["error"] and "hf.co/<owner>/<repo>:<quant>" in body["error"] and name in body["error"]
+    assert not (engine.config.roots[0] / "catalog").exists()
+
+
+def test_a_short_name_is_pulled_from_its_hugging_face_repo_and_keeps_its_name(tmp_path, fake_hf):
+    updates = []
+    puller = pull.Puller(tmp_path / "own", 0, short_names={"tiny:1": "hf.co/Someone/Tiny-GGUF:Q8_0"})
+    puller.pull("tiny:1", updates.append)
+    assert updates[-1] == {"status": "success"}
+    store = ModelStore([tmp_path / "own"])
+    assert store.names() == ["tiny:1"]
+    assert store.get("tiny:1").model_path.read_bytes() == fake_hf["data"]
+    assert store.get("tiny:1").manifest["layers"][0]["from"] == "Tiny-Q8_0.gguf"
+
+
+def test_an_installed_short_name_is_not_downloaded_again(tmp_path, fake_hf):
+    puller = pull.Puller(tmp_path / "own", 0, short_names={"tiny:1": "hf.co/Someone/Tiny-GGUF:Q8_0"})
+    puller.pull("tiny:1", lambda update: None)
+    manifest = (tmp_path / "own" / "catalog" / "local" / "library" / "tiny" / "1.json")
+    before = manifest.read_bytes()
+    fake_hf["ranges"].clear()
+    updates = []
+    puller.pull("tiny:1", updates.append)
+    assert fake_hf["ranges"] == [] and manifest.read_bytes() == before and updates[-1] == {"status": "success"}
+
+
+def test_the_shipped_short_names_point_at_hugging_face_and_cover_what_arty_pulls():
+    names = pull.load_short_names()
+    assert {"qwen3:14b", "mimo-v2.6:9b", "nomic-embed-text:latest"} <= set(names)
+    for short, source in names.items():
+        assert parse_name(short).host == "local" and parse_name(source).host in pull.HF_HOSTS
+        assert parse_name(source).tag != "latest"
+
+
+def test_a_short_name_list_pointing_elsewhere_is_refused(tmp_path):
+    listed = tmp_path / "short_names.json"
+    listed.write_text(json.dumps({"tiny:1": "registry.example/library/tiny:1"}))
+    with pytest.raises(ValueError, match="Hugging Face"):
+        pull.load_short_names(listed)
 
 
 @pytest.mark.parametrize("info", [
@@ -294,13 +328,13 @@ def test_a_registry_manifest_the_engine_cannot_read_is_a_502(engine, monkeypatch
     {"siblings": [{"rfilename": "M-Q8_0.gguf", "lfs": {"sha256": "zz", "size": 1}}]},
 ])
 def test_hugging_face_file_lists_the_engine_cannot_read_are_a_502(engine, monkeypatch, info):
-    status, body = pull_from_registry(engine, monkeypatch, 200, info, "hf.co/Someone/M-GGUF:Q8_0")
+    status, body = pull_from_hub(engine, monkeypatch, 200, info, "hf.co/Someone/M-GGUF:Q8_0")
     assert status == 502 and "Hugging Face" in body["error"]
 
 
 def test_a_quant_the_repo_does_not_have_is_a_404_and_a_split_one_a_501(engine, monkeypatch):
     info = {"siblings": [{"rfilename": "M-Q8_0.gguf"}, {"rfilename": "M-Q2_K-00001-of-00002.gguf"}]}
-    status, body = pull_from_registry(engine, monkeypatch, 200, info, "hf.co/Someone/M-GGUF:Q5_K_M")
+    status, body = pull_from_hub(engine, monkeypatch, 200, info, "hf.co/Someone/M-GGUF:Q5_K_M")
     assert status == 404 and "M-Q8_0.gguf" in body["error"]
-    status, body = pull_from_registry(engine, monkeypatch, 200, info, "hf.co/Someone/M-GGUF:Q2_K")
+    status, body = pull_from_hub(engine, monkeypatch, 200, info, "hf.co/Someone/M-GGUF:Q2_K")
     assert status == 501 and "split" in body["error"]

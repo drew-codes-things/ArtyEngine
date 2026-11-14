@@ -27,7 +27,7 @@ class Config:
     listen: str = "127.0.0.1:11438"
     store: str = "/srv/ai/arty-engine/models"
     model_roots: list = field(default_factory=list)
-    llama_server: str = "/srv/ai/arty-engine/llama.cpp/current/llama-server"
+    runner_binary: str = "/srv/ai/arty-engine/runtime/server"
     library_path: list = field(default_factory=lambda: ["/srv/ai/arty-engine/cuda-12.8/lib"])
     state_dir: str = "/srv/ai/arty-engine/state"
     vram_budget_mb: int = 11500

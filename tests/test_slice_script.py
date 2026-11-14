@@ -58,10 +58,9 @@ def serve(recorder, role):
 @pytest.fixture
 def slice_world(tmp_path):
     recorder = Recorder()
-    servers = {role: serve(recorder, role) for role in ("ollama", "engine", "controller")}
+    servers = {role: serve(recorder, role) for role in ("engine", "controller")}
     environment = {**os.environ,
                    "SLICE_LOCK": str(tmp_path / "gpu-lock"),
-                   "SLICE_OLLAMA_PORT": str(servers["ollama"].server_port),
                    "SLICE_ENGINE_PORT": str(servers["engine"].server_port),
                    "SLICE_CONTROLLER": f"http://127.0.0.1:{servers['controller'].server_port}",
                    "SLICE_WORK_DIR": str(tmp_path),
@@ -103,7 +102,7 @@ def test_a_slice_does_not_run_when_the_controller_does_not_hand_over_the_gpu(sli
     recorder.controller_status = 503
     finished = run_slice(environment, *marker_command(environment))
     assert finished.returncode == 4
-    assert recorder.calls("ollama") == [] and recorder.calls("engine") == []
+    assert recorder.calls("engine") == []
     assert [path for _, path, _ in recorder.calls("controller")] == ["/busy"]
     assert not (folder / "gpu-lock").exists()
 
@@ -179,12 +178,8 @@ def test_a_slice_puts_back_the_main_model_the_site_names(slice_world):
     assert reloads == [{"model": "mimo-v2.6:9b"}]
 
 
-def test_without_an_ollama_port_a_slice_leaves_ollama_alone(slice_world):
+def test_show_settings_names_the_engine_and_reload_ports(slice_world):
     recorder, environment, folder = slice_world
-    del environment["SLICE_OLLAMA_PORT"]
-    finished = run_slice(environment, "true")
-    assert finished.returncode == 0, finished.stdout + finished.stderr
-    assert recorder.calls("ollama") == []
     shown = run_slice(environment, "--show-settings")
-    assert "ollama port: (none)" in shown.stdout.splitlines()
+    assert f"engine port: {environment['SLICE_ENGINE_PORT']}" in shown.stdout.splitlines()
     assert f"reload port: {environment['SLICE_ENGINE_PORT']}" in shown.stdout.splitlines()

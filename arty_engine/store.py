@@ -7,22 +7,23 @@ from pathlib import Path
 
 from .gguf import GgufError, GgufInfo, plain_metadata, read_gguf
 
-DEFAULT_HOST = "ollama.com"
-LEGACY_HOST = "registry.ollama.ai"
+LOCAL_HOST = "local"
 DEFAULT_NAMESPACE = "library"
 DEFAULT_TAG = "latest"
-MANIFEST_DIRS = ("manifests-v2", "manifests")
-MODEL_LAYER = "application/vnd.ollama.image.model"
-PROJECTOR_LAYER = "application/vnd.ollama.image.projector"
-TEMPLATE_LAYER = "application/vnd.ollama.image.template"
-SYSTEM_LAYER = "application/vnd.ollama.image.system"
-PARAMS_LAYER = "application/vnd.ollama.image.params"
-LICENSE_LAYER = "application/vnd.ollama.image.license"
-MANIFEST_LIST = "application/vnd.ollama.manifest.list.v2+json"
-PREFERRED_RUNNERS = ("llamacpp", "ggml", "")
+CATALOG_FOLDER = "catalog"
+MANIFEST_SUFFIX = ".json"
+SCHEMA_VERSION = 1
+MEDIA_PREFIX = "application/vnd.arty-engine."
+MANIFEST_MEDIA_TYPE = f"{MEDIA_PREFIX}manifest.v1+json"
+CONFIG_MEDIA_TYPE = f"{MEDIA_PREFIX}config"
+MODEL_LAYER = f"{MEDIA_PREFIX}model"
+PROJECTOR_LAYER = f"{MEDIA_PREFIX}projector"
+TEMPLATE_LAYER = f"{MEDIA_PREFIX}template"
+SYSTEM_LAYER = f"{MEDIA_PREFIX}system"
+PARAMS_LAYER = f"{MEDIA_PREFIX}params"
+LICENSE_LAYER = f"{MEDIA_PREFIX}license"
 EMBEDDING_ARCHITECTURES = {"bert", "nomic-bert", "nomic-bert-moe", "jina-bert-v2", "jina-bert-v3", "modern-bert", "neo-bert"}
-OLLAMA_ONLY_ARCHITECTURES = {"qwen25vl"}
-LLAMA_CPP_BUILDS = {"qwen25vl": "hf.co/ggml-org/Qwen2.5-VL-7B-Instruct-GGUF:Q4_K_M"}
+UNSUPPORTED_ARCHITECTURES = {"qwen25vl"}
 MILLION = 1_000_000
 BILLION = 1_000_000_000
 TEN_BILLION = 10 * BILLION
@@ -55,13 +56,14 @@ class ModelName:
 
     @property
     def display(self) -> str:
-        if self.host in (DEFAULT_HOST, LEGACY_HOST) and self.namespace == DEFAULT_NAMESPACE:
+        if self.host != LOCAL_HOST:
+            return f"{self.host}/{self.namespace}/{self.model}:{self.tag}"
+        if self.namespace == DEFAULT_NAMESPACE:
             return f"{self.model}:{self.tag}"
-        return f"{self.host}/{self.namespace}/{self.model}:{self.tag}"
+        return f"{self.namespace}/{self.model}:{self.tag}"
 
-    def manifest_paths(self, root: Path) -> list[Path]:
-        hosts = (DEFAULT_HOST, LEGACY_HOST) if self.host in (DEFAULT_HOST, LEGACY_HOST) else (self.host,)
-        return [root / folder / host / self.namespace / self.model / self.tag for folder in MANIFEST_DIRS for host in hosts]
+    def manifest_path(self, root: Path) -> Path:
+        return root / CATALOG_FOLDER / self.host / self.namespace / self.model / f"{self.tag}{MANIFEST_SUFFIX}"
 
 
 def parse_name(name: str) -> ModelName:
@@ -72,9 +74,9 @@ def parse_name(name: str) -> ModelName:
     if any(part in PATH_STEPS or len(part) > LONGEST_FILE_NAME for part in (*parts, tag)):
         raise ModelNotFound(f"invalid model name {name!r}")
     if len(parts) == 1:
-        return ModelName(DEFAULT_HOST, DEFAULT_NAMESPACE, parts[0].lower(), tag or DEFAULT_TAG)
+        return ModelName(LOCAL_HOST, DEFAULT_NAMESPACE, parts[0].lower(), tag or DEFAULT_TAG)
     if len(parts) == 2:
-        return ModelName(DEFAULT_HOST, parts[0].lower(), parts[1].lower(), tag or DEFAULT_TAG)
+        return ModelName(LOCAL_HOST, parts[0].lower(), parts[1].lower(), tag or DEFAULT_TAG)
     if len(parts) == 3:
         return ModelName(parts[0].lower(), parts[1], parts[2], tag or DEFAULT_TAG)
     raise ModelNotFound(f"invalid model name {name!r}")
@@ -95,8 +97,8 @@ class Model:
     params: dict = field(default_factory=dict)
     system: str = ""
     license: str = ""
-    ollama_template: str = ""
-    ollama_config: dict = field(default_factory=dict)
+    stored_template: str = ""
+    stored_config: dict = field(default_factory=dict)
 
     @property
     def architecture(self) -> str:
@@ -108,16 +110,15 @@ class Model:
 
     @property
     def runnable(self) -> bool:
-        return self.architecture not in OLLAMA_ONLY_ARCHITECTURES and not (self.gguf.has_inline_vision and not self.projector_path)
+        return self.architecture not in UNSUPPORTED_ARCHITECTURES and not (self.gguf.has_inline_vision and not self.projector_path)
 
     @property
     def unrunnable_reason(self) -> str:
         if self.runnable:
             return ""
-        reason = (f"{self.name} is stored in Ollama's own engine format ({self.architecture} with the vision weights inside "
-                  "the model file); llama.cpp needs the text model and a separate projector")
-        build = LLAMA_CPP_BUILDS.get(self.architecture)
-        return f"{reason}. Use a llama.cpp build with its projector instead, such as {build} (ai-pull {build})" if build else reason
+        return (f"{self.name} is not supported by ArtyEngine: its model file ({self.architecture}) keeps the vision weights "
+                "inside it, and the engine needs the text model and a separate projector file. Pull a build of the model "
+                "that ships a projector file from Hugging Face instead")
 
     @property
     def capabilities(self) -> list[str]:
@@ -126,7 +127,7 @@ class Model:
         found = ["completion"]
         if self.projector_path or self.gguf.has_inline_vision:
             found.append("vision")
-        template = self.gguf.chat_template or self.ollama_template
+        template = self.gguf.chat_template or self.stored_template
         if "tools" in template or ".Tools" in template:
             found.append("tools")
         if "think" in template or ".Think" in template:
@@ -147,7 +148,7 @@ class Model:
             "format": "gguf",
             "family": self.architecture,
             "families": [self.architecture],
-            "parameter_size": self.ollama_config.get("model_type") or parameter_size(self.gguf.parameter_count),
+            "parameter_size": self.stored_config.get("model_type") or parameter_size(self.gguf.parameter_count),
             "quantization_level": FILE_TYPE_NAMES.get(file_type, str(file_type) if file_type is not None else ""),
         }
 
@@ -203,23 +204,10 @@ class ModelStore:
 
     def _locate(self, name: ModelName) -> tuple[Path, Path] | None:
         for root in self.roots:
-            for path in name.manifest_paths(root):
-                if path.is_file():
-                    return root, path
+            path = name.manifest_path(root)
+            if path.is_file():
+                return root, path
         return None
-
-    def _resolve_manifest(self, root: Path, path: Path) -> tuple[dict, str]:
-        manifest = _read_json(path)
-        digest = path.resolve().name.removeprefix("sha256-") if path.is_symlink() else _sha256_of(path)
-        if manifest.get("mediaType") != MANIFEST_LIST:
-            return manifest, digest
-        entries = [entry for entry in manifest.get("manifests", []) if entry.get("format") == "gguf"]
-        entries.sort(key=lambda entry: PREFERRED_RUNNERS.index(entry.get("runner", "")) if entry.get("runner", "") in PREFERRED_RUNNERS
-                     else len(PREFERRED_RUNNERS))
-        if not entries:
-            raise ModelNotFound(f"{path} lists no GGUF build")
-        chosen = entries[0]["digest"]
-        return _read_json(blob_path(root, chosen)), chosen.removeprefix("sha256:")
 
     def get(self, name: str) -> Model:
         parsed = parse_name(name)
@@ -227,17 +215,19 @@ class ModelStore:
         if not found:
             raise ModelNotFound(f"model '{name}' not found")
         root, path = found
-        manifest, digest = self._resolve_manifest(root, path)
+        manifest = _read_json(path)
+        if not isinstance(manifest, dict) or manifest.get("mediaType") != MANIFEST_MEDIA_TYPE:
+            raise ModelNotFound(f"{path} is not an ArtyEngine manifest")
         layers = {layer.get("mediaType"): layer for layer in manifest.get("layers", [])}
         if MODEL_LAYER not in layers:
             raise ModelNotFound(f"model '{name}' has no model layer")
         model_path = blob_path(root, layers[MODEL_LAYER]["digest"])
         projector = layers.get(PROJECTOR_LAYER)
+        config = manifest.get("config") or {}
         model = Model(
-            name=parsed.display, root=root, digest=digest, manifest=manifest,
-            modified_at=datetime.fromtimestamp(path.lstat().st_mtime, tz=timezone.utc),
-            size=sum(int(layer.get("size", 0)) for layer in manifest.get("layers", []) if layer.get("mediaType", "").startswith("application/vnd.ollama.image"))
-            + int(manifest.get("config", {}).get("size", 0)),
+            name=parsed.display, root=root, digest=_sha256_of(path), manifest=manifest,
+            modified_at=datetime.fromtimestamp(path.stat().st_mtime, tz=timezone.utc),
+            size=sum(int(layer.get("size", 0)) for layer in manifest.get("layers", [])) + int(config.get("size", 0)),
             model_path=model_path,
             projector_path=blob_path(root, projector["digest"]) if projector else None,
             template_digest=layers.get(TEMPLATE_LAYER, {}).get("digest", ""),
@@ -246,8 +236,8 @@ class ModelStore:
         model.params = self._layer_json(root, layers.get(PARAMS_LAYER))
         model.system = self._layer_text(root, layers.get(SYSTEM_LAYER))
         model.license = self._layer_text(root, layers.get(LICENSE_LAYER))
-        model.ollama_template = self._layer_text(root, layers.get(TEMPLATE_LAYER))
-        model.ollama_config = self._config_json(root, manifest.get("config"))
+        model.stored_template = self._layer_text(root, layers.get(TEMPLATE_LAYER))
+        model.stored_config = self._config_json(root, config)
         return model
 
     @staticmethod
@@ -272,16 +262,10 @@ class ModelStore:
     def names(self) -> list[str]:
         found = []
         for root in self.roots:
-            for folder in MANIFEST_DIRS:
-                base = root / folder
-                if not base.is_dir():
-                    continue
-                for path in sorted(base.glob("*/*/*/*")):
-                    if path.is_file():
-                        host, namespace, model, tag = path.relative_to(base).parts
-                        display = ModelName(host, namespace, model, tag).display
-                        if display not in found:
-                            found.append(display)
+            for path in _manifest_files(root):
+                display = name_of_manifest(root, path).display
+                if display not in found:
+                    found.append(display)
         return found
 
     def models(self) -> list[Model]:
@@ -324,22 +308,15 @@ class ModelStore:
         candidates = self._blobs_of(root, path)
         path.unlink()
         self._prune_empty_folders(root, path.parent)
-        still_used = set().union(*(self._blobs_of(root, other) for other in self._manifest_files(root)))
+        still_used = set().union(*(self._blobs_of(root, other) for other in _manifest_files(root)))
         removed = [blob for blob in sorted(candidates - still_used) if blob.is_file()]
         for blob in removed:
             blob.unlink()
         return removed
 
-    @staticmethod
-    def _manifest_files(root: Path) -> list[Path]:
-        return [path for folder in MANIFEST_DIRS if (root / folder).is_dir() for path in (root / folder).glob("*/*/*/*") if path.is_file()]
-
     def _blobs_of(self, root: Path, path: Path) -> set[Path]:
-        blobs = {path.resolve()} if path.is_symlink() else set()
         manifest = _read_json(path)
-        for entry in manifest.get("manifests", []):
-            if is_digest(entry.get("digest")) and (listed := blob_path(root, entry["digest"])).is_file():
-                blobs |= {listed} | self._blobs_of(root, listed)
+        blobs = set()
         for layer in manifest.get("layers", []) + [manifest.get("config") or {}]:
             if is_digest(layer.get("digest")):
                 blobs.add(blob_path(root, layer["digest"]))
@@ -347,7 +324,35 @@ class ModelStore:
 
     @staticmethod
     def _prune_empty_folders(root: Path, folder: Path) -> None:
-        stops = {root / name for name in MANIFEST_DIRS}
-        while folder not in stops and folder.is_dir() and not any(folder.iterdir()):
+        stop = root / CATALOG_FOLDER
+        while folder != stop and folder.is_dir() and not any(folder.iterdir()):
             folder.rmdir()
             folder = folder.parent
+
+
+def _manifest_files(root: Path) -> list[Path]:
+    catalog = root / CATALOG_FOLDER
+    if not catalog.is_dir():
+        return []
+    return sorted(path for path in catalog.glob(f"*/*/*/*{MANIFEST_SUFFIX}") if path.is_file())
+
+
+def name_of_manifest(root: Path, path: Path) -> ModelName:
+    host, namespace, model, file_name = path.relative_to(root / CATALOG_FOLDER).parts
+    return ModelName(host, namespace, model, file_name.removesuffix(MANIFEST_SUFFIX))
+
+
+def engine_manifest(layers: list[dict], config: dict | None = None) -> dict:
+    manifest = {"schemaVersion": SCHEMA_VERSION, "mediaType": MANIFEST_MEDIA_TYPE, "layers": layers}
+    if config:
+        manifest["config"] = config
+    return manifest
+
+
+def write_manifest(root: Path, name: ModelName, manifest: dict) -> Path:
+    path = name.manifest_path(root)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".partial")
+    temporary.write_text(json.dumps(manifest))
+    temporary.replace(path)
+    return path

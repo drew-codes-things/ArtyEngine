@@ -26,12 +26,6 @@ usage() {
   exit 2
 }
 
-refuse_ollama() {
-  echo "Ollama is not installed any more: arty-engine serves every model from its own store, so there is nothing to switch back to." >&2
-  echo "Nothing was changed. To run Ollama again, reinstall it from its install archive first." >&2
-  exit 2
-}
-
 require() {
   [ -n "$2" ] || { echo "set $1 in $SITE ($3); nothing was changed" >&2; exit 2; }
 }
@@ -126,8 +120,6 @@ if ! caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null
   exit 1
 fi
 systemctl reload caddy
-gate=/etc/systemd/system/brain.service.d/ollama-through-gate.conf
-[ ! -f "$gate" ] || mv "$gate" "$gate.off"
 install -d /etc/systemd/system/tool-hub.service.d
 install -m 644 /srv/ai/arty-engine/src/deploy/brain-through-engine.conf /etc/systemd/system/brain.service.d/brain-through-engine.conf
 install -m 644 /srv/ai/arty-engine/src/deploy/tool-hub-through-engine.conf /etc/systemd/system/tool-hub.service.d/tool-hub-through-engine.conf
@@ -139,22 +131,21 @@ systemctl restart tool-hub brain'
 
 show_controller_status() {
   has_controller || { echo "controller: none"; return 0; }
-  echo "controller: $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("ollama_url", "default (Ollama)"))' "$CONTROLLER_SETTINGS" 2>/dev/null || echo 'default (Ollama)')"
+  echo "controller: $(python3 -c 'import json,sys; print(json.load(open(sys.argv[1])).get("arty_engine_url", "its default"))' "$CONTROLLER_SETTINGS" 2>/dev/null || echo 'its default')"
   echo "controller status: $(curl -s -m 5 "$CONTROLLER_URL/status" | head -c 200)"
 }
 
 show_status() {
   show_controller_status
-  in_ct 'echo "brain: $(systemctl show brain -p Environment | grep -o "OLLAMA_URL=[^ ]*")"
-echo "tool hub: $(systemctl show tool-hub -p Environment | grep -o "OLLAMA_URL=[^ ]*" || echo "OLLAMA_URL unset")"
+  in_ct 'echo "brain: $(systemctl show brain -p Environment | grep -o "ARTY_ENGINE_URL=[^ ]*" || echo "ARTY_ENGINE_URL unset")"
+echo "tool hub: $(systemctl show tool-hub -p Environment | grep -o "ARTY_ENGINE_URL=[^ ]*" || echo "ARTY_ENGINE_URL unset")"
 echo "starfire route: $(grep -o "reverse_proxy 127.0.0.1:114[0-9]*" /etc/caddy/Caddyfile)"
-echo "ai-pull and friends: $(cat /etc/default/arty-backend 2>/dev/null || echo "OLLAMA_HOST unset")"
+echo "ai-pull and friends: $(cat /etc/default/arty-backend 2>/dev/null || echo "ARTY_ENGINE_URL unset")"
 echo "arty-engine: $(systemctl is-active arty-engine 2>/dev/null)"
 echo "engine holds: $(curl -s localhost:11438/api/ps 2>/dev/null | python3 -c "import json,sys; print([m[\"name\"] for m in json.load(sys.stdin)[\"models\"]])" 2>/dev/null || echo "not running")"'
 }
 
 case "${1:-}" in
-  ollama) refuse_ollama ;;
   engine|status|settings|engine-config) check_settings ;;
   *) usage ;;
 esac

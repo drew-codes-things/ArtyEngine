@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 BACKEND_URLS = {"engine": "http://127.0.0.1:11438"}
+ENGINE_URL_SETTING = "arty_engine_url"
 SYSTEMD_FOLDER = Path("/etc/systemd/system")
 DROP_IN_NAME = "settings.conf"
 UNIT_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9@._-]*")
@@ -65,9 +66,9 @@ def check_drop_in(drop_in: Path, settings: Path) -> bool:
 def switch(backend: str, settings: Path, drop_in: Path, python: str, module: str) -> list[str]:
     values = read_settings(settings)
     drop_in_present = check_drop_in(drop_in, settings)
-    values["ollama_url"] = BACKEND_URLS[backend]
+    values[ENGINE_URL_SETTING] = BACKEND_URLS[backend]
     write_atomically(settings, json.dumps(values, indent=2) + "\n")
-    done = [f"{settings}: ollama_url = {values['ollama_url']}"]
+    done = [f"{settings}: {ENGINE_URL_SETTING} = {values[ENGINE_URL_SETTING]}"]
     if not drop_in_present:
         write_atomically(drop_in, drop_in_text(python, module, settings))
         done.append(f"{drop_in}: controller now reads {settings}")

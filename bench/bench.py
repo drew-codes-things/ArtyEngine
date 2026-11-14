@@ -331,8 +331,8 @@ def stop_file_appeared(stop_file: str) -> bool:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Side-by-side benchmark of an Ollama-compatible server for Arty")
-    parser.add_argument("base", help="for example http://127.0.0.1:11434")
+    parser = argparse.ArgumentParser(description="Benchmark of a model server for Arty that speaks the engine's HTTP API")
+    parser.add_argument("base", help="for example http://127.0.0.1:11438")
     parser.add_argument("label")
     parser.add_argument("--parts", default="speed,chat,code,vision")
     parser.add_argument("--model", default="qwen3:14b")

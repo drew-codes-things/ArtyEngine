@@ -25,7 +25,7 @@ def switch(tmp_path, backend):
 def test_the_engine_switch_points_the_controller_at_the_engine(tmp_path):
     finished, settings, drop_in = switch(tmp_path, "engine")
     assert finished.returncode == 0, finished.stderr
-    assert json.loads(settings.read_text()) == {"ollama_url": "http://127.0.0.1:11438"}
+    assert json.loads(settings.read_text()) == {"arty_engine_url": "http://127.0.0.1:11438"}
     assert drop_in.read_text() == f"[Service]\nExecStart=\nExecStart={PYTHON} -m {MODULE} --settings {settings}\n"
     assert f"systemctl restart {UNIT}" in finished.stdout
 
@@ -35,14 +35,14 @@ def test_the_switch_keeps_the_other_controller_settings(tmp_path):
     finished, settings, _ = switch(tmp_path, "engine")
     assert finished.returncode == 0, finished.stderr
     assert json.loads(settings.read_text()) == {"run_folder": RUN_FOLDER,
-                                                "ollama_url": "http://127.0.0.1:11438"}
+                                                "arty_engine_url": "http://127.0.0.1:11438"}
 
 
-def test_the_controller_can_no_longer_be_pointed_at_ollama(tmp_path):
-    (tmp_path / "controller-settings.json").write_text(json.dumps({"ollama_url": "http://127.0.0.1:11438"}))
-    finished, settings, drop_in = switch(tmp_path, "ollama")
+def test_only_the_engine_is_a_backend(tmp_path):
+    (tmp_path / "controller-settings.json").write_text(json.dumps({"arty_engine_url": "http://127.0.0.1:11438"}))
+    finished, settings, drop_in = switch(tmp_path, "elsewhere")
     assert finished.returncode != 0
-    assert json.loads(settings.read_text()) == {"ollama_url": "http://127.0.0.1:11438"}
+    assert json.loads(settings.read_text()) == {"arty_engine_url": "http://127.0.0.1:11438"}
     assert not drop_in.exists()
 
 

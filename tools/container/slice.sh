@@ -3,7 +3,6 @@ set -u
 SITE=${ARTY_ENGINE_SITE:-/srv/ai/arty-engine/site.env}
 [ ! -f "$SITE" ] || . "$SITE"
 LOCK=${SLICE_LOCK:-/root/gpu-lock}
-OLLAMA_PORT=${SLICE_OLLAMA_PORT:-}
 ENGINE_PORT=${SLICE_ENGINE_PORT:-11438}
 RELOAD_PORT=${SLICE_RELOAD_PORT:-$ENGINE_PORT}
 CONTROLLER=${SLICE_CONTROLLER:-${ARTY_CONTROLLER_URL:-}}
@@ -18,8 +17,8 @@ if [ -z "$CONTROLLER" ]; then
   exit $NOT_CONFIGURED
 fi
 if [ "${1:-}" = --show-settings ]; then
-  printf 'site: %s\ncontroller: %s\nlock: %s\nollama port: %s\nengine port: %s\nreload port: %s\nwork dir: %s\nmain model: %s\n' \
-    "$SITE" "$CONTROLLER" "$LOCK" "${OLLAMA_PORT:-(none)}" "$ENGINE_PORT" "$RELOAD_PORT" "$WORK_DIR" "$MAIN_MODEL"
+  printf 'site: %s\ncontroller: %s\nlock: %s\nengine port: %s\nreload port: %s\nwork dir: %s\nmain model: %s\n' \
+    "$SITE" "$CONTROLLER" "$LOCK" "$ENGINE_PORT" "$RELOAD_PORT" "$WORK_DIR" "$MAIN_MODEL"
   exit 0
 fi
 if ! ( set -o noclobber; echo "arty-engine $(date +%s)" > $LOCK ) 2>/dev/null; then exit 3; fi
@@ -57,10 +56,6 @@ if ! answer=$(tell_controller busy); then
 fi
 trap release EXIT
 echo "took lock at $(date +%s) (controller /busy: $answer)"
-if [ -n "$OLLAMA_PORT" ]; then
-  echo "ollama before: $(curl -s localhost:$OLLAMA_PORT/api/ps | head -c 300)"
-  unload $OLLAMA_PORT
-fi
 unload $ENGINE_PORT
 sleep 3
 cd $WORK_DIR

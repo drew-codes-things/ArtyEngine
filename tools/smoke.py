@@ -56,7 +56,7 @@ def cases(model: str, vision_model: str, embed_model: str, image: str) -> list[t
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Send brain-shaped requests to an Ollama-compatible server and save what came back")
+    parser = argparse.ArgumentParser(description="Send brain-shaped requests to the engine's HTTP API and save what came back")
     parser.add_argument("base")
     parser.add_argument("output")
     parser.add_argument("--model", default="qwen3:14b")

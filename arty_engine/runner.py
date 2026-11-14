@@ -147,7 +147,7 @@ class Runner:
 
 def build_arguments(config: Config, plan: LaunchPlan, port: int) -> list[str]:
     model = plan.model
-    arguments = [config.llama_server, "--model", str(model.model_path), "--host", "127.0.0.1", "--port", str(port),
+    arguments = [config.runner_binary, "--model", str(model.model_path), "--host", "127.0.0.1", "--port", str(port),
                  "--no-webui", "--offline", "-c", str(plan.ctx), "-np", str(config.parallel), "-a", model.name,
                  "--fit-target", str(config.fit_target_mb), "--no-warmup"]
     if plan.cpu_only:
@@ -337,7 +337,7 @@ class RunnerPool:
                 if not idle and not on_card:
                     if not fits_card:
                         log.warning("%s needs ~%d MiB but only %d MiB is free on the card (used by other programs); "
-                                    "llama.cpp will fit what it can", for_name, needed_mb, card.free_mb)
+                                    "the model runner will fit what it can", for_name, needed_mb, card.free_mb)
                     return
                 if not idle:
                     if time.monotonic() > deadline:
@@ -356,7 +356,7 @@ class RunnerPool:
         logs = self.state_dir / "logs"
         logs.mkdir(parents=True, exist_ok=True)
         log_path = logs / f"{plan.model.name.replace('/', '_').replace(':', '_')}.log"
-        environment = {**os.environ, "LD_LIBRARY_PATH": ":".join(self.config.library_path + [str(Path(self.config.llama_server).parent)])}
+        environment = {**os.environ, "LD_LIBRARY_PATH": ":".join(self.config.library_path + [str(Path(self.config.runner_binary).resolve().parent)])}
         if plan.cpu_only:
             environment["CUDA_VISIBLE_DEVICES"] = ""
         started = time.monotonic()
@@ -377,7 +377,7 @@ class RunnerPool:
         deadline = time.monotonic() + self.config.load_timeout_seconds
         while time.monotonic() < deadline:
             if runner.process.poll() is not None:
-                raise LoadError(f"llama-server for {runner.name} exited with {runner.process.returncode} while loading: "
+                raise LoadError(f"the model runner for {runner.name} exited with {runner.process.returncode} while loading: "
                                 f"{last_lines(log_path)}")
             try:
                 with urllib.request.urlopen(f"{runner.base_url}/health", timeout=HEALTH_TIMEOUT_SECONDS) as response:
@@ -410,7 +410,7 @@ class RunnerPool:
                 runner.stopping = True
                 self.runners.pop(runner.name, None)
         for runner in dead:
-            log.warning("llama-server for %s died with %s", runner.name, runner.process.returncode)
+            log.warning("the model runner for %s died with %s", runner.name, runner.process.returncode)
         for runner in expired:
             self._stop(runner)
 

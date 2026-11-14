@@ -42,7 +42,7 @@ def main() -> int:
     parser.add_argument("--trainer-url", required=True, help="the trainer controller's address, or an empty string for none")
     parser.add_argument("--allowed-host", action="append", default=[], help="a Host name to serve besides localhost (repeat for more)")
     parser.add_argument("--allowed-origin", action="append", default=[], help="a web page host to serve besides localhost (repeat for more)")
-    parser.add_argument("--model-root", action="append", default=[], help="another model store to read in place, such as Ollama's (repeat for more)")
+    parser.add_argument("--model-root", action="append", default=[], help="another engine model store to read in place (repeat for more)")
     arguments = parser.parse_args()
     try:
         install(site_config(arguments.source, arguments.trainer_url, arguments.allowed_host, arguments.allowed_origin,

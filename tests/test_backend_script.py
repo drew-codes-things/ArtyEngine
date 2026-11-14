@@ -109,14 +109,14 @@ def test_without_model_roots_the_engine_reads_only_its_own_store(tmp_path):
     assert "--model-root" not in calls(tmp_path)
 
 
-def test_the_ollama_switch_is_retired_and_changes_nothing(tmp_path):
-    finished = run_backend(tmp_path, SITE_WITH_CONTROLLER, "ollama")
+def test_an_unknown_command_changes_nothing(tmp_path):
+    finished = run_backend(tmp_path, SITE_WITH_CONTROLLER, "elsewhere")
     assert finished.returncode == 2
-    assert "Ollama is not installed" in finished.stderr
+    assert "usage" in finished.stderr
     assert calls(tmp_path) == ""
 
 
-def test_the_status_no_longer_asks_ollama(tmp_path):
+def test_the_status_reads_the_engine_url_setting(tmp_path):
     finished = run_backend(tmp_path, "ARTY_CT=201\nARTY_CONTROLLER_URL=none\n", "status")
     assert finished.returncode == 0, finished.stderr
-    assert "11434" not in calls(tmp_path) and "ollama holds" not in calls(tmp_path)
+    assert "ARTY_ENGINE_URL=" in calls(tmp_path) and "11434" not in calls(tmp_path)

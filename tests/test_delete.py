@@ -4,6 +4,7 @@ import urllib.request
 
 import pytest
 
+from arty_engine.store import MODEL_LAYER, PROJECTOR_LAYER, engine_manifest, parse_name, write_manifest
 from engine_harness import RunningEngine, error_of, http_json
 from fake_store import QWEN3, _gguf_blob
 
@@ -13,16 +14,11 @@ REPLIES = {"/v1/chat/completions": lambda body: {"json": {"choices": [{"finish_r
 
 
 def add_pulled_model(root, name: str, metadata: dict, shared_projector: str = "") -> str:
-    host_namespace_model, tag = name.rsplit(":", 1)
-    host, namespace, model = host_namespace_model.split("/")
     digest, size = _gguf_blob(root, metadata, {"blk.0.w": (10, 10)})
-    layers = [{"mediaType": "application/vnd.ollama.image.model", "digest": digest, "size": size}]
+    layers = [{"mediaType": MODEL_LAYER, "digest": digest, "size": size}]
     if shared_projector:
-        layers.append({"mediaType": "application/vnd.ollama.image.projector", "digest": shared_projector, "size": 1})
-    manifest = {"schemaVersion": 2, "config": {"digest": "", "size": 0}, "layers": layers}
-    path = root / "manifests-v2" / host / namespace / model / tag
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(manifest))
+        layers.append({"mediaType": PROJECTOR_LAYER, "digest": shared_projector, "size": 1})
+    write_manifest(root, parse_name(name), engine_manifest(layers))
     return digest
 
 
@@ -54,22 +50,22 @@ def blob(engine, key: str):
 
 
 def test_deleting_a_pulled_model_removes_it_and_only_its_own_blobs(engine):
-    ollama_before = tree_fingerprint(engine.config.roots[1])
+    other_before = tree_fingerprint(engine.config.roots[1])
     assert delete(engine.url, HF_NAME) == (200, b"")
     assert HF_NAME not in [model["name"] for model in http_json(f"{engine.url}/api/tags")["models"]]
     assert not blob(engine, "model").exists()
     assert blob(engine, "projector").exists() and blob(engine, "twin").exists()
-    assert tree_fingerprint(engine.config.roots[1]) == ollama_before
+    assert tree_fingerprint(engine.config.roots[1]) == other_before
 
 
-def test_ollamas_models_are_left_to_ollama(engine):
-    ollama_before = tree_fingerprint(engine.config.roots[1])
+def test_models_read_in_place_are_left_alone(engine):
+    other_before = tree_fingerprint(engine.config.roots[1])
     status, body = error_of(lambda: delete(engine.url, "qwen3:14b"))
     assert status == 405 and "read in place" in body["error"] and "model_roots" in body["error"]
-    assert tree_fingerprint(engine.config.roots[1]) == ollama_before
+    assert tree_fingerprint(engine.config.roots[1]) == other_before
 
 
-def test_deleting_an_unknown_model_is_404_like_ollama(engine):
+def test_deleting_an_unknown_model_is_404(engine):
     status, body = error_of(lambda: delete(engine.url, "nope:1b"))
     assert status == 404 and body == {"error": "model 'nope:1b' not found"}
 
@@ -100,10 +96,10 @@ def test_a_loaded_model_is_unloaded_before_it_is_deleted(engine):
 @pytest.mark.parametrize("path", ["/api/create", "/api/copy", "/api/push"])
 def test_store_writes_the_engine_does_not_do_say_so(engine, path):
     status, body = error_of(lambda: http_json(f"{engine.url}{path}", {"model": "x", "source": HF_NAME, "destination": "y"}))
-    assert status == 501 and "ollama" in body["error"].lower()
+    assert status == 501 and "does not create, copy or push" in body["error"]
 
 
-def test_refusing_an_ollama_model_leaves_it_loaded(engine):
+def test_refusing_a_model_read_in_place_leaves_it_loaded(engine):
     http_json(f"{engine.url}/api/generate", {"model": "qwen3:14b", "keep_alive": -1})
     error_of(lambda: delete(engine.url, "qwen3:14b"))
     assert [model["name"] for model in http_json(f"{engine.url}/api/ps")["models"]] == ["qwen3:14b"]
