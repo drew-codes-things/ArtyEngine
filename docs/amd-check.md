@@ -74,7 +74,7 @@ AMD GPU was found, 64 a wrong option, 130 interrupted.
 |---|---|---|
 | `tools` | the programs above; for ROCm with AMD's packages, `python3 -m venv` | they are all there |
 | `detect` | `lspci`, `/dev/kfd`, the amdgpu render node, the card's gfx target and `vulkaninfo` | an amdgpu render node is there; the backend is `rocm` with `/dev/kfd` and a target the ROCm build carries code for, else `vulkan` |
-| `download` | downloads release b12110 of the model runtime (ROCm 10.0 or Vulkan build) | its sha256 equals the digest the release lists. When the listing can't be read the step fails, prints the sha256 to compare by hand with the README, and nothing is unpacked or run |
+| `download` | downloads release b12110 of the model runtime (ROCm 10.0 or Vulkan build) | its sha256 equals the digest the kit pins (the same as in the README); nothing is unpacked or run otherwise. The release listing is a second check: a listing that disagrees fails the step, one that can't be read is noted and the check goes on |
 | `libraries` | `ldd` on the runtime's GPU backend library; for ROCm, installs AMD's `rocm[libraries,device-<gfx target>]==10.0.0` packages (the card's own kernel package, never a default one) into the temporary folder when the system lacks them, and uses both folders they put libraries in | every library it needs loads; the report names the device package installed |
 | `devices` | asks the runtime which devices it sees | it lists a `ROCm0` device, or a `Vulkan0` device that is AMD's (an Intel or other Vulkan device alone fails), so models run on the card |
 | `config` | writes an engine config on a free 127.0.0.1 port with `gpu_backend` and `runtimes` set | |

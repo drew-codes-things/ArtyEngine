@@ -1,6 +1,5 @@
 import json
 import math
-import re
 import time
 from datetime import datetime, timezone
 
@@ -20,9 +19,6 @@ THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
 THINK_TAGS = (THINK_OPEN, THINK_CLOSE)
 THINKING_SWITCH = "enable_thinking"
-LEAK_CHECK_CHARS = 200
-REASONING_START = re.compile(r"\s*(?:<think>|(?:okay|ok|alright|hmm+|so|well|wait|first|now|let me|let's|i need|i should|"
-                             r"i'll|i will|i think|i must|the user|we need|we have)\b)", re.IGNORECASE)
 LARGEST_TOKEN_COUNT = 2 ** 31 - 1
 INT64_LIMITS = (-(2 ** 63), 2 ** 63 - 1)
 WHOLE_NUMBER_FIELDS = {"top_k", "seed", "repeat_last_n", "mirostat"}
@@ -294,16 +290,20 @@ def finish_reason(reason: str | None) -> str:
 
 
 def split_leaked_thinking(text: str) -> tuple[str, str]:
-    if THINK_CLOSE not in text:
-        return "", text
-    leaked, _, answer = text.rpartition(THINK_CLOSE)
-    return leaked.replace(THINK_OPEN, "").strip(), answer.lstrip()
+    if THINK_CLOSE in text:
+        leaked, _, answer = text.rpartition(THINK_CLOSE)
+        return leaked.replace(THINK_OPEN, "").strip(), answer.lstrip()
+    if text.lstrip().startswith(THINK_OPEN):
+        return text.replace(THINK_OPEN, "").strip(), ""
+    return "", text
 
 
-def chat_reply(model_name: str, completion: dict, load_seconds: float, started: float, keep_thinking: bool = True) -> dict:
+def chat_reply(model_name: str, completion: dict, load_seconds: float, started: float, keep_thinking: bool = True,
+               may_leak: bool = False) -> dict:
     choice = (completion.get("choices") or [{}])[0]
     message = choice.get("message") or {}
-    leaked, content = split_leaked_thinking(message.get("content") or "")
+    content = message.get("content") or ""
+    leaked, content = split_leaked_thinking(content) if may_leak else ("", content)
     reply_message = {"role": "assistant", "content": content}
     thinking = "\n".join(part for part in (message.get("reasoning_content") or "", leaked if keep_thinking else "") if part)
     if thinking:
@@ -314,10 +314,6 @@ def chat_reply(model_name: str, completion: dict, load_seconds: float, started: 
     return {"model": model_name, "created_at": now_iso(), "message": reply_message,
             "done_reason": finish_reason(choice.get("finish_reason")), "done": True,
             **timing_fields(completion.get("timings"), completion.get("usage"), load_seconds, time.monotonic() - started)}
-
-
-def looks_like_reasoning(text: str) -> bool:
-    return REASONING_START.match(text) is not None
 
 
 def partial_tag_length(text: str) -> int:
@@ -334,10 +330,13 @@ class StreamTranslator:
         self.model_name = model_name
         self.load_seconds = load_seconds
         self.started = started
+        self.may_leak = hold_content
         self.holding = hold_content
         self.keep_thinking = keep_thinking
         self.held = ""
         self.tag_tail = ""
+        self.trim_answer_start = False
+        self.late_tags = 0
         self.calls: dict[int, dict] = {}
         self.finish = None
         self.timings = None
@@ -367,23 +366,31 @@ class StreamTranslator:
 
     def _hold(self, text: str) -> list[dict]:
         self.held += text
-        if THINK_CLOSE in self.held:
-            leaked, answer = split_leaked_thinking(self.held)
-            self.held, self.holding = "", False
-            out = [self._chunk({"content": "", "thinking": leaked})] if leaked and self.keep_thinking else []
-            return out + self._pass(answer)
-        if len(self.held) >= LEAK_CHECK_CHARS and not looks_like_reasoning(self.held):
-            return self._release_held()
-        return []
+        return self._split_held() if THINK_CLOSE in self.held else []
+
+    def _split_held(self) -> list[dict]:
+        if not self.holding:
+            return []
+        leaked, answer = split_leaked_thinking(self.held)
+        self.held, self.holding = "", False
+        self.trim_answer_start = True
+        out = [self._chunk({"content": "", "thinking": leaked})] if leaked and self.keep_thinking else []
+        return out + self._pass(answer)
 
     def _release_held(self) -> list[dict]:
         held, self.held, self.holding = self.held, "", False
         return self._pass(held)
 
     def _pass(self, text: str) -> list[dict]:
+        if not self.may_leak:
+            return [self._chunk({"content": text})] if text else []
         text = self.tag_tail + text
+        self.late_tags += sum(text.count(tag) for tag in THINK_TAGS)
         for tag in THINK_TAGS:
             text = text.replace(tag, "")
+        if self.trim_answer_start:
+            text = text.lstrip()
+            self.trim_answer_start = not text
         kept = partial_tag_length(text)
         self.tag_tail = text[len(text) - kept:] if kept else ""
         text = text[:len(text) - kept]
@@ -404,7 +411,7 @@ class StreamTranslator:
             slot["function"]["arguments"] += function["arguments"]
 
     def finish_chunks(self) -> list[dict]:
-        out = self._release_held() + self._flush_tag_tail()
+        out = self._split_held() + self._flush_tag_tail()
         if self.calls:
             ordered = [self.calls[index] for index in sorted(self.calls)]
             out.append(self._chunk({"content": "", "tool_calls": reply_tool_calls(ordered)}))

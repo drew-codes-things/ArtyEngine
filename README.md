@@ -319,14 +319,18 @@ cards, the engine reads the one with the most memory.
 Every answer carries `Server: arty-engine/<version>`.
 
 Thinking that leaks into the answer: some models (seen with `mimo-v2.6:9b`) write their reasoning and a closing
-`</think>` into the reply even with `think` false. Chat and generate replies (not raw ones) keep only the text after
-the last closing tag as content; the text before it goes into `thinking`, or is dropped when the request has `think`
-false. Whether a model can leak is decided once when it loads: a thinking model can when it is named in
-`thinking_leakers` or its chat template does not read `enable_thinking`; any other model (such as `qwen3:14b`) streams
-its content at once. `mimo-v2.6:9b` needs naming: its template does read the switch, yet the model still writes its
-reasoning into the answer. For a model that can leak, a streamed reply holds its content back until a closing tag,
-reasoning from the model, 200 characters that do not open like reasoning, or the end of the reply rules a leak out. A
-think tag that turns up later in content already streamed is dropped from the rest of the stream.
+`</think>` into the reply even with `think` false. Whether a model can leak is decided once when it loads: a thinking
+model can when it is named in `thinking_leakers` or its chat template does not read `enable_thinking`. `mimo-v2.6:9b`
+needs naming: its template does read the switch, yet the model still writes its reasoning into the answer. Any other
+model (such as `qwen3:14b`) streams its content at once and exactly as written, think tags included. For a model that
+can leak, chat and generate replies (not raw ones) keep only the text after the last closing tag as content; the text
+before it goes into `thinking`, or is dropped when the request has `think` false. The same characters mean both
+things, so an answer from such a model that writes the tags itself loses them. For a model that can leak, a streamed
+reply holds its content back until a closing tag, reasoning from the model or the end of the reply, so a reply without
+a closing tag arrives in one piece at the end, however long it is. A reply that opens with `<think>` and ends without
+closing it (cut by the length limit inside its reasoning) is all thinking, with no content. A think tag that turns up
+later in content already streamed is dropped from the rest of the stream and logged as a warning. A name in
+`thinking_leakers` that matches no installed model is logged as a warning at start.
 
 Pulls: a short name already in the store is not downloaded again; one the engine can't run or read answers 409
 (delete it, then pull). Each short name is pinned to the sha256 of its files, so a file changed on Hugging Face is
@@ -336,14 +340,22 @@ Pulled manifests record the repo and revision. Any other name answers 400 with t
 mismatch inside the stream.
 
 A pull can also name its own source: `{"model": "qwen2.5vl:7b", "source": "hf.co/<owner>/<repo>:Q4_K_M"}` fetches that
-repository and quant and installs it under the short name given, and the manifest records the source. Without
-`source` the short names in `arty_engine/short_names.json` decide, as above. Pulling a name already installed from
-the same source downloads nothing. From a different source the new files are downloaded and checked first, and only
-then does the new manifest replace the old one; the old copy is unloaded and the blobs only it used are removed (all
-are kept when any manifest can't be read). Projector rules, size checks and `pull_keep_free_mb` apply as for any
-pull, and a source that matches a short name's catalogue entry keeps its sha256 pins. `source` must be a Hugging Face
-name (400 otherwise), only a short name or that same Hugging Face name can take it (400), and an internal model's name
-answers 409.
+repository and quant and installs it under the short name given, and the manifest records the source. Without `source`
+the short names in `arty_engine/short_names.json` decide, as above. Pulling a name already installed from the same
+source downloads nothing; `hf.co` and `huggingface.co` are the same host, and the owner, repository and quant are
+compared without regard to case. From a different source the new files are downloaded and checked first, and only then
+does the new manifest replace the old one, and the old copy is unloaded. A replace keeps only the new weights: the old
+copy's template, system prompt and parameters are not carried over (the status line names the ones dropped), and the
+old copy's files stay in the store until `tools/unused_blobs.py --remove --remove-unnamed-blobs` removes them, since a
+migration backup or a model left out with `--skip` may still need them. Like any pull that writes a manifest, a
+replace means a migration made before it can no longer be undone. A new source whose files are the old copy's is not a
+replace: only the recorded source changes and nothing is unloaded. A name installed only in another store root gets
+its new copy in the engine's own store and the other root's copy is left as it is, no longer used. Every pull that
+names a source is logged as a warning with the caller's address, the name and the source, and every replace with the
+old and the new source; `/api/show` shows a model's recorded source (`name` and `revision`) when it has one. Projector
+rules, size checks and `pull_keep_free_mb` apply as for any pull, and a source that matches a short name's catalogue
+entry keeps its sha256 pins. `source` must be a Hugging Face name (400 otherwise), only a short name or that same
+Hugging Face name can take it (400), and an internal model's name answers 409.
 
 ---
 

@@ -185,3 +185,28 @@ def test_the_controller_line_comes_last_even_when_caddy_refuses(tmp_path):
     finished = run_engine_switch(tmp_path, 3, ct_refuses="Caddyfile")
     assert finished.returncode != 0
     assert "trainer-controller is not running" in finished.stderr.rstrip().splitlines()[-1]
+
+
+def last_line(finished) -> str:
+    lines = finished.stderr.rstrip().splitlines()
+    return lines[-1] if lines else ""
+
+
+def test_a_refused_move_with_the_controller_down_never_says_arty_moved(tmp_path):
+    finished = run_engine_switch(tmp_path, 3, ct_refuses="Caddyfile")
+    assert finished.returncode != 0
+    assert "Arty now uses the engine" not in finished.stderr
+    assert "Arty was not moved" in last_line(finished) and "trainer-controller" in last_line(finished)
+
+
+def test_an_engine_that_does_not_answer_ends_with_where_arty_stands(tmp_path):
+    finished = run_engine_switch(tmp_path, 0, ct_refuses="api/version")
+    assert finished.returncode != 0
+    assert "did not start" in last_line(finished) and "Arty was not moved" in last_line(finished)
+    assert "brain-through-engine.conf" not in calls(tmp_path)
+
+
+def test_a_main_model_that_does_not_load_after_the_move_is_named_last(tmp_path):
+    finished = run_engine_switch(tmp_path, 0, ct_refuses="keep_alive")
+    assert finished.returncode != 0
+    assert "Arty now uses the engine" in last_line(finished) and "qwen3:14b" in last_line(finished)

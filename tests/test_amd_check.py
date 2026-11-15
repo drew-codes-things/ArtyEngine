@@ -104,6 +104,8 @@ class Rig:
         self.environment = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_ROOT": str(root),
                             "AMD_CHECK_DRM": str(root / "sys" / "class" / "drm"), "AMD_CHECK_DEV": str(root / "dev"),
                             "AMD_CHECK_KFD": str(root / "kfd"), "TMPDIR": str(root / "tmp"), "FAKE_DEVICES": ROCM_DEVICES}
+        self.runtime_digest = self.build_runtime()
+        self.environment["AMD_CHECK_RUNTIME_SHA256"] = self.runtime_digest
         self.environment.pop("HSA_OVERRIDE_GFX_VERSION", None)
         program(self.bin, "curl", FAKE_CURL)
         program(self.bin, "ldd", FAKE_LDD)
@@ -111,7 +113,6 @@ class Rig:
         program(self.bin, "amd-smi", FAKE_AMD_SMI)
         program(root, "fake-pip", FAKE_PIP)
         self.lspci(AMD_PCI)
-        self.runtime_digest = self.build_runtime()
 
     def lspci(self, line: str) -> None:
         program(self.bin, "lspci", f"#!/bin/bash\necho '{line}'\n")
@@ -250,7 +251,7 @@ def test_rocm_runs_through_download_config_and_engine_start_then_cleans_up(rig):
     steps = rig.steps()
     assert steps["detect"].startswith("PASS backend rocm.") and "/dev/kfd: yes" in steps["detect"]
     assert "card target: gfx1100" in steps["detect"]
-    assert steps["download"] == f"PASS release {RELEASE}, ubuntu-rocm-10.0-x64 build, sha256 {rig.runtime_digest} matches the published digest"
+    assert steps["download"] == f"PASS release {RELEASE}, ubuntu-rocm-10.0-x64 build, sha256 {rig.runtime_digest} matches the pinned digest (the release listing agrees)"
     assert steps["libraries"].startswith("PASS every library of the rocm backend loads (ROCm libraries: system)")
     assert steps["devices"] == "PASS   ROCm0: Fake Radeon (16368 MiB, 16000 MiB free)"
     assert steps["start"].startswith("PASS version") and "GPU backend rocm (set in the config)" in steps["start"]
@@ -295,15 +296,29 @@ def test_a_digest_that_does_not_match_the_release_stops_the_check(rig):
     assert "config" not in rig.steps() and rig.leftover_work() == []
 
 
-def test_an_unreachable_release_listing_stops_the_check_and_prints_the_digest_for_a_hand_check(rig):
+def test_an_unreachable_release_listing_still_runs_a_runtime_that_matches_its_pinned_digest(rig):
     amd_with_rocm(rig)
     (rig.root / "release.json").unlink()
-    finished = rig.run()
+    rig.run("--stop-after", "download")
+    download = rig.steps()["download"]
+    assert download.startswith(f"PASS release {RELEASE}, ubuntu-rocm-10.0-x64 build, sha256 {rig.runtime_digest} matches")
+    assert "pinned" in download and "listing could not be read" in download
+
+
+def test_a_runtime_that_does_not_match_its_pinned_digest_stops_the_check_even_when_the_listing_agrees(rig):
+    amd_with_rocm(rig)
+    finished = rig.run(AMD_CHECK_RUNTIME_SHA256="1" * 64)
     assert finished.returncode == EXIT_FAILED, finished.stdout
     download = rig.steps()["download"]
     assert download.startswith(f"FAIL release {RELEASE}, ubuntu-rocm-10.0-x64 build has sha256 {rig.runtime_digest}")
-    assert "will not be run" in download and "libraries" not in rig.steps() and "devices" not in rig.steps()
-    assert result_line(rig) == "result: FAIL"
+    assert "1" * 64 in download and "libraries" not in rig.steps() and rig.leftover_work() == []
+
+
+def test_the_kit_s_pinned_digests_match_the_readme():
+    readme = (SCRIPT.parents[1] / "README.md").read_text()
+    published = dict(re.findall(r"`([0-9a-f]{64})` \((ROCm|Vulkan)\)", readme.replace("\n", " ")))
+    assert {kind: digest for digest, kind in published.items()} == {"ROCm": script_value("ROCM_RUNTIME_SHA256"),
+                                                                    "Vulkan": script_value("VULKAN_RUNTIME_SHA256")}
 
 
 def test_a_runtime_that_sees_no_gpu_fails(rig):

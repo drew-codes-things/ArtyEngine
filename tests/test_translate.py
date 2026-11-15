@@ -177,7 +177,7 @@ LEAKED = "Yes, 14 orange stars.</think>14"
 @pytest.mark.parametrize("keep_thinking, thinking", [(True, "Yes, 14 orange stars."), (False, None)])
 def test_reasoning_leaked_into_a_reply_is_moved_or_dropped(keep_thinking, thinking):
     completion = {"choices": [{"finish_reason": "stop", "message": {"content": LEAKED}}]}
-    reply = translate.chat_reply("mimo-v2.6:9b", completion, 0, 0, keep_thinking=keep_thinking)
+    reply = translate.chat_reply("mimo-v2.6:9b", completion, 0, 0, keep_thinking=keep_thinking, may_leak=True)
     assert reply["message"]["content"] == "14"
     assert reply["message"].get("thinking") == thinking
 
@@ -230,11 +230,10 @@ REASONING_LEAK = "Okay, the user wants the count of orange stars, so I should lo
 PLAIN_ANSWER = "There are fourteen orange stars in the picture, set out in two rows of seven across the top of the page. " * 3
 
 
-def test_a_leaker_s_plain_answer_is_released_once_it_cannot_be_reasoning():
+def test_a_leaker_s_reply_without_a_tag_is_held_to_the_end_however_it_opens():
     pieces = [PLAIN_ANSWER[index:index + 10] for index in range(0, len(PLAIN_ANSWER), 10)]
     chunks = stream_of(pieces)
-    first = next(index for index, batch in enumerate(chunks) if any(chunk["message"].get("content") for chunk in batch))
-    assert first * 10 >= translate.LEAK_CHECK_CHARS - 10 and first < len(pieces) - 1
+    assert not any(chunk["message"].get("content") for batch in chunks[:-1] for chunk in batch)
     assert "".join(contents(chunks)) == PLAIN_ANSWER
 
 
@@ -245,11 +244,18 @@ def test_text_that_reads_like_reasoning_stays_held_until_its_tag():
 
 
 def test_a_tag_that_turns_up_after_the_answer_was_released_is_dropped_from_the_rest():
-    chunks = stream_of(["Fourteen", " stars.</th", "ink> Fourteen."], hold_content=False)
+    chunks = stream_of(["count</think>Fourteen", " stars.</th", "ink> Fourteen."])
     assert "".join(contents(chunks)) == "Fourteen stars. Fourteen."
-    chunks = stream_of(["Fourteen <think>", "stars."], hold_content=False)
+    chunks = stream_of(["count</think>Fourteen <think>", "stars."])
     assert "".join(contents(chunks)) == "Fourteen stars."
 
 
 def test_a_lone_angle_bracket_at_the_end_still_comes_out():
-    assert "".join(contents(stream_of(["5 <"], hold_content=False))) == "5 <"
+    assert "".join(contents(stream_of(["count</think>5 <"]))) == "5 <"
+
+
+def test_a_model_that_cannot_leak_streams_think_tags_as_it_wrote_them():
+    pieces = ["print(\"<thi", "nk>a</th", "ink>\")"]
+    assert "".join(contents(stream_of(pieces, hold_content=False))) == "".join(pieces)
+    completion = {"choices": [{"finish_reason": "stop", "message": {"content": "".join(pieces)}}]}
+    assert translate.chat_reply("qwen3:14b", completion, 0, 0, keep_thinking=False)["message"]["content"] == "".join(pieces)

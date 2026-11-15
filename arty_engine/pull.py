@@ -1,6 +1,7 @@
 import hashlib
 import http.client
 import json
+import logging
 import os
 import re
 import shutil
@@ -14,10 +15,14 @@ from http import HTTPStatus
 from pathlib import Path
 
 from .gguf import GgufError
-from .store import (LOCAL_HOST, MODEL_LAYER, PROJECTOR_LAYER, ModelName, ModelNotFound, ModelStore, blob_path,
-                    engine_manifest, is_digest, parse_name, remove_unreferenced_blobs, write_manifest)
+from .store import (LOCAL_HOST, MODEL_LAYER, PARAMS_LAYER, PROJECTOR_LAYER, SYSTEM_LAYER, TEMPLATE_LAYER, ModelName,
+                    ModelNotFound, ModelStore, blob_path, engine_manifest, is_digest, parse_name, write_manifest)
 
+log = logging.getLogger("arty-engine.pull")
 HF_HOSTS = ("hf.co", "huggingface.co")
+WEIGHT_LAYERS = (MODEL_LAYER, PROJECTOR_LAYER)
+SETTING_LAYER_WORDS = {TEMPLATE_LAYER: "template", SYSTEM_LAYER: "system prompt", PARAMS_LAYER: "parameters"}
+CLEANUP_COMMAND = "tools/unused_blobs.py --remove --remove-unnamed-blobs"
 TOKEN_HOSTS = ("huggingface.co",)
 HF_API = "https://huggingface.co/api/models/{repo}?blobs=true"
 HF_FILE = "https://huggingface.co/{repo}/resolve/{revision}/{file}"
@@ -43,6 +48,7 @@ class PullPlan:
     target: ModelName
     pins: "ShortName | None"
     replaces: bool = False
+    installed_at: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -196,13 +202,33 @@ class Puller:
                 progress({"status": f"{plan.target.display} is already installed from {source}"})
             progress({"status": "success"})
             return False
-        old_digests = installed_digests(self.root, plan.target) if plan.replaces else set()
+        old_manifest = installed_manifest(plan.installed_at, plan.target) if plan.replaces else None
         self._pull_hf(plan.source, plan.target, progress, plan.pins)
-        if plan.replaces:
-            removed = remove_unreferenced_blobs(self.root, old_digests)
-            progress({"status": f"replaced {plan.target.display}; {len(removed)} blobs only the old copy used were removed"})
+        replaced = plan.replaces and self._report_replace(plan, old_manifest, progress)
         progress({"status": "success"})
-        return plan.replaces
+        return replaced
+
+    def _report_replace(self, plan: PullPlan, old_manifest, progress) -> bool:
+        target, source = plan.target.display, plan.source.display
+        old_layers = manifest_layers(old_manifest)
+        if plan.installed_at != self.root:
+            log.warning("pulled %s from %s into %s; the copy in %s is no longer used", target, source, self.root, plan.installed_at)
+            progress({"status": f"installed {target} from {source} in {self.root}; the copy in {plan.installed_at} is left "
+                                f"as it is and no longer used"})
+            return True
+        if weight_digests(old_layers) == weight_digests(manifest_layers(installed_manifest(self.root, plan.target))):
+            old_manifest["source"] = installed_manifest(self.root, plan.target)["source"]
+            write_manifest(self.root, plan.target, old_manifest)
+            progress({"status": f"{target} already had the files of {source}; only its recorded source changed"})
+            return False
+        old_source = installed_source_of(old_manifest) or "no recorded source"
+        log.warning("replaced %s: it was %s, it is now %s", target, old_source, source)
+        dropped = [word for media_type, word in SETTING_LAYER_WORDS.items() if any(layer.get("mediaType") == media_type
+                                                                                   for layer in old_layers)]
+        not_carried = f"; its {', '.join(dropped)} were not carried over" if dropped else ""
+        progress({"status": f"replaced {target} with {source}{not_carried}; the old copy's files stay in the store until "
+                            f"{CLEANUP_COMMAND} removes them"})
+        return True
 
     def _plan(self, name: str, source: str | None) -> PullPlan:
         if source is None:
@@ -219,9 +245,9 @@ class Puller:
         installed_at = self._installed_root(target)
         if installed_at is None:
             return PullPlan(chosen, target, pins)
-        if installed_source(installed_at, target) == chosen.display:
+        if same_source(installed_source(installed_at, target), chosen):
             return PullPlan(None, target, None)
-        return PullPlan(chosen, target, pins, replaces=True)
+        return PullPlan(chosen, target, pins, replaces=True, installed_at=installed_at)
 
     def _installed_root(self, target: ModelName) -> Path | None:
         roots = self.store.roots if self.store is not None else [self.root]
@@ -377,15 +403,35 @@ def installed_manifest(root: Path, target: ModelName):
 
 
 def installed_source(root: Path, target: ModelName) -> str | None:
-    manifest = installed_manifest(root, target)
+    return installed_source_of(installed_manifest(root, target))
+
+
+def installed_source_of(manifest) -> str | None:
     source = manifest.get("source") if isinstance(manifest, dict) else None
     return source.get("name") if isinstance(source, dict) else None
 
 
-def installed_digests(root: Path, target: ModelName) -> set[str]:
-    manifest = installed_manifest(root, target)
+def manifest_layers(manifest) -> list[dict]:
     layers = manifest.get("layers") if isinstance(manifest, dict) else None
-    return {layer.get("digest") for layer in layers if isinstance(layer, dict)} if isinstance(layers, list) else set()
+    return [layer for layer in layers if isinstance(layer, dict)] if isinstance(layers, list) else []
+
+
+def weight_digests(layers: list[dict]) -> set[str]:
+    return {layer.get("digest") for layer in layers if layer.get("mediaType") in WEIGHT_LAYERS}
+
+
+def source_key(name: ModelName) -> tuple[str, str, str]:
+    return name.namespace.lower(), name.model.lower(), name.tag.lower()
+
+
+def same_source(recorded: str | None, chosen: ModelName) -> bool:
+    if not recorded:
+        return False
+    try:
+        parsed = parse_name(recorded)
+    except ModelNotFound:
+        return False
+    return parsed.host in HF_HOSTS and source_key(parsed) == source_key(chosen)
 
 
 def keep_download(partial: Path, target: Path, digest: str) -> None:

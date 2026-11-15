@@ -100,20 +100,44 @@ point_controller_at() {
 }
 
 stop_before_moving() {
-  echo "the engine is started, but Arty was not moved to it: $1. Fix that and run $0 engine again" >&2
+  not_moved_reason=$1
   exit 1
 }
 
 finish_switch() {
   release_gpu_lock
-  if [ "$controller_running" = no ]; then
-    report_controller_down
-  fi
+  case "$switch_stage" in
+    starting) report_engine_not_started ;;
+    started) report_not_moved ;;
+    moved) report_moved ;;
+  esac
 }
 
-report_controller_down() {
-  echo "Arty now uses the engine, but $CONTROLLER_UNIT is not running after the restart; see journalctl -u" \
-    "$CONTROLLER_UNIT (an unknown setting in $CONTROLLER_SETTINGS stops it). Training stays paused until it runs again" >&2
+report_engine_not_started() {
+  echo "the engine did not start, so Arty was not moved and still uses its old backend; see journalctl -u arty-engine" \
+    "in CT $CT, fix that and run $0 engine again" >&2
+}
+
+report_not_moved() {
+  echo "the engine is started, but Arty was not moved to it: ${not_moved_reason:-see the lines above}.$(controller_clause_before_move)" \
+    "Fix that and run $0 engine again" >&2
+}
+
+controller_clause_before_move() {
+  [ "$controller_running" = no ] || return 0
+  printf ' %s is not running after its restart and already points at the engine; see journalctl -u %s.' \
+    "$CONTROLLER_UNIT" "$CONTROLLER_UNIT"
+}
+
+report_moved() {
+  local problems=() joined
+  [ "$main_model_loaded" = yes ] ||
+    problems+=("$MAIN_MODEL did not load there (see journalctl -u arty-engine in CT $CT; Arty's first request tries again)")
+  [ "$controller_running" = yes ] ||
+    problems+=("$CONTROLLER_UNIT is not running after the restart; see journalctl -u $CONTROLLER_UNIT (an unknown setting in $CONTROLLER_SETTINGS stops it). Training stays paused until it runs again")
+  [ ${#problems[@]} -gt 0 ] || return 0
+  joined=$(printf '%s, and ' "${problems[@]}")
+  echo "Arty now uses the engine, but ${joined%, and }" >&2
 }
 
 repeated_option() {
@@ -150,7 +174,10 @@ install -m 644 /srv/ai/arty-engine/src/deploy/tool-hub-through-engine.conf /etc/
 install -m 644 /srv/ai/arty-engine/src/deploy/arty-backend.env /etc/default/arty-backend
 systemctl daemon-reload
 systemctl restart tool-hub brain'
-  in_ct "curl -s -m 600 localhost:11438/api/generate -d '{\"model\":\"$MAIN_MODEL\",\"keep_alive\":-1}' >/dev/null"
+}
+
+load_main_model() {
+  in_ct "curl -sf -m 600 localhost:11438/api/generate -d '{\"model\":\"$MAIN_MODEL\",\"keep_alive\":-1}' >/dev/null"
 }
 
 show_controller_status() {
@@ -170,6 +197,9 @@ echo "engine holds: $(curl -s localhost:11438/api/ps 2>/dev/null | python3 -c "i
 }
 
 controller_running=yes
+main_model_loaded=yes
+switch_stage=none
+not_moved_reason=
 
 case "${1:-}" in
   engine|status|settings|engine-config) check_settings ;;
@@ -183,11 +213,15 @@ case "$1" in
       exit 1
     fi
     take_gpu_lock
+    switch_stage=starting
     start_engine
+    switch_stage=started
     point_controller_at engine || controller_running=no
     move_ct_to_engine
+    switch_stage=moved
+    load_main_model || main_model_loaded=no
     show_status
-    if [ "$controller_running" = no ]; then
+    if [ "$controller_running" = no ] || [ "$main_model_loaded" = no ]; then
       exit 1
     fi
     ;;

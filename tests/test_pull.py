@@ -9,6 +9,7 @@ import pytest
 from arty_engine import pull
 from arty_engine.store import MANIFEST_MEDIA_TYPE, MODEL_LAYER, ModelStore, parse_name
 from engine_harness import RunningEngine, error_of, http_json
+from fake_store import build_store
 from gguf_writer import write_gguf
 
 
@@ -583,7 +584,7 @@ def test_another_source_replaces_the_model_after_its_download_verified(tmp_path,
     store = ModelStore([root])
     assert store.get("tiny:1").manifest["source"]["name"] == OTHER_SOURCE
     assert model_digest(root, "tiny:1") == f"sha256:{fake_hf['sha']}"
-    assert not (root / "blobs" / old_digest.replace(":", "-")).exists()
+    assert (root / "blobs" / old_digest.replace(":", "-")).is_file()
 
 
 def test_a_replacement_that_fails_its_check_leaves_the_installed_model(tmp_path, fake_hf):
@@ -637,3 +638,53 @@ def test_a_source_for_an_internal_name_is_refused(tmp_path):
     finally:
         running.close()
     assert status == 409 and "internal_models" in body["error"]
+
+
+def test_a_replace_keeps_the_old_files_and_says_what_was_not_carried_over(tmp_path, fake_hf):
+    root = tmp_path / "store"
+    build_store(root)
+    old_layers = ModelStore([root]).get("qwen3:14b").manifest["layers"]
+    updates = []
+    assert pull.Puller(root, 0, short_names={}).pull("qwen3:14b", updates.append, source=TINY_SOURCE) is True
+    replaced = next(update["status"] for update in updates if update["status"].startswith("replaced"))
+    assert "template" in replaced and "parameters" in replaced and "unused_blobs" in replaced
+    assert all((root / "blobs" / layer["digest"].replace(":", "-")).is_file() for layer in old_layers)
+
+
+@pytest.mark.parametrize("spelling", ["huggingface.co/Someone/Tiny-GGUF:Q8_0", "hf.co/someone/tiny-gguf:Q8_0",
+                                      "hf.co/Someone/Tiny-GGUF:q8_0"])
+def test_the_same_source_spelled_another_way_downloads_nothing(tmp_path, fake_hf, spelling):
+    puller = pull.Puller(tmp_path / "own", 0, short_names={})
+    puller.pull("tiny:1", lambda update: None, source=TINY_SOURCE)
+    asked = list(fake_hf["paths"])
+    assert puller.pull("tiny:1", lambda update: None, source=spelling) is False
+    assert fake_hf["paths"] == asked
+
+
+def test_another_source_with_the_same_files_is_not_a_replace(tmp_path, fake_hf):
+    root = tmp_path / "own"
+    puller = pull.Puller(root, 0, short_names={})
+    puller.pull("tiny:1", lambda update: None, source=TINY_SOURCE)
+    updates = []
+    assert puller.pull("tiny:1", updates.append, source=OTHER_SOURCE) is False
+    assert not any(update["status"].startswith("replaced") for update in updates)
+    assert ModelStore([root]).get("tiny:1").manifest["source"]["name"] == OTHER_SOURCE
+
+
+def test_every_pull_from_a_source_and_every_replace_is_logged(engine, fake_hf, caplog):
+    caplog.set_level("INFO")
+    http_json(f"{engine.url}/api/pull", {"model": "tiny:1", "source": TINY_SOURCE, "stream": False})
+    assert "tiny:1" in caplog.text and TINY_SOURCE in caplog.text
+    fake_hf["data"] = fake_hf["data"] + b"\x00" * 8
+    fake_hf["sha"] = hashlib.sha256(fake_hf["data"]).hexdigest()
+    caplog.clear()
+    http_json(f"{engine.url}/api/pull", {"model": "tiny:1", "source": OTHER_SOURCE, "stream": False})
+    warnings = [record.getMessage() for record in caplog.records if record.levelname == "WARNING"]
+    assert any("tiny:1" in line and TINY_SOURCE in line and OTHER_SOURCE in line for line in warnings)
+
+
+def test_show_names_the_source_a_model_was_pulled_from(engine, fake_hf):
+    http_json(f"{engine.url}/api/pull", {"model": "tiny:1", "source": TINY_SOURCE, "stream": False})
+    shown = http_json(f"{engine.url}/api/show", {"model": "tiny:1"})
+    assert (shown.get("source") or {}).get("name") == TINY_SOURCE
+    assert "source" not in http_json(f"{engine.url}/api/show", {"model": "qwen3:14b"})

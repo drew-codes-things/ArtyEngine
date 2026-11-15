@@ -12,6 +12,18 @@ LEAK_PROMPT = "how many orange stars?"
 LEAK_PIECES = ["Yes, 14 ", "orange stars.</th", "ink>14"]
 COUNT_PROMPT = "the numbers from 1 to 5 separated by spaces, nothing else"
 COUNT_PIECES = ["1", " 2", " 3", " 4", " 5"]
+CODE_PROMPT = "print a Python line containing the literal text <think>a</think>"
+UNLISTED_OPENER_PROMPT = "what is the invoice total?"
+UNLISTED_OPENER_REASONING = ("Got it, let's look at the picture. The invoice has two rows, a line for the parts and a line "
+                             "for the labour, and a total at the bottom right that reads thirty six pounds and twenty pence, "
+                             "so the answer is that figure written as a number.")
+INVOICE_ANSWER = "The invoice total is 36.20 pounds."
+BLANK_LINES_PROMPT = "how many rows?"
+BLANK_LINES_PIECES = ["Okay, count the rows.", "</think>", "\n\nTwo rows."]
+CUT_PROMPT = "count every star"
+LATE_TAG_PROMPT = "how many rows, twice?"
+CUT_REASONING = "<think>\nOkay, the user wants every star counted, so I start at the top left and go"
+CODE_PIECES = ["Here it is:\n```python\nprint(\"<thi", "nk>a</th", "ink>\")\n```"]
 
 
 def leaked_reply(body):
@@ -20,6 +32,15 @@ def leaked_reply(body):
         events.append({"choices": [{"delta": {}, "finish_reason": "stop"}], "timings": TIMINGS})
         return {"sse": [f"data: {json.dumps(event)}" for event in events] + ["data: [DONE]"]}
     return {"json": {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "".join(LEAK_PIECES)}}],
+                     "timings": TIMINGS}}
+
+
+def pieces_reply(body, pieces, finish="stop"):
+    if body.get("stream"):
+        events = [{"choices": [{"delta": {"content": piece}}]} for piece in pieces]
+        events.append({"choices": [{"delta": {}, "finish_reason": finish}], "timings": TIMINGS})
+        return {"sse": [f"data: {json.dumps(event)}" for event in events] + ["data: [DONE]"]}
+    return {"json": {"choices": [{"finish_reason": finish, "message": {"role": "assistant", "content": "".join(pieces)}}],
                      "timings": TIMINGS}}
 
 
@@ -34,6 +55,17 @@ def chat_reply(body):
         return leaked_reply(body)
     if any(message.get("content") == COUNT_PROMPT for message in body.get("messages", [])):
         return counted_reply()
+    if any(message.get("content") == CODE_PROMPT for message in body.get("messages", [])):
+        return pieces_reply(body, CODE_PIECES)
+    if any(message.get("content") == UNLISTED_OPENER_PROMPT for message in body.get("messages", [])):
+        words = [word + " " for word in UNLISTED_OPENER_REASONING.split(" ")]
+        return pieces_reply(body, words + ["\n</think>", "\n\n" + INVOICE_ANSWER])
+    if any(message.get("content") == BLANK_LINES_PROMPT for message in body.get("messages", [])):
+        return pieces_reply(body, BLANK_LINES_PIECES)
+    if any(message.get("content") == LATE_TAG_PROMPT for message in body.get("messages", [])):
+        return pieces_reply(body, ["a</think>Two", " rows.</think>"])
+    if any(message.get("content") == CUT_PROMPT for message in body.get("messages", [])):
+        return pieces_reply(body, [CUT_REASONING[index:index + 7] for index in range(0, len(CUT_REASONING), 7)], "length")
     if body.get("tools"):
         return {"json": {"choices": [{"finish_reason": "tool_calls", "message": {"role": "assistant", "content": "", "tool_calls": [
             {"id": "x1", "type": "function", "function": {"name": "calculate", "arguments": "{\"expression\":\"12*15\"}"}}]}}], "timings": TIMINGS}}
@@ -363,3 +395,68 @@ def test_a_template_that_honours_the_thinking_switch_streams_think_false_replies
     pieces = [(line.get(field) if field else line["message"].get("content")) for line in lines]
     assert [piece for piece in pieces if piece] == COUNT_PIECES
     assert not lines[0]["done"] and lines[-1]["done"]
+
+
+@pytest.mark.parametrize("think", [None, False])
+@pytest.mark.parametrize("stream", [False, True])
+def test_think_tags_in_the_answer_of_a_model_that_cannot_leak_arrive_intact(engine, think, stream):
+    extra = {} if think is None else {"think": think}
+    chat = {"model": "qwen3:14b", "messages": [{"role": "user", "content": CODE_PROMPT}], **extra}
+    generate = {"model": "qwen3:14b", "prompt": CODE_PROMPT, **extra}
+    if stream:
+        chat_lines = streamed_lines(engine, "/api/chat", chat)
+        generate_lines = streamed_lines(engine, "/api/generate", generate)
+        chat_content = "".join(line["message"].get("content", "") for line in chat_lines)
+        chat_thinking = "".join(line["message"].get("thinking", "") for line in chat_lines)
+        generate_content = "".join(line.get("response", "") for line in generate_lines)
+    else:
+        reply = http_json(f"{engine.url}/api/chat", {**chat, "stream": False})
+        chat_content, chat_thinking = reply["message"]["content"], reply["message"].get("thinking", "")
+        generate_content = http_json(f"{engine.url}/api/generate", {**generate, "stream": False})["response"]
+    assert chat_content == "".join(CODE_PIECES) and chat_thinking == ""
+    assert generate_content == "".join(CODE_PIECES)
+
+
+def leaker_answers(engine, prompt, think, stream):
+    extra = {} if think is None else {"think": think}
+    chat = {"model": "mimo:9b", "messages": [{"role": "user", "content": prompt}], **extra}
+    generate = {"model": "mimo:9b", "prompt": prompt, **extra}
+    if not stream:
+        reply = http_json(f"{engine.url}/api/chat", {**chat, "stream": False})
+        response = http_json(f"{engine.url}/api/generate", {**generate, "stream": False})["response"]
+        return reply["message"]["content"], reply["message"].get("thinking", ""), response
+    lines = streamed_lines(engine, "/api/chat", chat)
+    response = "".join(line.get("response", "") for line in streamed_lines(engine, "/api/generate", generate))
+    return ("".join(line["message"].get("content", "") for line in lines),
+            "".join(line["message"].get("thinking", "") for line in lines), response)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("think", [None, False])
+def test_a_leak_that_opens_with_any_words_never_reaches_the_answer(engine, think, stream):
+    content, thinking, response = leaker_answers(engine, UNLISTED_OPENER_PROMPT, think, stream)
+    assert content == INVOICE_ANSWER and response == INVOICE_ANSWER
+    assert thinking == ("" if think is False else UNLISTED_OPENER_REASONING)
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_the_answer_after_a_leak_starts_without_the_blank_lines(engine, stream):
+    content, _, response = leaker_answers(engine, BLANK_LINES_PROMPT, False, stream)
+    assert content == "Two rows." and response == "Two rows."
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("think", [None, False])
+def test_a_reply_cut_off_inside_its_reasoning_is_thinking_not_the_answer(engine, think, stream):
+    content, thinking, response = leaker_answers(engine, CUT_PROMPT, think, stream)
+    assert content == "" and response == ""
+    assert thinking == ("" if think is False else CUT_REASONING.replace("<think>", "").strip())
+
+
+def test_a_think_tag_after_a_leaker_s_answer_started_is_logged(engine, caplog):
+    caplog.set_level("WARNING")
+    leaker_answers(engine, BLANK_LINES_PROMPT, False, True)
+    assert "think tag" not in caplog.text
+    content, _, _ = leaker_answers(engine, LATE_TAG_PROMPT, False, True)
+    assert content == "Two rows."
+    assert "mimo:9b" in caplog.text and "think tag" in caplog.text

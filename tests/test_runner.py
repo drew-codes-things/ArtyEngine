@@ -356,3 +356,10 @@ def test_a_model_named_as_a_leaker_holds_its_content_though_its_template_reads_t
 def test_thinking_leakers_must_be_a_list_of_names(value):
     with pytest.raises(ValueError, match="thinking_leakers"):
         Config(thinking_leakers=value)
+
+
+def test_a_thinking_leaker_name_that_matches_no_model_is_warned_about(tmp_path, caplog):
+    caplog.set_level("WARNING")
+    make_pool(tmp_path, thinking_leakers=["mimo:9b", "mimo-v2.6"])
+    assert "mimo-v2.6:latest" in caplog.text and "thinking_leakers" in caplog.text
+    assert "mimo:9b" not in caplog.text

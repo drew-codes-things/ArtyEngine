@@ -4,7 +4,7 @@ import json
 import pytest
 
 from arty_engine.store import (TEMPLATE_LAYER, ModelNotFound, ModelStore, blob_path, engine_manifest, parse_name,
-                               remove_unreferenced_blobs, write_manifest)
+                               write_manifest)
 from fake_store import QWEN3, QWEN3_TEMPLATE, add_model, build_store
 
 
@@ -214,20 +214,3 @@ def test_a_manifest_that_is_not_json_is_skipped_deleted_and_never_blocks_another
     store.remove_owned("broken:1")
     assert not path.exists() and "broken:1" not in ModelStore([root]).names()
     assert store.get("qwen3:14b").name == "qwen3:14b"
-
-
-def test_blobs_a_replaced_copy_used_are_removed_unless_another_manifest_names_them(tmp_path):
-    first = json.loads(add_model(tmp_path, "first", "1", QWEN3, {"w": (4, 4)}).read_text())
-    second = add_model(tmp_path, "second", "1", QWEN3, {"w": (8, 8)})
-    shared = first["layers"][0]["digest"]
-    lonely = json.loads(second.read_text())["layers"][0]["digest"]
-    second.unlink()
-    removed = remove_unreferenced_blobs(tmp_path, {shared, lonely})
-    assert removed == [blob_path(tmp_path, lonely)] and blob_path(tmp_path, shared).is_file()
-
-
-def test_an_unreadable_manifest_keeps_every_replaced_blob(tmp_path):
-    first = add_model(tmp_path, "first", "1", QWEN3, {"w": (4, 4)})
-    digest = json.loads(first.read_text())["layers"][0]["digest"]
-    first.write_text("{not json")
-    assert remove_unreferenced_blobs(tmp_path, {digest}) == [] and blob_path(tmp_path, digest).is_file()

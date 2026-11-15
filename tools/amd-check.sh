@@ -7,6 +7,8 @@ RELEASE_API=https://api.github.com/repos/ggml-org/llama.cpp/releases/tags/$RELEA
 ASSET_URL_PREFIX=https://github.com/ggml-org/llama.cpp/releases/download/$RELEASE/llama-$RELEASE-bin-
 ROCM_ASSET_KIND=ubuntu-rocm-10.0-x64
 VULKAN_ASSET_KIND=ubuntu-vulkan-x64
+ROCM_RUNTIME_SHA256=664b5c218ec9a38d1e7b543bae7407dc62a4051ba09ddc51bd29f68ee77da674
+VULKAN_RUNTIME_SHA256=a5d741940956ec62e8783aee7e5a4c7c761af867d6f027c3277a51e1a3ac59b0
 ROCM_WHEEL_INDEX=https://stable.repo.amd.com/rocm/whl-next/
 ROCM_WHEEL_VERSION=10.0.0
 ROCM_LIBRARY_FILES="libamdhip64.so.7 libhipblas.so.3 librocblas.so.5"
@@ -205,27 +207,42 @@ published_digest() {
   python3 "$STEPS" published-digest "$WORK/release.json" "$ASSET"
 }
 
+pinned_digest() {
+  if [ -n "${AMD_CHECK_RUNTIME_SHA256:-}" ]; then
+    echo "$AMD_CHECK_RUNTIME_SHA256"
+  elif [ "$BACKEND" = vulkan ]; then
+    echo "$VULKAN_RUNTIME_SHA256"
+  else
+    echo "$ROCM_RUNTIME_SHA256"
+  fi
+}
+
 download_runtime() {
-  local kind=$ROCM_ASSET_KIND url published actual
+  local kind=$ROCM_ASSET_KIND url published actual pinned second_check
   [ "$BACKEND" = vulkan ] && kind=$VULKAN_ASSET_KIND
   url=$(asset_url "$kind")
   ASSET=${url##*/}
   BUILD="release $RELEASE, $kind build"
   curl -fL --retry 3 -sS -o "$WORK/runtime.tar.gz" "$url" || { record FAIL download "could not download $url"; return 1; }
   actual=$(sha256sum "$WORK/runtime.tar.gz" | cut -d' ' -f1)
-  if ! published=$(published_digest); then
-    record FAIL download "$BUILD has sha256 $actual, but the release listing could not be read, so it was not checked and will not be run. Compare it by hand with README.md (AMD GPUs (untested)) or the release page, then run the check again"
+  pinned=$(pinned_digest)
+  if [ "$actual" != "$pinned" ]; then
+    record FAIL download "$BUILD has sha256 $actual, but this kit pins $pinned, so it will not be run"
     return 1
   fi
-  if [ "$actual" != "$published" ]; then
+  if ! published=$(published_digest); then
+    second_check="the release listing could not be read as a second check"
+  elif [ "$actual" != "$published" ]; then
     record FAIL download "$BUILD has sha256 $actual, but the release lists $published"
     return 1
+  else
+    second_check="the release listing agrees"
   fi
   mkdir -p "$WORK/runtime"
   tar -xzf "$WORK/runtime.tar.gz" -C "$WORK/runtime" --strip-components=1 || { record FAIL download "could not unpack the $BUILD"; return 1; }
   RUNNER=$(find "$WORK/runtime" -maxdepth 1 -type f -name '*-server' ! -name '*rpc*' | head -1)
   [ -n "$RUNNER" ] || { record FAIL download "no model server binary in the $BUILD"; return 1; }
-  record PASS download "$BUILD, sha256 $actual matches the published digest"
+  record PASS download "$BUILD, sha256 $actual matches the pinned digest ($second_check)"
 }
 
 missing_libraries() {

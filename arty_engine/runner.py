@@ -120,6 +120,12 @@ class LaunchPlan:
         return (self.model.digest, self.ctx, self.speculative.draft, self.speculative.spec_type, self.cpu_only)
 
 
+def warn_about_unknown_leakers(leaker_names: set[str], store: ModelStore) -> None:
+    for name in sorted(leaker_names - set(store.names())):
+        log.warning("%s in thinking_leakers matches no installed model, so it has no effect until a model of that name "
+                    "is installed", name)
+
+
 def may_leak_thinking(model: Model, template_source: Model, leaker_names: set[str]) -> bool:
     if "thinking" not in model.capabilities:
         return False
@@ -199,6 +205,7 @@ class RunnerPool:
         self.config = replace(config, runner_binary=self.backend.runner_binary, library_path=list(self.backend.library_path))
         self.store = store
         self.leaker_names = {parse_name(name).display for name in config.thinking_leakers}
+        warn_about_unknown_leakers(self.leaker_names, store)
         self.launcher = launcher
         self.memory = memory or partial(gpu.card_memory, self.backend.name)
         self.process_memory = partial(gpu.memory_by_process, self.backend.name)

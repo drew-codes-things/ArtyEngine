@@ -353,7 +353,7 @@ def make_handler(engine: Engine):
                                   "template": model.stored_template or model.gguf.chat_template, "system": model.system,
                                   "details": model.details, "model_info": engine.store.gguf_metadata(model),
                                   "capabilities": model.capabilities, "modified_at": iso_time(model.modified_at),
-                                  "runnable": model.runnable})
+                                  "runnable": model.runnable, **recorded_source(model)})
 
         def delete(self):
             request = self._body()
@@ -494,7 +494,8 @@ def make_handler(engine: Engine):
                 if not stream:
                     completion = post_json(url, body)
                     self._send_json(200, shape(translate.chat_reply(model.name, completion, load_seconds, started,
-                                                                    keep_thinking=keep_thinking)))
+                                                                    keep_thinking=keep_thinking,
+                                                                    may_leak=runner.plan.may_leak_thinking)))
                     return
                 translator = translate.StreamTranslator(model.name, load_seconds, started,
                                                         hold_content=runner.plan.may_leak_thinking,
@@ -511,6 +512,9 @@ def make_handler(engine: Engine):
                 for chunk in translator.finish_chunks():
                     self._stream_line(shape(chunk))
                 self._end_stream()
+                if translator.late_tags:
+                    log.warning("%s wrote %d think tag(s) after its answer had started streaming; they were dropped from "
+                                "the stream, check that no reasoning reached the answer", model.name, translator.late_tags)
 
             engine.with_runner(model, options, keep_alive, run)
 
@@ -563,6 +567,8 @@ def make_handler(engine: Engine):
                 raise ApiError(409, "another pull is running; the engine pulls one model at a time to spare the link")
             try:
                 engine.puller.check(name, source)
+                if source is not None:
+                    log.warning("%s asked to pull %s from %s", self.client_address[0], name, source)
                 if stream:
                     self._start_stream()
                     self._unload_if_replaced(name, engine.puller.pull(name, self._stream_line, source))
@@ -588,6 +594,11 @@ def make_handler(engine: Engine):
                 engine.pool.unload(parse_name(name).display)
 
     return Handler
+
+
+def recorded_source(model) -> dict:
+    source = model.manifest.get("source") if isinstance(model.manifest, dict) else None
+    return {"source": source} if isinstance(source, dict) else {}
 
 
 def describe_memory(memory: gpu.GpuMemory | None) -> str:
