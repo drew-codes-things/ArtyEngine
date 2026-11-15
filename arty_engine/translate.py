@@ -1,5 +1,6 @@
 import json
 import math
+import re
 import time
 from datetime import datetime, timezone
 
@@ -17,6 +18,11 @@ FINISH_REASONS = {"stop": "stop", "length": "length", "tool_calls": "stop", "con
 NANOSECONDS_PER_MS = 1_000_000
 THINK_OPEN = "<think>"
 THINK_CLOSE = "</think>"
+THINK_TAGS = (THINK_OPEN, THINK_CLOSE)
+THINKING_SWITCH = "enable_thinking"
+LEAK_CHECK_CHARS = 200
+REASONING_START = re.compile(r"\s*(?:<think>|(?:okay|ok|alright|hmm+|so|well|wait|first|now|let me|let's|i need|i should|"
+                             r"i'll|i will|i think|i must|the user|we need|we have)\b)", re.IGNORECASE)
 LARGEST_TOKEN_COUNT = 2 ** 31 - 1
 INT64_LIMITS = (-(2 ** 63), 2 ** 63 - 1)
 WHOLE_NUMBER_FIELDS = {"top_k", "seed", "repeat_last_n", "mirostat"}
@@ -215,10 +221,10 @@ def thinking_fields(think, thinking_capable: bool) -> dict:
     if isinstance(think, str):
         if think not in THINK_LEVELS:
             raise RequestError('think must be true, false, "low", "medium" or "high"')
-        return {"reasoning_effort": think, "chat_template_kwargs": {"enable_thinking": True}}
+        return {"reasoning_effort": think, "chat_template_kwargs": {THINKING_SWITCH: True}}
     if not isinstance(think, bool):
         raise RequestError("think must be true or false")
-    return {"chat_template_kwargs": {"enable_thinking": think}}
+    return {"chat_template_kwargs": {THINKING_SWITCH: think}}
 
 
 def chat_body(request: dict, model, stream: bool) -> dict:
@@ -310,6 +316,18 @@ def chat_reply(model_name: str, completion: dict, load_seconds: float, started: 
             **timing_fields(completion.get("timings"), completion.get("usage"), load_seconds, time.monotonic() - started)}
 
 
+def looks_like_reasoning(text: str) -> bool:
+    return REASONING_START.match(text) is not None
+
+
+def partial_tag_length(text: str) -> int:
+    longest = max(len(tag) for tag in THINK_TAGS) - 1
+    for length in range(min(longest, len(text)), 0, -1):
+        if any(tag.startswith(text[-length:]) for tag in THINK_TAGS):
+            return length
+    return 0
+
+
 class StreamTranslator:
     def __init__(self, model_name: str, load_seconds: float, started: float, hold_content: bool = False,
                  keep_thinking: bool = True):
@@ -319,6 +337,7 @@ class StreamTranslator:
         self.holding = hold_content
         self.keep_thinking = keep_thinking
         self.held = ""
+        self.tag_tail = ""
         self.calls: dict[int, dict] = {}
         self.finish = None
         self.timings = None
@@ -339,7 +358,7 @@ class StreamTranslator:
                 out += self._release_held()
                 out.append(self._chunk({"content": "", "thinking": delta["reasoning_content"]}))
             if delta.get("content"):
-                out += self._hold(delta["content"]) if self.holding else [self._chunk({"content": delta["content"]})]
+                out += self._hold(delta["content"]) if self.holding else self._pass(delta["content"])
             for piece in delta.get("tool_calls") or []:
                 self._add_call_piece(piece)
             if choice.get("finish_reason"):
@@ -348,16 +367,31 @@ class StreamTranslator:
 
     def _hold(self, text: str) -> list[dict]:
         self.held += text
-        if THINK_CLOSE not in self.held:
-            return []
-        leaked, answer = split_leaked_thinking(self.held)
-        self.held, self.holding = "", False
-        out = [self._chunk({"content": "", "thinking": leaked})] if leaked and self.keep_thinking else []
-        return out + ([self._chunk({"content": answer})] if answer else [])
+        if THINK_CLOSE in self.held:
+            leaked, answer = split_leaked_thinking(self.held)
+            self.held, self.holding = "", False
+            out = [self._chunk({"content": "", "thinking": leaked})] if leaked and self.keep_thinking else []
+            return out + self._pass(answer)
+        if len(self.held) >= LEAK_CHECK_CHARS and not looks_like_reasoning(self.held):
+            return self._release_held()
+        return []
 
     def _release_held(self) -> list[dict]:
         held, self.held, self.holding = self.held, "", False
-        return [self._chunk({"content": held})] if held else []
+        return self._pass(held)
+
+    def _pass(self, text: str) -> list[dict]:
+        text = self.tag_tail + text
+        for tag in THINK_TAGS:
+            text = text.replace(tag, "")
+        kept = partial_tag_length(text)
+        self.tag_tail = text[len(text) - kept:] if kept else ""
+        text = text[:len(text) - kept]
+        return [self._chunk({"content": text})] if text else []
+
+    def _flush_tag_tail(self) -> list[dict]:
+        tail, self.tag_tail = self.tag_tail, ""
+        return [self._chunk({"content": tail})] if tail else []
 
     def _add_call_piece(self, piece: dict) -> None:
         slot = self.calls.setdefault(int(piece.get("index", len(self.calls))), {"id": "", "function": {"name": "", "arguments": ""}})
@@ -370,7 +404,7 @@ class StreamTranslator:
             slot["function"]["arguments"] += function["arguments"]
 
     def finish_chunks(self) -> list[dict]:
-        out = self._release_held()
+        out = self._release_held() + self._flush_tag_tail()
         if self.calls:
             ordered = [self.calls[index] for index in sorted(self.calls)]
             out.append(self._chunk({"content": "", "tool_calls": reply_tool_calls(ordered)}))

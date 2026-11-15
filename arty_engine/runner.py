@@ -16,7 +16,8 @@ from pathlib import Path
 from . import gpu
 from .backend import Backend, resolve_backend
 from .config import Config, SpeculativeSettings
-from .store import Model, ModelStore
+from .store import Model, ModelStore, parse_name
+from .translate import THINKING_SWITCH
 
 log = logging.getLogger("arty-engine.runner")
 
@@ -112,10 +113,17 @@ class LaunchPlan:
     draft_path: Path | None = None
     template_file: Path | None = None
     cpu_only: bool = False
+    may_leak_thinking: bool = False
 
     @property
     def key(self) -> tuple:
         return (self.model.digest, self.ctx, self.speculative.draft, self.speculative.spec_type, self.cpu_only)
+
+
+def may_leak_thinking(model: Model, template_source: Model, leaker_names: set[str]) -> bool:
+    if "thinking" not in model.capabilities:
+        return False
+    return model.name in leaker_names or THINKING_SWITCH not in template_source.gguf.chat_template
 
 
 @dataclass
@@ -190,6 +198,7 @@ class RunnerPool:
         self.backend = backend or resolve_backend(config)
         self.config = replace(config, runner_binary=self.backend.runner_binary, library_path=list(self.backend.library_path))
         self.store = store
+        self.leaker_names = {parse_name(name).display for name in config.thinking_leakers}
         self.launcher = launcher
         self.memory = memory or partial(gpu.card_memory, self.backend.name)
         self.process_memory = partial(gpu.memory_by_process, self.backend.name)
@@ -214,11 +223,12 @@ class RunnerPool:
         plan = LaunchPlan(model=model, ctx=ctx, speculative=speculative, cpu_only=cpu_only)
         if speculative.draft:
             plan.draft_path = self.store.get(speculative.draft).model_path
-        plan.template_file = self._launch_template(model)
+        donor = self.store.template_donor(model)
+        plan.template_file = self._launch_template(model, donor)
+        plan.may_leak_thinking = may_leak_thinking(model, donor or model, self.leaker_names)
         return plan
 
-    def _launch_template(self, model: Model) -> Path | None:
-        donor = self.store.template_donor(model)
+    def _launch_template(self, model: Model, donor: Model | None) -> Path | None:
         source = donor or model
         template = source.gguf.chat_template
         if self.config.compact_tool_json:

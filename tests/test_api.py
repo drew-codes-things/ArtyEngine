@@ -10,6 +10,8 @@ TIMINGS = {"prompt_n": 40, "prompt_ms": 20.0, "predicted_n": 5, "predicted_ms": 
 
 LEAK_PROMPT = "how many orange stars?"
 LEAK_PIECES = ["Yes, 14 ", "orange stars.</th", "ink>14"]
+COUNT_PROMPT = "the numbers from 1 to 5 separated by spaces, nothing else"
+COUNT_PIECES = ["1", " 2", " 3", " 4", " 5"]
 
 
 def leaked_reply(body):
@@ -21,9 +23,17 @@ def leaked_reply(body):
                      "timings": TIMINGS}}
 
 
+def counted_reply():
+    events = [{"choices": [{"delta": {"content": piece}}]} for piece in COUNT_PIECES]
+    events.append({"choices": [{"delta": {}, "finish_reason": "stop"}], "timings": TIMINGS})
+    return {"sse": [f"data: {json.dumps(event)}" for event in events] + ["data: [DONE]"]}
+
+
 def chat_reply(body):
     if any(message.get("content") == LEAK_PROMPT for message in body.get("messages", [])):
         return leaked_reply(body)
+    if any(message.get("content") == COUNT_PROMPT for message in body.get("messages", [])):
+        return counted_reply()
     if body.get("tools"):
         return {"json": {"choices": [{"finish_reason": "tool_calls", "message": {"role": "assistant", "content": "", "tool_calls": [
             {"id": "x1", "type": "function", "function": {"name": "calculate", "arguments": "{\"expression\":\"12*15\"}"}}]}}], "timings": TIMINGS}}
@@ -334,8 +344,8 @@ def streamed_lines(engine, path, body):
 @pytest.mark.parametrize("think, thinking", [(None, "Yes, 14 orange stars."), (False, "")])
 def test_leaked_reasoning_never_reaches_chat_or_generate_as_content(engine, think, thinking):
     extra = {} if think is None else {"think": think}
-    chat = {"model": "qwen3:14b", "messages": [{"role": "user", "content": LEAK_PROMPT}], **extra}
-    generate = {"model": "qwen3:14b", "prompt": LEAK_PROMPT, **extra}
+    chat = {"model": "mimo:9b", "messages": [{"role": "user", "content": LEAK_PROMPT}], **extra}
+    generate = {"model": "mimo:9b", "prompt": LEAK_PROMPT, **extra}
     reply = http_json(f"{engine.url}/api/chat", {**chat, "stream": False})
     assert reply["message"]["content"] == "14" and reply["message"].get("thinking", "") == thinking
     assert http_json(f"{engine.url}/api/generate", {**generate, "stream": False})["response"] == "14"
@@ -344,3 +354,12 @@ def test_leaked_reasoning_never_reaches_chat_or_generate_as_content(engine, thin
     assert "".join(line["message"].get("thinking", "") for line in lines) == thinking
     lines = streamed_lines(engine, "/api/generate", generate)
     assert "".join(line.get("response", "") for line in lines) == "14"
+
+
+@pytest.mark.parametrize("path, field", [("/api/chat", None), ("/api/generate", "response")])
+def test_a_template_that_honours_the_thinking_switch_streams_think_false_replies_at_once(engine, path, field):
+    body = ({"messages": [{"role": "user", "content": COUNT_PROMPT}]} if field is None else {"prompt": COUNT_PROMPT})
+    lines = streamed_lines(engine, path, {"model": "qwen3:14b", "think": False, **body})
+    pieces = [(line.get(field) if field else line["message"].get("content")) for line in lines]
+    assert [piece for piece in pieces if piece] == COUNT_PIECES
+    assert not lines[0]["done"] and lines[-1]["done"]

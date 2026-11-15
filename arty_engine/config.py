@@ -58,6 +58,7 @@ class Config:
     pull_keep_free_mb: int = 2048
     speculative: dict = field(default_factory=dict)
     internal_models: list = field(default_factory=list)
+    thinking_leakers: list = field(default_factory=list)
     extra_args: dict = field(default_factory=dict)
     allowed_hosts: list = field(default_factory=list)
     allowed_origins: list = field(default_factory=list)
@@ -66,6 +67,8 @@ class Config:
 
     def __post_init__(self):
         check_gpu_settings(self.gpu_backend, self.runtimes)
+        if not isinstance(self.thinking_leakers, list) or not all(isinstance(name, str) for name in self.thinking_leakers):
+            raise ValueError("thinking_leakers must be a list of model names")
 
     @property
     def roots(self) -> list[Path]:

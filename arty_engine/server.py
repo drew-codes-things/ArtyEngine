@@ -497,7 +497,7 @@ def make_handler(engine: Engine):
                                                                     keep_thinking=keep_thinking)))
                     return
                 translator = translate.StreamTranslator(model.name, load_seconds, started,
-                                                        hold_content="thinking" in model.capabilities,
+                                                        hold_content=runner.plan.may_leak_thinking,
                                                         keep_thinking=keep_thinking)
                 events = stream_events(url, body)
                 first = next(events, None)

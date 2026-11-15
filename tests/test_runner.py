@@ -333,3 +333,26 @@ def test_the_pool_reads_card_memory_the_backend_s_way(tmp_path, monkeypatch):
     assert runner.vram_mb() == 0
     assert seen[0] == "rocm" and "processes rocm" in seen
     pool.shutdown()
+
+
+@pytest.mark.parametrize("name, leaks", [("qwen3:14b", False), ("untemplated", False), ("mimo:9b", True), ("nomic-embed-text", False)])
+def test_whether_a_model_can_leak_thinking_is_read_from_its_template_at_load(tmp_path, name, leaks):
+    pool, store, launcher = make_pool(tmp_path)
+    runner, _ = pool.acquire(store.get(name), None)
+    pool.release(runner, FOREVER)
+    assert runner.plan.may_leak_thinking is leaks
+    pool.shutdown()
+
+
+def test_a_model_named_as_a_leaker_holds_its_content_though_its_template_reads_the_switch(tmp_path):
+    pool, store, launcher = make_pool(tmp_path, thinking_leakers=["qwen3:14b"])
+    runner, _ = pool.acquire(store.get("qwen3:14b"), None)
+    pool.release(runner, FOREVER)
+    assert runner.plan.may_leak_thinking is True
+    pool.shutdown()
+
+
+@pytest.mark.parametrize("value", ["mimo:9b", [5], None])
+def test_thinking_leakers_must_be_a_list_of_names(value):
+    with pytest.raises(ValueError, match="thinking_leakers"):
+        Config(thinking_leakers=value)

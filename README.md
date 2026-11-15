@@ -199,6 +199,7 @@ prompt or parameters of a model left out of a migration with `--skip` or of an o
 | `pull_keep_free_mb` | `2048` | A pull is refused (507) before it downloads anything when it would leave less than this free on the store's disk |
 | `speculative` | `{}` | Per model: `{"draft": "<model>", "draft_max": 16, "draft_min": 0, "draft_p_min": 0.75}` or `{"spec_type": "ngram-mod", "ngram_min": 0, "ngram_max": 0}` |
 | `internal_models` | `[]` | Models kept out of `/api/tags` (such as a draft model); they still answer by name |
+| `thinking_leakers` | `[]` | Thinking models that write reasoning into their answer even when told not to; their streamed replies are held back until a leak is ruled out (below) |
 | `extra_args` | `{}` | Per model: extra runtime arguments, as a list |
 | `allowed_hosts` | `[]` | Host names besides localhost, 127.0.0.1 and ::1 that requests may name in `Host` while the engine listens on loopback |
 | `allowed_origins` | `[]` | Host names of web pages besides localhost whose requests (with an `Origin` header) are served |
@@ -207,7 +208,7 @@ prompt or parameters of a model left out of a migration with `--skip` or of an o
 
 The shipped `deploy/engine.json` is Arty's setup, not these defaults: a 24576 context, models kept loaded
 (`default_keep_alive` `-1`), n-gram speculation for `qwen3:14b` and `mimo-v2.6:9b`, the Qwen3-0.6B draft listed
-as an internal model, and `gpu_backend` `cuda`.
+as an internal model, `mimo-v2.6:9b` as a thinking leaker, and `gpu_backend` `cuda`.
 
 `auto` picks `cuda` when `/dev/nvidia0` is there (`nvidia-smi` alone, without the device, does not count); otherwise
 `rocm` when `/dev/kfd` and a render node of the amdgpu driver are there, `runtimes` lists `rocm` and the card's gfx
@@ -320,9 +321,12 @@ Every answer carries `Server: arty-engine/<version>`.
 Thinking that leaks into the answer: some models (seen with `mimo-v2.6:9b`) write their reasoning and a closing
 `</think>` into the reply even with `think` false. Chat and generate replies (not raw ones) keep only the text after
 the last closing tag as content; the text before it goes into `thinking`, or is dropped when the request has `think`
-false. For a model with the thinking capability a streamed reply holds its content back until a closing tag, reasoning
-from the model or the end of the reply rules a leak out, so reasoning is never streamed as content; such replies can
-arrive in one piece at the end.
+false. Whether a model can leak is decided once when it loads: a thinking model can when it is named in
+`thinking_leakers` or its chat template does not read `enable_thinking`; any other model (such as `qwen3:14b`) streams
+its content at once. `mimo-v2.6:9b` needs naming: its template does read the switch, yet the model still writes its
+reasoning into the answer. For a model that can leak, a streamed reply holds its content back until a closing tag,
+reasoning from the model, 200 characters that do not open like reasoning, or the end of the reply rules a leak out. A
+think tag that turns up later in content already streamed is dropped from the rest of the stream.
 
 Pulls: a short name already in the store is not downloaded again; one the engine can't run or read answers 409
 (delete it, then pull). Each short name is pinned to the sha256 of its files, so a file changed on Hugging Face is

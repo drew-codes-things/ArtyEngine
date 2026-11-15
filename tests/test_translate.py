@@ -224,3 +224,32 @@ def test_reasoning_from_the_runner_is_a_safe_point_and_content_flows_at_once():
 def test_a_model_without_thinking_streams_at_once():
     chunks = stream_of(["Four", "teen"], hold_content=False)
     assert chunks[0][0]["message"]["content"] == "Four"
+
+
+REASONING_LEAK = "Okay, the user wants the count of orange stars, so I should look at the picture again and count. " * 3
+PLAIN_ANSWER = "There are fourteen orange stars in the picture, set out in two rows of seven across the top of the page. " * 3
+
+
+def test_a_leaker_s_plain_answer_is_released_once_it_cannot_be_reasoning():
+    pieces = [PLAIN_ANSWER[index:index + 10] for index in range(0, len(PLAIN_ANSWER), 10)]
+    chunks = stream_of(pieces)
+    first = next(index for index, batch in enumerate(chunks) if any(chunk["message"].get("content") for chunk in batch))
+    assert first * 10 >= translate.LEAK_CHECK_CHARS - 10 and first < len(pieces) - 1
+    assert "".join(contents(chunks)) == PLAIN_ANSWER
+
+
+def test_text_that_reads_like_reasoning_stays_held_until_its_tag():
+    pieces = [REASONING_LEAK[index:index + 10] for index in range(0, len(REASONING_LEAK), 10)] + ["</think>", "14"]
+    chunks = stream_of(pieces)
+    assert contents(chunks) == ["14"]
+
+
+def test_a_tag_that_turns_up_after_the_answer_was_released_is_dropped_from_the_rest():
+    chunks = stream_of(["Fourteen", " stars.</th", "ink> Fourteen."], hold_content=False)
+    assert "".join(contents(chunks)) == "Fourteen stars. Fourteen."
+    chunks = stream_of(["Fourteen <think>", "stars."], hold_content=False)
+    assert "".join(contents(chunks)) == "Fourteen stars."
+
+
+def test_a_lone_angle_bracket_at_the_end_still_comes_out():
+    assert "".join(contents(stream_of(["5 <"], hold_content=False))) == "5 <"

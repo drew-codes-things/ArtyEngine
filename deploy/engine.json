@@ -13,5 +13,6 @@
   "trainer_url": "",
   "pull_keep_free_mb": 15360,
   "speculative": {"qwen3:14b": {"spec_type": "ngram-mod"}, "mimo-v2.6:9b": {"spec_type": "ngram-mod"}},
-  "internal_models": ["hf.co/Qwen/Qwen3-0.6B-GGUF:Q8_0"]
+  "internal_models": ["hf.co/Qwen/Qwen3-0.6B-GGUF:Q8_0"],
+  "thinking_leakers": ["mimo-v2.6:9b"]
 }
