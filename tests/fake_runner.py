@@ -77,8 +77,10 @@ class FakeLauncher:
         self.replies = replies or {}
         self.fail = fail
         self.launched: list[FakeProcess] = []
+        self.environments: list[dict] = []
 
     def __call__(self, arguments, **kwargs):
         process = FakeProcess(arguments, self.replies, self.fail)
         self.launched.append(process)
+        self.environments.append(kwargs.get("env") or {})
         return process

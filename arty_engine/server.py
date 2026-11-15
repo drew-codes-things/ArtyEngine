@@ -14,6 +14,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 
 from . import gpu, translate
+from .backend import Backend, resolve_backend
 from .config import Config, load_config
 from .gguf import GgufError
 from .pull import Puller, PullError
@@ -69,10 +70,11 @@ class TrainerClient:
 
 
 class Engine:
-    def __init__(self, config: Config, pool: RunnerPool | None = None, store: ModelStore | None = None):
+    def __init__(self, config: Config, pool: RunnerPool | None = None, store: ModelStore | None = None,
+                 backend: Backend | None = None):
         self.config = config
         self.store = store or ModelStore(config.roots)
-        self.pool = pool or RunnerPool(config, self.store)
+        self.pool = pool or RunnerPool(config, self.store, backend=backend)
         self.trainer = TrainerClient(config.trainer_url)
         self.puller = Puller(config.roots[0], config.pull_rate_bytes, store=self.store,
                              keep_free_bytes=config.pull_keep_free_mb * 1024 * 1024)
@@ -569,17 +571,30 @@ def make_handler(engine: Engine):
     return Handler
 
 
+def describe_memory(memory: gpu.GpuMemory | None) -> str:
+    if memory is None:
+        return "card memory not readable"
+    return f"{memory.free_mb} MiB free of {memory.total_mb} MiB ({memory.source})"
+
+
+def log_backend(backend: Backend, memory: gpu.GpuMemory | None) -> None:
+    log.info("GPU backend %s (%s), model runner %s, %s", backend.name, backend.reason, backend.runner_binary,
+             describe_memory(memory))
+
+
 def serve(config: Config) -> None:
-    engine = Engine(config)
+    backend = resolve_backend(config)
+    engine = Engine(config, backend=backend)
     engine.pool.start_reaper()
     host, port = config.listen.rsplit(":", 1)
     server = ThreadingHTTPServer((host, int(port)), make_handler(engine))
     server.daemon_threads = True
     signal.signal(signal.SIGTERM, exit_on_terminate)
-    warn_when_no_models(engine.store, config)
-    log.info("arty-engine %s on %s, models from %s, model runner %s, VRAM budget %d MiB", VERSION, config.listen,
-             ", ".join(str(root) for root in config.roots), config.runner_binary, config.vram_budget_mb)
     try:
+        warn_when_no_models(engine.store, config)
+        log_backend(backend, engine.pool.memory())
+        log.info("arty-engine %s on %s, models from %s, model runner %s, VRAM budget %d MiB", VERSION, config.listen,
+                 ", ".join(str(root) for root in config.roots), backend.runner_binary, config.vram_budget_mb)
         server.serve_forever()
     finally:
         log.info("arty-engine stopping; unloading %d models", len(engine.pool.loaded()))

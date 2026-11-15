@@ -4,6 +4,10 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 
 CONFIG_ENV = "ARTY_ENGINE_CONFIG"
+AUTO_BACKEND = "auto"
+RUNTIME_BACKENDS = ("cuda", "rocm", "vulkan", "cpu")
+GPU_BACKENDS = (AUTO_BACKEND, *RUNTIME_BACKENDS)
+RUNTIME_SETTINGS = ("runner_binary", "library_path")
 
 
 @dataclass
@@ -20,6 +24,12 @@ class SpeculativeSettings:
     @property
     def enabled(self) -> bool:
         return bool(self.draft or self.spec_type)
+
+
+@dataclass(frozen=True)
+class Runtime:
+    runner_binary: str
+    library_path: list
 
 
 @dataclass
@@ -51,6 +61,11 @@ class Config:
     extra_args: dict = field(default_factory=dict)
     allowed_hosts: list = field(default_factory=list)
     allowed_origins: list = field(default_factory=list)
+    gpu_backend: str = AUTO_BACKEND
+    runtimes: dict = field(default_factory=dict)
+
+    def __post_init__(self):
+        check_gpu_settings(self.gpu_backend, self.runtimes)
 
     @property
     def roots(self) -> list[Path]:
@@ -63,6 +78,36 @@ class Config:
         known = {item.name for item in fields(SpeculativeSettings)}
         return SpeculativeSettings(**{key: value for key, value in settings.items() if key in known})
 
+    def runtime_for(self, backend: str) -> Runtime:
+        listed = self.runtimes.get(backend)
+        if not listed:
+            return Runtime(runner_binary=self.runner_binary, library_path=list(self.library_path))
+        return Runtime(runner_binary=listed["runner_binary"], library_path=list(listed.get("library_path", [])))
+
+
+def check_gpu_settings(backend, runtimes) -> None:
+    if backend not in GPU_BACKENDS:
+        raise ValueError(f"gpu_backend must be one of {', '.join(GPU_BACKENDS)}, not {backend!r}")
+    if not isinstance(runtimes, dict):
+        raise ValueError("runtimes must be an object of backend name to runtime settings")
+    for name, settings in runtimes.items():
+        check_runtime(name, settings)
+
+
+def check_runtime(name, settings) -> None:
+    if name not in RUNTIME_BACKENDS:
+        raise ValueError(f"runtimes: {name!r} is not a backend ({', '.join(RUNTIME_BACKENDS)})")
+    if not isinstance(settings, dict):
+        raise ValueError(f"runtimes.{name} must be an object with runner_binary and library_path")
+    unknown = sorted(set(settings) - set(RUNTIME_SETTINGS))
+    if unknown:
+        raise ValueError(f"runtimes.{name}: unknown settings {', '.join(unknown)}")
+    if not isinstance(settings.get("runner_binary"), str) or not settings["runner_binary"]:
+        raise ValueError(f"runtimes.{name} needs runner_binary, the path of that build's model server")
+    folders = settings.get("library_path", [])
+    if not isinstance(folders, list) or not all(isinstance(folder, str) for folder in folders):
+        raise ValueError(f"runtimes.{name}.library_path must be a list of folders")
+
 
 def load_config(path: str | None = None) -> Config:
     path = path or os.environ.get(CONFIG_ENV, "")
@@ -74,4 +119,7 @@ def load_config(path: str | None = None) -> Config:
     unknown = sorted(set(raw) - known)
     if unknown:
         raise ValueError(f"{path}: unknown settings {', '.join(unknown)}")
-    return Config(**raw)
+    try:
+        return Config(**raw)
+    except ValueError as error:
+        raise ValueError(f"{path}: {error}") from error

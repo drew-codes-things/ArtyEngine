@@ -68,3 +68,25 @@ def test_a_stop_file_present_at_the_start_runs_nothing(tmp_path, monkeypatch, an
     assert bench.main() == 0
     assert answers_without_edits == []
     assert "code:qwen3:14b" not in json.loads((tmp_path / "bench.json").read_text())
+
+
+def test_the_speed_part_runs_without_a_readable_card(monkeypatch):
+    monkeypatch.setattr(bench.gpu, "nvidia_card_memory", lambda: None)
+    monkeypatch.setattr(bench.gpu, "amd_card_memory", lambda drm=None: None)
+    monkeypatch.setattr(bench, "call", lambda base, path, body=None, timeout=bench.TIMEOUT_SECONDS:
+                        {"models": []} if path == "/api/ps" else {"eval_count": 4, "eval_duration": 100_000_000})
+    monkeypatch.setattr(bench, "stream", lambda base, body: {"first_token_seconds": 0.1, "wall_seconds": 0.2, "content": "hi"})
+    monkeypatch.setattr(bench.time, "sleep", lambda seconds: None)
+    result = bench.speed("http://127.0.0.1:9", "qwen3:14b", "You are Arty.", [])
+    assert result["vram_mb"] is None
+
+
+def test_the_speed_part_reports_the_growth_an_amd_card_shows(monkeypatch):
+    readings = iter([bench.gpu.GpuMemory(total_mb=16384, used_mb=500), bench.gpu.GpuMemory(total_mb=16384, used_mb=9500)])
+    monkeypatch.setattr(bench.gpu, "nvidia_card_memory", lambda: None)
+    monkeypatch.setattr(bench.gpu, "amd_card_memory", lambda drm=None: next(readings))
+    monkeypatch.setattr(bench, "call", lambda base, path, body=None, timeout=bench.TIMEOUT_SECONDS:
+                        {"models": []} if path == "/api/ps" else {"eval_count": 4, "eval_duration": 100_000_000})
+    monkeypatch.setattr(bench, "stream", lambda base, body: {"first_token_seconds": 0.1, "wall_seconds": 0.2, "content": "hi"})
+    monkeypatch.setattr(bench.time, "sleep", lambda seconds: None)
+    assert bench.speed("http://127.0.0.1:9", "qwen3:14b", "You are Arty.", [])["vram_mb"] == 9000

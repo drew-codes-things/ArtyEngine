@@ -40,14 +40,15 @@ request to, through the engine's HTTP API (`/api/chat`, `/api/generate`, `/api/e
 - **Optional trainer hand-off.** With `trainer_url` set, the engine tells a GPU-sharing controller `/busy` before a
   request and `/done` after it, so something else (such as a training job) can use the card while the engine is idle.
 
-The engine is Python standard library only. It reads the card's free memory with `nvidia-smi` when it is there.
+The engine is Python standard library only. It reads the card's free memory with `nvidia-smi` on an NVIDIA card, and
+with `amd-smi`, `rocm-smi` or the amdgpu driver's own files on an AMD card ([untested](#amd-gpus-untested)).
 
 ---
 
 ## Requirements
 
 - **Linux with an NVIDIA GPU**, with `nvidia-smi` on the `PATH`. Built and tested on an RTX 3060 (12 GB) in a Debian 13
-  container.
+  container. AMD cards have a code path that has never run on a real AMD card; see [AMD GPUs (untested)](#amd-gpus-untested).
 - **Python 3.10 or newer.** No packages to install. The tests need `pytest`.
 - **The model runtime**, a prebuilt release for your GPU (see Install). If the CUDA runtime libraries it needs
   (`libcudart`, `libcublas`) are not on the system, put them in a folder and list it in `library_path`.
@@ -190,14 +191,82 @@ never on a store in the older layout: there every blob counts as unused.
 | `extra_args` | `{}` | Per model: extra runtime arguments, as a list |
 | `allowed_hosts` | `[]` | Host names besides localhost, 127.0.0.1 and ::1 that requests may name in `Host` while the engine listens on loopback |
 | `allowed_origins` | `[]` | Host names of web pages besides localhost whose requests (with an `Origin` header) are served |
+| `gpu_backend` | `auto` | `cuda`, `rocm`, `vulkan` or `cpu`; `auto` picks one at start (below) |
+| `runtimes` | `{}` | Per backend: `{"runner_binary": "<path>", "library_path": ["<folder>"]}`; a backend not listed uses `runner_binary` and `library_path` above |
 
 The shipped `deploy/engine.json` is Arty's setup, not these defaults: a 24576 context, models kept loaded
-(`default_keep_alive` `-1`), n-gram speculation for `qwen3:14b` and `mimo-v2.6:9b`, and the Qwen3-0.6B draft listed
-as an internal model.
+(`default_keep_alive` `-1`), n-gram speculation for `qwen3:14b` and `mimo-v2.6:9b`, the Qwen3-0.6B draft listed
+as an internal model, and `gpu_backend` `cuda`.
+
+`auto` picks `cuda` when `nvidia-smi` or `/dev/nvidia0` is there; otherwise `rocm` when `/dev/kfd` and a render node
+of the amdgpu driver are there and `runtimes` lists `rocm`; otherwise `vulkan` when a render node (amdgpu first) is
+there and `runtimes` lists `vulkan`; otherwise `cpu`. The engine logs its choice, the reason and the card's free memory
+once at start. A config without `gpu_backend` or `runtimes` works as before: on an NVIDIA machine it resolves to
+`cuda` with the top-level `runner_binary` and `library_path`. A request with `num_gpu: 0` runs on the CPU with
+`--device none` and, for `cuda` and `rocm`, the backend's visible-devices variable set empty.
 
 `draft_ctx` is accepted in `speculative` but not passed to the runtime yet. Pulls from Hugging Face send `HF_TOKEN`
 from the environment when it is set, for gated repositories. Without it, Hugging Face answers 401 for a repository
 that is missing, private or gated, and the engine passes that on as 404; a refused token is a 502.
+
+---
+
+## AMD GPUs (untested)
+
+**No real AMD run has been done.** The AMD path is written and tested only against fakes (fake `amd-smi`, `rocm-smi`,
+sysfs and device nodes) on machines without an AMD card. Treat it as a starting point; `tools/amd-check.sh`
+([docs/amd-check.md](docs/amd-check.md)) checks it on a machine that has one.
+
+**Which runtime build.** Two official release builds of the same runtime as the CUDA one (release b12110, the one the
+engine was tested with), each unpacked into a folder of its own:
+
+- ROCm: https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-ubuntu-rocm-10.0-x64.tar.gz
+- Vulkan: https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-ubuntu-vulkan-x64.tar.gz
+
+Their published sha256 digests are `664b5c218ec9a38d1e7b543bae7407dc62a4051ba09ddc51bd29f68ee77da674` (ROCm) and
+`a5d741940956ec62e8783aee7e5a4c7c761af867d6f027c3277a51e1a3ac59b0` (Vulkan). Link a `server` in each folder to its
+model server binary (not the RPC server), as for CUDA.
+
+- The **ROCm** build loads ROCm 10.0's `libamdhip64.so.7`, `libhipblas.so.3` and `librocblas.so.5`, which it does not
+  include. Either install ROCm 10.0 on the system, or install AMD's own Python packages of it into a folder, the way
+  the build itself was made:
+  `python3 -m venv /srv/ai/arty-engine/rocm-10.0 && /srv/ai/arty-engine/rocm-10.0/bin/pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "rocm[libraries]==10.0.0"`,
+  then list the folder that holds `libamdhip64.so.7` (`find /srv/ai/arty-engine/rocm-10.0 -name 'libamdhip64.so.7*'`)
+  in `runtimes.rocm.library_path`. The build carries GPU code for gfx908, gfx90a, gfx942, gfx950, gfx1010 to gfx1012,
+  gfx1030 to gfx1036, gfx1100 to gfx1103, gfx1150 to gfx1152, gfx1200 and gfx1201.
+- The **Vulkan** build needs the Vulkan loader (`libvulkan.so.1`) and a Vulkan driver for the card, on Debian
+  `apt install libvulkan1 mesa-vulkan-drivers` (Mesa's RADV driver for AMD).
+
+**Which cards ROCm supports.** AMD's own list is the ROCm compatibility matrix,
+https://rocm.docs.amd.com/en/latest/compatibility/compatibility-matrix.html. On 15 Nov 2026 it covered ROCm 10.1.0 and
+listed these Radeon cards: RX 9070 XT, RX 9070 GRE, RX 9070, RX 9060 XT LP, RX 9060 XT, RX 9060, RX 9050, RX 7900 XTX,
+RX 7900 XT, RX 7900 GRE, RX 7800 XT, RX 7700 XT, RX 7700 and RX 7600, plus Radeon PRO (such as the W7900, W7800, W6800
+and V620) and Instinct cards. Consumer RX 6000 cards are not on it. Check the page before choosing a card or a
+rented machine; it changes between releases.
+
+**Older cards need Vulkan.** Cards such as the RX 570 (Polaris, gfx803) are neither on AMD's list nor among the GPU
+code the ROCm build carries, so they run on the Vulkan build, or on the CPU.
+
+**Config.** Name both runtimes and let `auto` choose, or set `gpu_backend` to `rocm` or `vulkan`:
+
+```json
+"gpu_backend": "auto",
+"runtimes": {
+  "rocm": {"runner_binary": "/srv/ai/arty-engine/runtime-rocm/server", "library_path": ["<the folder with libamdhip64.so.7>"]},
+  "vulkan": {"runner_binary": "/srv/ai/arty-engine/runtime-vulkan/server"}
+}
+```
+
+**Container devices.** ROCm needs `/dev/kfd` and the card's render node `/dev/dri/renderD*`; Vulkan needs only the
+render node. Pass the card node `/dev/dri/card*` of the same GPU too. AMD's docs give GPU access to the `render` and
+`video` groups, so give the nodes the container's own group ids: `render` for `/dev/kfd` and the render node, `video`
+for the card node (`getent group render video` inside the container shows them). On Proxmox, for example:
+`pct set <ct> -dev0 /dev/kfd,gid=<render> -dev1 /dev/dri/renderD128,gid=<render> -dev2 /dev/dri/card1,gid=<video>`.
+The shipped unit runs the engine as root, which can open the nodes either way.
+
+**Not done for AMD.** `/api/ps` shows the engine's estimate as `size_vram` (there is no per-process reading as with
+`nvidia-smi`). A `num_gpu: 0` request on the Vulkan build relies on `--device none` alone. When `amd-smi` lists several
+cards, the engine reads the one with the most memory.
 
 ---
 

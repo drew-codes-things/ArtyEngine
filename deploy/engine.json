@@ -4,6 +4,7 @@
   "model_roots": [],
   "runner_binary": "/srv/ai/arty-engine/runtime/server",
   "library_path": ["/srv/ai/arty-engine/cuda-12.8/lib"],
+  "gpu_backend": "cuda",
   "state_dir": "/srv/ai/arty-engine/state",
   "vram_budget_mb": 11500,
   "default_ctx": 24576,

@@ -8,10 +8,13 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from dataclasses import dataclass, field
+from collections.abc import Callable
+from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 
 from . import gpu
+from .backend import Backend, resolve_backend
 from .config import Config, SpeculativeSettings
 from .store import Model, ModelStore
 
@@ -128,6 +131,7 @@ class Runner:
     expires_wall: float | None = None
     stopping: bool = False
     unload_requested: bool = False
+    process_memory: Callable[[], dict[int, int]] = gpu.memory_by_process
 
     @property
     def name(self) -> str:
@@ -142,7 +146,7 @@ class Runner:
         return self.process.poll() is None and not self.stopping
 
     def vram_mb(self) -> int:
-        return gpu.memory_by_process().get(self.process.pid, 0)
+        return self.process_memory().get(self.process.pid, 0)
 
 
 def build_arguments(config: Config, plan: LaunchPlan, port: int) -> list[str]:
@@ -182,11 +186,13 @@ def speculative_arguments(config: Config, plan: LaunchPlan) -> list[str]:
 
 
 class RunnerPool:
-    def __init__(self, config: Config, store: ModelStore, launcher=subprocess.Popen, memory=gpu.card_memory):
-        self.config = config
+    def __init__(self, config: Config, store: ModelStore, launcher=subprocess.Popen, memory=None, backend: Backend | None = None):
+        self.backend = backend or resolve_backend(config)
+        self.config = replace(config, runner_binary=self.backend.runner_binary, library_path=list(self.backend.library_path))
         self.store = store
         self.launcher = launcher
-        self.memory = memory
+        self.memory = memory or partial(gpu.card_memory, self.backend.name)
+        self.process_memory = partial(gpu.memory_by_process, self.backend.name)
         self.runners: dict[str, Runner] = {}
         self.state = threading.Condition()
         self.load_lock = threading.Lock()
@@ -358,12 +364,12 @@ class RunnerPool:
         log_path = logs / f"{plan.model.name.replace('/', '_').replace(':', '_')}.log"
         environment = {**os.environ, "LD_LIBRARY_PATH": ":".join(self.config.library_path + [str(Path(self.config.runner_binary).resolve().parent)])}
         if plan.cpu_only:
-            environment["CUDA_VISIBLE_DEVICES"] = ""
+            environment.update(self.backend.cpu_only_environment)
         started = time.monotonic()
         log.info("loading %s (ctx %d, ~%d MiB): %s", plan.model.name, plan.ctx, estimate, " ".join(arguments[1:]))
         with open(log_path, "ab") as output:
             process = self.launcher(arguments, stdout=output, stderr=subprocess.STDOUT, env=environment, start_new_session=True)
-        runner = Runner(plan=plan, port=port, process=process, estimate_mb=estimate)
+        runner = Runner(plan=plan, port=port, process=process, estimate_mb=estimate, process_memory=self.process_memory)
         try:
             self._wait_until_ready(runner, log_path)
         except LoadError:

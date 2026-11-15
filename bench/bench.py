@@ -14,7 +14,9 @@ from functools import partial
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from arty_engine import gpu
 from coding_tasks import TASKS
 
 TIMEOUT_SECONDS = 900
@@ -86,9 +88,15 @@ def stream(base: str, body: dict) -> dict:
     return {**last, "first_token_seconds": first, "wall_seconds": time.monotonic() - started, "content": "".join(content)}
 
 
-def vram_used_mb() -> int:
-    output = subprocess.run(["nvidia-smi", "--query-gpu=memory.used", "--format=csv,noheader,nounits"], capture_output=True, text=True).stdout
-    return int(output.strip().splitlines()[0])
+def vram_used_mb() -> int | None:
+    memory = gpu.any_card_memory()
+    return memory.used_mb if memory else None
+
+
+def vram_growth_mb(before: int | None, after: int | None) -> int | None:
+    if before is None or after is None:
+        return None
+    return after - before
 
 
 def unload_all(base: str) -> None:
@@ -125,7 +133,7 @@ def speed(base: str, model: str, system_prompt: str, tools: list, context: int =
     started = time.monotonic()
     call(base, "/api/generate", {"model": model, "keep_alive": -1, "options": {"num_ctx": context}})
     load_seconds = time.monotonic() - started
-    vram = vram_used_mb() - baseline
+    vram = vram_growth_mb(baseline, vram_used_mb())
     short = [stream(base, {"model": model, "think": False, "keep_alive": -1, "options": {**brain_options, "num_predict": 16},
                            "messages": [{"role": "user", "content": f"say hi ({attempt})"}]}) for attempt in range(SPEED_REPEATS)]
     long_cold = stream(base, {"model": model, "think": False, "keep_alive": -1, "tools": tools, "options": {**brain_options, "num_predict": 64},

@@ -2,6 +2,8 @@ import time
 
 import pytest
 
+from arty_engine import gpu
+from arty_engine.backend import Backend
 from arty_engine.config import Config
 from arty_engine.gpu import GpuMemory
 from arty_engine.runner import FOREVER, LoadError, RunnerPool, build_arguments, compact_tool_definitions, kv_cache_mb
@@ -243,4 +245,72 @@ def test_a_model_still_answering_is_not_killed_to_load_it_with_another_context(t
         pool.acquire(model, 4096)
     assert busy.alive and launcher.launched[0].returncode is None and len(launcher.launched) == 1
     pool.release(busy, FOREVER)
+    pool.shutdown()
+
+
+def backend_pool(tmp_path, name, runtimes=None, memory=None):
+    config = Config(store=str(tmp_path / "own"), model_roots=[str(tmp_path / "other")], state_dir=str(tmp_path / "state"),
+                    runner_binary="/opt/runtime/server", library_path=["/opt/cuda/lib"], load_overhead_mb=100,
+                    runtimes=runtimes or {})
+    build_store(tmp_path / "other")
+    runtime = config.runtime_for(name)
+    backend = Backend(name=name, reason="test", runner_binary=runtime.runner_binary, library_path=tuple(runtime.library_path))
+    store = ModelStore(config.roots)
+    launcher = FakeLauncher()
+    return RunnerPool(config, store, launcher=launcher, memory=memory, backend=backend), store, launcher
+
+
+@pytest.mark.parametrize("name, hidden", [("cuda", {"CUDA_VISIBLE_DEVICES": ""}), ("rocm", {"HIP_VISIBLE_DEVICES": ""}),
+                                          ("vulkan", {}), ("cpu", {})])
+def test_a_cpu_only_request_hides_the_cards_of_the_chosen_backend(tmp_path, monkeypatch, name, hidden):
+    for variable in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
+        monkeypatch.delenv(variable, raising=False)
+    pool, store, launcher = backend_pool(tmp_path, name)
+    runner, _ = pool.acquire(store.get("nomic-embed-text"), None, cpu_only=True)
+    pool.release(runner, FOREVER)
+    environment = launcher.environments[0]
+    assert {key: environment[key] for key in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES") if key in environment} == hidden
+    arguments = launcher.launched[0].arguments
+    assert arguments[arguments.index("--device") + 1] == "none"
+    pool.shutdown()
+
+
+def test_a_gpu_request_hides_no_card(tmp_path, monkeypatch):
+    for variable in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
+        monkeypatch.delenv(variable, raising=False)
+    pool, store, launcher = backend_pool(tmp_path, "rocm")
+    runner, _ = pool.acquire(store.get("nomic-embed-text"), None)
+    pool.release(runner, FOREVER)
+    assert "HIP_VISIBLE_DEVICES" not in launcher.environments[0] and "CUDA_VISIBLE_DEVICES" not in launcher.environments[0]
+    pool.shutdown()
+
+
+def test_the_chosen_backend_s_runtime_and_libraries_are_launched(tmp_path):
+    runtimes = {"rocm": {"runner_binary": "/opt/rocm-build/server", "library_path": ["/opt/rocm-libs/lib"]}}
+    pool, store, launcher = backend_pool(tmp_path, "rocm", runtimes)
+    runner, _ = pool.acquire(store.get("qwen3:14b"), 4096)
+    pool.release(runner, FOREVER)
+    assert launcher.launched[0].arguments[0] == "/opt/rocm-build/server"
+    assert launcher.environments[0]["LD_LIBRARY_PATH"].split(":") == ["/opt/rocm-libs/lib", "/opt/rocm-build"]
+    pool.shutdown()
+
+
+def test_the_cuda_backend_launches_the_top_level_runtime_as_before(tmp_path):
+    pool, store, launcher = backend_pool(tmp_path, "cuda", {"rocm": {"runner_binary": "/opt/rocm-build/server"}})
+    runner, _ = pool.acquire(store.get("qwen3:14b"), 4096)
+    pool.release(runner, FOREVER)
+    assert launcher.launched[0].arguments[0] == "/opt/runtime/server"
+    assert launcher.environments[0]["LD_LIBRARY_PATH"].split(":") == ["/opt/cuda/lib", "/opt/runtime"]
+    pool.shutdown()
+
+
+def test_the_pool_reads_card_memory_the_backend_s_way(tmp_path, monkeypatch):
+    seen = []
+    monkeypatch.setattr(gpu, "card_memory", lambda backend="cuda": seen.append(backend) or GpuMemory(total_mb=8192, used_mb=0))
+    monkeypatch.setattr(gpu, "memory_by_process", lambda backend="cuda": seen.append(f"processes {backend}") or {})
+    pool, store, _ = backend_pool(tmp_path, "rocm")
+    runner, _ = pool.acquire(store.get("qwen3:14b"), 4096)
+    pool.release(runner, FOREVER)
+    assert runner.vram_mb() == 0
+    assert seen[0] == "rocm" and "processes rocm" in seen
     pool.shutdown()
