@@ -33,6 +33,8 @@ COPY_FOLDER = "copy"
 MOVED_FOLDER = "moved"
 DOCUMENTS_FOLDER = "old-manifest-blobs"
 PROBE_PREFIX = ".migrate-probe-"
+RESTORING_SUFFIX = ".restoring"
+ENGINE_URL_SCHEMES = ("http://", "https://")
 LARGEST_OLD_DOCUMENT = 1024 * 1024
 DEFAULT_ENGINE_URL = "http://127.0.0.1:11438"
 NO_ENGINE = "none"
@@ -110,8 +112,8 @@ def default_host_of(base: Path, chosen: tuple[str, ...]) -> str | None:
     named = sorted(set(hosts) & {host.lower() for host in chosen})
     if len(named) > 1:
         raise MigrationError(f"{base} holds several of the hosts given with --default-host ({', '.join(named)}); name one")
-    if named:
-        return named[0]
+    if chosen:
+        return named[0] if named else None
     if len(hosts) > 1:
         raise MigrationError(f"{base} holds models from several hosts ({', '.join(hosts)}); name the one its short names "
                              f"came from with --default-host; nothing was changed")
@@ -155,10 +157,32 @@ def old_manifests(root: Path, default_hosts: tuple[str, ...]) -> tuple[list[OldM
             in_folder[name.display] = path
             entry = OldManifest(folder, path, name)
             if name.display in kept:
+                check_same_model(root, kept[name.display], entry)
                 older_copies.append((entry, kept[name.display]))
             else:
                 kept[name.display] = entry
     return list(kept.values()), older_copies
+
+
+def model_file_of(root: Path, path: Path) -> str | None:
+    try:
+        manifest = single_build(root, path, read_object(path))
+    except MigrationError:
+        return None
+    layers = manifest.get("layers")
+    for layer in layers if isinstance(layers, list) else []:
+        kind = OLD_LAYER_TYPE.fullmatch(str(layer.get("mediaType", ""))) if isinstance(layer, dict) else None
+        if kind and kind.group(1) == "model":
+            return layer.get("digest")
+    return None
+
+
+def check_same_model(root: Path, kept: OldManifest, other: OldManifest) -> None:
+    model_file = model_file_of(root, kept.path)
+    if model_file is None or model_file != model_file_of(root, other.path):
+        raise MigrationError(f"{kept.path.relative_to(root)} and {other.path.relative_to(root)} would both become "
+                             f"{kept.name.display} but hold different model files (or one can't be read); move one of "
+                             f"them out of the store first; nothing was changed")
 
 
 def read_json(path: Path):
@@ -397,8 +421,8 @@ def migrate(root: Path, backup: Path, default_hosts: tuple[str, ...] = (), skip:
 def plan_lines(root: Path, plan: Plan) -> list[str]:
     lines = [f"{entry.name.display}: {entry.path.relative_to(root)} -> {entry.name.manifest_path(root).relative_to(root)}"
              for entry, _ in plan.convert]
-    lines += [f"{older.name.display}: {older.path.relative_to(root)} is an older copy of {kept.path.relative_to(root)}; "
-              f"it stays in the backup" for older, kept in plan.older_copies]
+    lines += [f"{older.name.display}: {older.path.relative_to(root)} is an older copy of {kept.path.relative_to(root)} "
+              f"(same model file); it stays in the backup" for older, kept in plan.older_copies]
     lines += [f"{entry.name.display}: {entry.path.relative_to(root)} left out (--skip); it stays in the backup"
               for entry in plan.skipped]
     return lines
@@ -428,13 +452,19 @@ def check_catalog(root: Path, record: dict) -> None:
                              "move or delete them first, nothing was undone:\n  " + "\n  ".join(extra))
 
 
+def run_finished(record: dict, backup: Path) -> bool:
+    if "finished" in record:
+        return bool(record["finished"])
+    return (backup / MOVED_FOLDER).is_dir()
+
+
 def source_of(root: Path, backup: Path, record: dict, before: dict, folder: str) -> Path | None:
     expected = strip_times(part_of(before, folder))
     in_store, moved, copy = root / folder, backup / MOVED_FOLDER / folder, backup / COPY_FOLDER / folder
     if in_store.exists() and moved.exists():
         raise MigrationError(f"{in_store} exists again; nothing was undone")
     candidates = [(in_store, root), (moved, backup / MOVED_FOLDER)]
-    if record.get("finished", True):
+    if run_finished(record, backup):
         candidates.append((copy, backup / COPY_FOLDER))
     for place, base in candidates:
         if not place.exists():
@@ -442,7 +472,7 @@ def source_of(root: Path, backup: Path, record: dict, before: dict, folder: str)
         if strip_times(describe_tree(base, (folder,))) != expected:
             raise MigrationError(f"{place} does not match what the migration moved; nothing was undone")
         return None if place == in_store else place
-    if not record.get("finished", True):
+    if not run_finished(record, backup):
         raise MigrationError(f"{folder} is in neither {root} nor {backup / MOVED_FOLDER}: this backup belongs to a migrate that "
                              f"stopped before it moved the old folders, so they are in a later run's backup; undo with that "
                              f"one; nothing was undone")
@@ -454,7 +484,9 @@ def restore_folder(root: Path, source: Path, folder: str, before: dict) -> None:
     if source.parent.name == MOVED_FOLDER:
         os.rename(source, root / folder)
     else:
-        shutil.copytree(source, root / folder, symlinks=True)
+        restoring = root / f"{folder}{RESTORING_SUFFIX}"
+        shutil.copytree(source, restoring, symlinks=True)
+        os.rename(restoring, root / folder)
     for relative in sorted(part_of(before, folder), key=lambda path: path.count("/"), reverse=True):
         old_time = before[relative]["mtime_ns"]
         os.utime(root / relative, ns=(old_time, old_time), follow_symlinks=False)
@@ -482,7 +514,9 @@ def models_missing_blobs(root: Path, folders: list[str]) -> list[str]:
         for path in sorted((root / folder).glob("*/*/*/*")):
             try:
                 manifest = single_build(root, path, read_object(path))
-            except MigrationError:
+            except MigrationError as error:
+                lines.append(f"warning: {path.relative_to(root)} can't be read ({error}), so that model won't load; a later "
+                             f"migrate needs --skip for it")
                 continue
             missing = sorted(digest for digest in digests_named_by(manifest) if not blob_path(root, digest).is_file())
             if missing:
@@ -502,6 +536,7 @@ def undo(root: Path, backup: Path) -> list[str]:
     root, backup = root.resolve(), backup.absolute()
     record = store_record(root, backup)
     before = read_object(backup / LAYOUT_BEFORE)
+    remove_restoring_leftovers(root, record)
     check_catalog(root, record)
     sources = {folder: source_of(root, backup, record, before, folder) for folder in record["moved"]}
     documents = record.get("documents", {})
@@ -518,15 +553,30 @@ def undo(root: Path, backup: Path) -> list[str]:
     differences = sorted(path for path in set(before) | set(after) if before.get(path) != after.get(path))
     if differences:
         raise MigrationError("the old layout came back with differences:\n  " + "\n  ".join(differences))
+    record["undone"] = True
+    write_synced(backup / MIGRATION_RECORD, json.dumps(record, indent=1))
     return ([f"restored {folder}" for folder, source in sources.items() if source is not None]
             + [f"removed {relative}" for relative in record["written"]]
             + models_missing_blobs(root, [folder for folder in record["moved"] if folder in OLD_MANIFEST_FOLDERS]))
 
 
+def remove_restoring_leftovers(root: Path, record: dict) -> None:
+    for folder in record["moved"]:
+        leftover = root / f"{folder}{RESTORING_SUFFIX}"
+        if leftover.is_dir() and not leftover.is_symlink():
+            shutil.rmtree(leftover)
+
+
 def finished_record(root: Path, backup: Path) -> dict:
     record = store_record(root, backup)
-    if not record.get("finished", True):
+    if record.get("undone"):
+        raise MigrationError(f"the migration recorded in {backup} was undone; nothing was changed")
+    if not run_finished(record, backup):
         raise MigrationError(f"{backup} belongs to a migrate that did not finish; undo it first")
+    back = [folder for folder in record["moved"] if (root / folder).exists()]
+    if back:
+        raise MigrationError(f"{', '.join(back)} is back in {root}, so the migration recorded in {backup} is not in force "
+                             f"(was it undone by an earlier version of this tool?); nothing was changed")
     return record
 
 
@@ -534,7 +584,12 @@ def tidy(root: Path, backup: Path) -> list[str]:
     root, backup = root.resolve(), backup.absolute()
     record = finished_record(root, backup)
     if record.get("documents"):
-        raise MigrationError(f"the old manifest blobs of this migration are already in {backup / DOCUMENTS_FOLDER}")
+        check_documents(root, backup, record["documents"])
+        left = {name: digest for name, digest in record["documents"].items() if (root / BLOBS_FOLDER / name).exists()}
+        move_documents_out(root, backup, left)
+        if not left:
+            return [f"the old manifest blobs of this migration are already in {backup / DOCUMENTS_FOLDER}"]
+        return [f"moved {name} to {backup / DOCUMENTS_FOLDER}" for name in left]
     record["blobs_mtime_ns"] = (root / BLOBS_FOLDER).lstat().st_mtime_ns
     record["documents"] = old_documents(root, blobs_in_use(root))
     write_synced(backup / MIGRATION_RECORD, json.dumps(record, indent=1))
@@ -555,17 +610,36 @@ def untidy(root: Path, backup: Path) -> list[str]:
     return [f"put {name} back in {root / BLOBS_FOLDER}" for name in documents]
 
 
+def engine_address(url: str) -> str:
+    if "://" not in url:
+        return f"http://{url}"
+    if not url.startswith(ENGINE_URL_SCHEMES):
+        raise MigrationError(f"--engine-url {url} is not an http:// or https:// address (or none); nothing was changed")
+    return url
+
+
+def is_stopped(reason) -> bool:
+    return isinstance(reason, (ConnectionRefusedError, TimeoutError))
+
+
 def check_engine_stopped(url: str) -> None:
     if url == NO_ENGINE:
         return
+    address = engine_address(url)
     try:
-        with urllib.request.urlopen(f"{url.rstrip('/')}/api/version", timeout=ENGINE_CHECK_SECONDS):
+        with urllib.request.urlopen(f"{address.rstrip('/')}/api/version", timeout=ENGINE_CHECK_SECONDS):
             pass
     except urllib.error.HTTPError:
         pass
-    except (urllib.error.URLError, OSError):
-        return
-    raise MigrationError(f"an engine answers at {url}; stop it first (or pass --engine-url none when no engine reads this store)")
+    except urllib.error.URLError as error:
+        if is_stopped(error.reason):
+            return
+        raise MigrationError(f"can't tell whether an engine answers at {address} ({error.reason}); nothing was changed") from error
+    except OSError as error:
+        if is_stopped(error):
+            return
+        raise MigrationError(f"can't tell whether an engine answers at {address} ({error}); nothing was changed") from error
+    raise MigrationError(f"an engine answers at {address}; stop it first (or pass --engine-url none when no engine reads this store)")
 
 
 ACTIONS = {"undo": undo, "tidy": tidy, "untidy": untidy}

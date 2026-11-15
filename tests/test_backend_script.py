@@ -162,3 +162,10 @@ def test_the_switch_drops_nothing_when_the_site_names_nothing(tmp_path):
     finished = run_engine_switch(tmp_path, 0)
     assert finished.returncode == 0, finished.stderr
     assert "--drop-setting" not in calls(tmp_path)
+
+
+def test_the_switch_moves_arty_over_before_it_fails_on_the_controller(tmp_path):
+    finished = run_engine_switch(tmp_path, 3)
+    assert finished.returncode != 0
+    assert "brain-through-engine.conf" in calls(tmp_path) and "keep_alive" in calls(tmp_path)
+    assert "trainer-controller is not running" in finished.stderr.rstrip().splitlines()[-1]

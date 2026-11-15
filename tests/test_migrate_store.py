@@ -390,3 +390,98 @@ def test_the_command_line_refuses_while_an_engine_answers(old_store, tmp_path, c
     assert "stop it first" in capsys.readouterr().err
     assert not (old_store / "catalog").exists()
     assert migrate_store.main(["migrate", "--store", str(old_store), "--backup", str(tmp_path / "b"), "--engine-url", "none"]) == 0
+
+
+def old_documents_in(folder: Path) -> list[Path]:
+    return [path for path in folder.iterdir() if is_old_document(path)]
+
+
+def test_undo_names_old_manifests_it_brought_back_that_cannot_be_read(old_store, tmp_path):
+    migrate_store.migrate(old_store, tmp_path / "backup")
+    migrate_store.untidy(old_store, tmp_path / "backup")
+    for document in old_documents_in(old_store / "blobs"):
+        document.unlink()
+    lines = migrate_store.undo(old_store, tmp_path / "backup")
+    assert any("qwen3/14b" in line and "can't be read" in line for line in lines)
+
+
+def test_an_earlier_tools_backup_of_a_run_that_never_moved_the_folders_is_refused(old_store, tmp_path, monkeypatch):
+    interrupt_writes(monkeypatch, 0)
+    with pytest.raises(OSError):
+        migrate_store.migrate(old_store, tmp_path / "first")
+    monkeypatch.undo()
+    record_path = tmp_path / "first" / "migration.json"
+    record = json.loads(record_path.read_text())
+    del record["finished"], record["documents"]
+    record_path.write_text(json.dumps(record))
+    (tmp_path / "first" / "moved").rmdir()
+    migrate_store.undo(old_store, tmp_path / "first")
+    migrate_store.migrate(old_store, tmp_path / "second")
+    before = snapshot(old_store)
+    with pytest.raises(migrate_store.MigrationError, match="nothing was undone"):
+        migrate_store.undo(old_store, tmp_path / "first")
+    assert snapshot(old_store) == before
+
+
+def test_tidy_and_untidy_refuse_a_migration_that_was_undone(old_store, tmp_path):
+    migrate_store.migrate(old_store, tmp_path / "backup")
+    migrate_store.untidy(old_store, tmp_path / "backup")
+    migrate_store.undo(old_store, tmp_path / "backup")
+    before = snapshot(old_store)
+    for action in (migrate_store.tidy, migrate_store.untidy):
+        with pytest.raises(migrate_store.MigrationError, match="undone"):
+            action(old_store, tmp_path / "backup")
+    assert snapshot(old_store) == before
+
+
+def test_tidy_finishes_a_move_that_stopped_part_way(old_store, tmp_path):
+    migrate_store.migrate(old_store, tmp_path / "backup")
+    moved = tmp_path / "backup" / "old-manifest-blobs"
+    first = sorted(moved.iterdir())[0]
+    os.rename(first, old_store / "blobs" / first.name)
+    migrate_store.tidy(old_store, tmp_path / "backup")
+    assert not old_documents_in(old_store / "blobs") and (moved / first.name).is_file()
+
+
+def test_an_undo_from_the_copy_that_stopped_part_way_can_be_run_again(old_store, tmp_path, monkeypatch):
+    before = snapshot(old_store)
+    migrate_store.migrate(old_store, tmp_path / "backup")
+    shutil.rmtree(tmp_path / "backup" / "moved")
+
+    def stopped_copy(source, target, symlinks=False):
+        Path(target).mkdir()
+        raise OSError(errno.EIO, "stopped")
+
+    monkeypatch.setattr(migrate_store.shutil, "copytree", stopped_copy)
+    with pytest.raises(OSError):
+        migrate_store.undo(old_store, tmp_path / "backup")
+    monkeypatch.undo()
+    migrate_store.undo(old_store, tmp_path / "backup")
+    assert snapshot(old_store) == before
+
+
+def test_an_engine_address_without_a_scheme_is_still_checked(old_store, tmp_path, capsys):
+    engine = answering_engine()
+    try:
+        address = f"127.0.0.1:{engine.server_address[1]}"
+        assert migrate_store.main(["migrate", "--store", str(old_store), "--backup", str(tmp_path / "b"), "--engine-url", address]) == 1
+    finally:
+        engine.shutdown()
+    assert "stop it first" in capsys.readouterr().err
+    assert migrate_store.main(["migrate", "--store", str(old_store), "--backup", str(tmp_path / "b"), "--engine-url", "ftp://x"]) == 1
+    assert not (old_store / "catalog").exists()
+
+
+def test_a_default_host_given_but_not_in_the_folder_leaves_its_hosts_named(tmp_path):
+    root = tmp_path / "models"
+    add_old_model(root, "manifests-v2", "third.example", "team", "model", "1")
+    migrate_store.migrate(root, tmp_path / "backup", default_hosts=("legacy.example",))
+    assert ModelStore([root]).names() == ["third.example/team/model:1"]
+
+
+def test_the_same_name_with_other_weights_in_the_other_folder_is_refused(old_store, tmp_path):
+    add_old_model(old_store, "manifests-v2", SHORT_HOST, "library", "plain", "1", rows=12)
+    add_old_model(old_store, "manifests", REGISTRY_HOST, "library", "plain", "1", rows=14)
+    with pytest.raises(migrate_store.MigrationError, match="different model files"):
+        migrate_store.migrate(old_store, tmp_path / "backup")
+    assert not (old_store / "catalog").exists()

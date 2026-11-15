@@ -149,6 +149,8 @@ def choose_hf_files(siblings: list[dict], quant: str) -> tuple[dict, dict | None
 
 
 def names_quant(file_name: str, quant: str) -> bool:
+    if not quant:
+        return True
     return re.search(rf"(?<![a-z0-9]){re.escape(quant)}(?![a-z0-9])", Path(file_name).name.lower()) is not None
 
 
@@ -223,6 +225,8 @@ class Puller:
         progress({"status": "pulling manifest"})
         info = _get_json(HF_API.format(repo=repo), HF_SOURCE)
         chosen, projector = choose_hf_files(hf_siblings(info), quant)
+        if pins and pins.model_sha256 and not pins.projector_sha256:
+            projector = None
         revision = info.get("sha") if REVISION.fullmatch(str(info.get("sha", ""))) else DEFAULT_REVISION
         files = [self._listed_file(entry, media_type) for entry, media_type in ((chosen, MODEL_LAYER), (projector, PROJECTOR_LAYER))
                  if entry]
@@ -246,6 +250,9 @@ class Puller:
             raise PullError(f"{entry['rfilename']} has no sha256 on Hugging Face, so it can't be verified")
         digest = checked_digest(f"sha256:{lfs['sha256']}", HF_SOURCE)
         size = checked_size(lfs.get("size") or 0, HF_SOURCE) or checked_size(entry.get("size") or 0, HF_SOURCE)
+        if not size:
+            raise PullError(f"{entry['rfilename']} is listed on Hugging Face without a size, so its download can't be limited "
+                            f"or its space checked; nothing was downloaded")
         return entry, media_type, digest, size
 
     def _check_free_space(self, files: list, target: ModelName) -> None:

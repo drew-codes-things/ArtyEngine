@@ -91,15 +91,16 @@ point_controller_at() {
   local older_setting drop_settings=()
   for older_setting in $CONTROLLER_OLDER_SETTINGS; do drop_settings+=(--drop-setting "$older_setting"); done
   python3 "$CONTROLLER_TOOL" "$1" --settings "$CONTROLLER_SETTINGS" --python "$CONTROLLER_PYTHON" \
-    --unit "$CONTROLLER_UNIT" --module "$CONTROLLER_MODULE" "${drop_settings[@]}"
-  systemctl daemon-reload
-  systemctl restart "$CONTROLLER_UNIT"
+    --unit "$CONTROLLER_UNIT" --module "$CONTROLLER_MODULE" "${drop_settings[@]}" || exit 1
+  systemctl daemon-reload || exit 1
+  systemctl restart "$CONTROLLER_UNIT" || return 1
   sleep "$CONTROLLER_SETTLE_SECONDS"
-  if ! systemctl is-active --quiet "$CONTROLLER_UNIT"; then
-    echo "$CONTROLLER_UNIT is not running after the restart; see journalctl -u $CONTROLLER_UNIT (an unknown setting in" \
-      "$CONTROLLER_SETTINGS stops it). The engine goes ahead without the trainer until it runs again" >&2
-    exit 1
-  fi
+  systemctl is-active --quiet "$CONTROLLER_UNIT"
+}
+
+report_controller_down() {
+  echo "Arty now uses the engine, but $CONTROLLER_UNIT is not running after the restart; see journalctl -u" \
+    "$CONTROLLER_UNIT (an unknown setting in $CONTROLLER_SETTINGS stops it). Training stays paused until it runs again" >&2
 }
 
 repeated_option() {
@@ -168,9 +169,14 @@ case "$1" in
     fi
     take_gpu_lock
     start_engine
-    point_controller_at engine
+    controller_running=yes
+    point_controller_at engine || controller_running=no
     move_ct_to_engine
     show_status
+    if [ "$controller_running" = no ]; then
+      report_controller_down
+      exit 1
+    fi
     ;;
   status) show_status ;;
   settings) show_settings ;;

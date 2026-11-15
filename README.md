@@ -28,7 +28,7 @@ request to, through the engine's HTTP API (`/api/chat`, `/api/generate`, `/api/e
   and unloads the least recently used idle models until it fits `vram_budget_mb` and the card's free memory.
   `keep_alive` says how long a model stays loaded.
 - **Hugging Face pulls.** `hf.co/<owner>/<repo>:<quant>` picks the matching GGUF (and a vision projector when the
-  repository has one), checks its sha256, resumes partial downloads and keeps to a bandwidth cap. Short names such
+  repository has one, F16 first), checks its sha256, resumes partial downloads and keeps to a bandwidth cap. Short names such
   as `qwen3:14b` or `nomic-embed-text` are pulled from the Hugging Face repository `arty_engine/short_names.json`
   lists for them and keep the short name. Pulled models go into the engine's own store. Hugging Face is the only
   source.
@@ -121,18 +121,29 @@ python3 tools/migrate_store.py undo --store /srv/ai/arty-engine/models --backup 
 `migrate` writes one catalog manifest per name (with the old manifest's time, so `/api/tags` keeps its order), keeps
 a copy of the old folders in the backup folder, then moves the old folders and the old manifest documents in `blobs/`
 there. Model files are never touched, copied or renamed. Short names stay short, and a name with a namespace keeps
-it (`someone/model:tag`); a model from another registry keeps that registry's host in its name. When an old folder
-holds several registries, `--default-host` names the one its short names came from; two old names that would become
-one are refused. A model whose old manifest can't be converted stops the run until it is left out with `--skip
+it (`someone/model:tag`); a model from another registry keeps that registry's host in its name. The one registry of
+an old folder becomes the short names; when a folder holds several, or when you want to choose, `--default-host`
+names it (only the hosts given then become short names). Two old names that would become one are refused, and a
+name in both old folders counts as an older copy only when both hold the same model file. A model whose old manifest can't be converted stops the run until it is left out with `--skip
 <name>`. The backup folder must be empty and reachable by a rename (the same mount). Every command that changes the
-store refuses while an engine answers on `--engine-url` (`http://127.0.0.1:11438` unless given, `none` to skip).
+store refuses while an engine answers on `--engine-url` (`http://127.0.0.1:11438` unless given, `http://` added
+when the address has no scheme, `none` to skip), and when it can't tell.
 
 `undo` first checks that the backup can bring the old layout back (from `moved/`, or from `copy/` when `moved/` is
 gone) and changes nothing when it can't; then it moves everything back, removes the catalog manifests the migration
 wrote and checks the old layout byte for byte against the record taken before the migration. It refuses when a
-migrated manifest changed or a model was pulled since, and names any model whose blobs were deleted in between.
-`tidy` moves the old manifest documents of a store migrated by an earlier version of this tool into its backup;
-`untidy` puts them back. At startup the engine names every root that is still in the older layout.
+migrated manifest changed or a model was pulled since, and names any model whose blobs were deleted in between or
+whose old manifest can't be read. An undo that stopped while copying can be run again. `tidy` moves the old manifest
+documents of a store migrated by an earlier version of this tool into its backup (and finishes a move that stopped);
+`untidy` puts them back. Both refuse once the migration was undone. At startup the engine names every root that is still in the older layout.
+
+`tools/unused_blobs.py --store <store>` lists what no catalog manifest names: partial downloads, model files, old
+manifest documents and anything else in `blobs/`, each with its kind and size. `--remove` deletes the list once it
+is printed, and refuses (exit 2, nothing removed) while the store still holds an old manifest folder, has no catalog
+manifest, holds the leftovers of a stopped migration or manifest write, or lists old manifest documents (use `tidy`
+for those, so undo can bring them back). Model files no manifest names, such as the weights of a model left out of a
+migration with `--skip`, are removed only with `--remove-model-files` as well. Run it with no pull in progress, and
+never on a store in the older layout: there every blob counts as unused.
 
 ### Upgrading an install from before 14 Nov 2026
 
@@ -199,10 +210,10 @@ that is missing, private or gated, and the engine passes that on as 404; a refus
 | `GET /api/tags` | Every model in the store and in `model_roots`, minus `internal_models` |
 | `GET /api/ps` | Loaded models, their context and VRAM |
 | `POST /api/show` | Details, parameters, template, capabilities, model info, and `runnable` |
-| `POST /api/chat` | Streamed and not; tools; `think` true, false, unset or a level; `format` `"json"` or a JSON schema; images on vision models; `keep_alive`; sampling options; `num_ctx`; `num_gpu: 0` runs on the CPU; `_debug_render_only` renders the prompt only |
+| `POST /api/chat` | Streamed or not; tools; `think` (true, false, unset, a level); `format` (`"json"`, a schema); images; `keep_alive`; sampling; `num_ctx`; `num_gpu: 0`; `_debug_render_only` |
 | `POST /api/generate` | Prompts, streamed and not; an empty prompt loads a model, and with `keep_alive: 0` unloads it; `raw` prompts |
 | `POST /api/embed`, `POST /api/embeddings` | Embeddings |
-| `POST /api/pull` | Hugging Face names (`hf.co/<owner>/<repo>:<quant>`) and the short names in `arty_engine/short_names.json`, with progress; one pull at a time. A short name already in the store is not downloaded again; one the engine can't run or read answers 409 (delete it, then pull). Each short name is pinned to the sha256 of its files, so a file changed on Hugging Face is refused (502); pulled manifests record the repo and revision. Any other name answers 400 with the form to use |
+| `POST /api/pull` | Hugging Face names (`hf.co/<owner>/<repo>:<quant>`) and the short names in `arty_engine/short_names.json`, with progress; one pull at a time (more below) |
 | `DELETE /api/delete` | Models in the engine's own store. Models read in place from `model_roots` answer 405, internal models and deletes during a pull answer 409 |
 | `POST /api/generate` with `suffix` | **501** |
 | `POST /api/generate` raw with images or a `format` | **501** |
@@ -212,6 +223,13 @@ that is missing, private or gated, and the engine passes that on as 404; a refus
 | Anything else (`/api/blobs`, the `/v1` OpenAI-style routes) | 404 |
 
 Every answer carries `Server: arty-engine/<version>`.
+
+Pulls: a short name already in the store is not downloaded again; one the engine can't run or read answers 409
+(delete it, then pull). Each short name is pinned to the sha256 of its files, so a file changed on Hugging Face is
+refused (502), and a short name that pins no projector takes none. A file listed without a size is refused (502).
+Pulled manifests record the repo and revision. Any other name answers 400 with the form to use. With
+`"stream": false` a pull that would break `pull_keep_free_mb` answers 507; a streamed pull reports that and a pin
+mismatch inside the stream.
 
 ---
 
@@ -235,8 +253,8 @@ copied from `deploy/site.env.example`:
 | `ARTY_CONTROLLER_URL` | The GPU-sharing trainer controller, or `none` |
 | `ARTY_CONTROLLER_SETTINGS`, `ARTY_CONTROLLER_PYTHON`, `ARTY_CONTROLLER_CODE` | The controller's settings file, its Python and its code (only with a controller) |
 | `ARTY_CONTROLLER_UNIT`, `ARTY_CONTROLLER_MODULE` | The controller's systemd unit and the Python module it runs (only with a controller) |
-| `ARTY_CONTROLLER_OLDER_SETTINGS` | Older names of the controller's engine address setting, space separated; the switch removes them from the settings file so only `arty_engine_url` is left (optional) |
-| `ARTY_ENGINE_ALLOWED_HOSTS`, `ARTY_ENGINE_ALLOWED_ORIGINS` | Names, separated by spaces, written into the installed config's `allowed_hosts` and `allowed_origins` (for example the address a reverse proxy passes as `Host`) |
+| `ARTY_CONTROLLER_OLDER_SETTINGS` | Optional: older names of the controller's `arty_engine_url` setting, space separated, which the switch removes |
+| `ARTY_ENGINE_ALLOWED_HOSTS`, `ARTY_ENGINE_ALLOWED_ORIGINS` | Space separated names for the config's `allowed_hosts` and `allowed_origins` (such as the `Host` a proxy passes) |
 | `ARTY_ENGINE_MODEL_ROOTS` | Folders, separated by spaces, written into the installed config's `model_roots` (other engine stores read in place); empty means the engine's own store only |
 | `ARTY_MAIN_MODEL` | The model loaded after a switch, `qwen3:14b` by default |
 

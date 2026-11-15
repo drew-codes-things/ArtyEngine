@@ -62,7 +62,7 @@ def fake_hf(tmp_path, monkeypatch):
     model = write_gguf(tmp_path / "Tiny-Q8_0.gguf", {"general.architecture": "qwen3", "tokenizer.chat_template": "{{ tools }}"}, {"w": (4, 4)})
     data = model.read_bytes()
     state = {"data": data, "sha": hashlib.sha256(data).hexdigest(), "ranges": [], "paths": [], "listed_size": None,
-             "refuse_ranges": 0, "revision": "a" * 40}
+             "refuse_ranges": 0, "revision": "a" * 40, "more_files": []}
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
@@ -73,7 +73,7 @@ def fake_hf(tmp_path, monkeypatch):
             if self.path.startswith("/api/"):
                 listed = len(state["data"]) if state["listed_size"] is None else state["listed_size"]
                 payload = json.dumps({"sha": state["revision"], "siblings": [
-                    {"rfilename": "Tiny-Q8_0.gguf", "lfs": {"sha256": state["sha"], "size": listed}}]}).encode()
+                    {"rfilename": "Tiny-Q8_0.gguf", "lfs": {"sha256": state["sha"], "size": listed}}, *state["more_files"]]}).encode()
                 self.send_response(200)
                 self.send_header("Content-Length", str(len(payload)))
                 self.end_headers()
@@ -461,6 +461,28 @@ def test_the_projector_quant_matches_a_whole_word():
     siblings = [{"rfilename": "M-Q4_K_M.gguf"}, {"rfilename": "mmproj-M-bf16.gguf"}, {"rfilename": "mmproj-M-F16.gguf"}]
     assert pull.choose_hf_files(siblings, "Q4_K_M")[1]["rfilename"] == "mmproj-M-F16.gguf"
     assert pull.choose_hf_files(siblings[:2], "Q4_K_M")[1]["rfilename"] == "mmproj-M-bf16.gguf"
+
+
+@pytest.mark.parametrize("projector", ["mmproj.gguf", "mmproj-F32.gguf", "mmproj-fp16.gguf", "mmproj-Q4_K_M.gguf"])
+def test_a_projector_named_another_way_is_still_taken(projector):
+    siblings = [{"rfilename": "M-Q4_K_M.gguf"}, {"rfilename": projector}]
+    assert pull.choose_hf_files(siblings, "Q4_K_M")[1]["rfilename"] == projector
+
+
+def test_a_pinned_short_name_without_a_projector_pin_takes_no_projector(tmp_path, fake_hf):
+    fake_hf["more_files"] = [{"rfilename": "mmproj-F16.gguf", "lfs": {"sha256": "2" * 64, "size": 10}}]
+    pinned = pull.ShortName("hf.co/Someone/Tiny-GGUF:Q8_0", fake_hf["sha"])
+    pull.Puller(tmp_path / "own", 0, short_names={"tiny:1": pinned}).pull("tiny:1", lambda update: None)
+    manifest = ModelStore([tmp_path / "own"]).get("tiny:1").manifest
+    assert [layer["mediaType"] for layer in manifest["layers"]] == [MODEL_LAYER]
+    assert not any("mmproj" in path for path in fake_hf["paths"])
+
+
+def test_a_file_listed_without_a_size_is_refused_before_downloading(tmp_path, fake_hf):
+    fake_hf["listed_size"] = 0
+    with pytest.raises(pull.PullError, match="size") as refused:
+        pull.Puller(tmp_path / "own", 0).pull("hf.co/Someone/Tiny-GGUF:Q8_0", lambda update: None)
+    assert refused.value.status == 502 and fake_hf["ranges"] == []
 
 
 def test_a_download_longer_than_listed_is_cut_off_and_thrown_away(tmp_path, fake_hf):
