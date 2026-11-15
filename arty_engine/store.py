@@ -365,6 +365,21 @@ def roots_in_older_layout(roots: list[Path]) -> list[Path]:
             if not (root / CATALOG_FOLDER).is_dir() and any((root / folder).is_dir() for folder in OLDER_LAYOUT_FOLDERS)]
 
 
+def remove_unreferenced_blobs(root: Path, digests: set[str]) -> list[Path]:
+    still_used = set()
+    for path in _manifest_files(root):
+        try:
+            still_used |= {entry.get("digest") for entry in _entries_of(_read_json(path))}
+        except (OSError, ValueError, RecursionError) as error:
+            log.warning("couldn't read %s, so no replaced blob is removed: %s", path, error)
+            return []
+    removed = [blob_path(root, digest) for digest in sorted(digests - still_used) if is_digest(digest)]
+    removed = [blob for blob in removed if blob.is_file()]
+    for blob in removed:
+        blob.unlink()
+    return removed
+
+
 def _manifest_files(root: Path) -> list[Path]:
     catalog = root / CATALOG_FOLDER
     if not catalog.is_dir():

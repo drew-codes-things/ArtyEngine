@@ -1,9 +1,10 @@
 import json
+import os
 from pathlib import Path
 
 import pytest
 
-from arty_engine.backend import Machine, resolve_backend
+from arty_engine.backend import ROCM_BUILD_TARGETS, Machine, gfx_target, resolve_backend
 from arty_engine.config import Config, load_config
 
 REPO = Path(__file__).resolve().parents[1]
@@ -12,15 +13,29 @@ SHIPPED_RUNNER = "/srv/ai/arty-engine/runtime/server"
 SHIPPED_LIBRARIES = ("/srv/ai/arty-engine/cuda-12.8/lib",)
 ROCM_RUNTIME = {"runner_binary": "/opt/rocm-build/server", "library_path": ["/opt/rocm-libs/lib"]}
 VULKAN_RUNTIME = {"runner_binary": "/opt/vulkan-build/server"}
+RX_7900_XTX = 110000
+RX_570 = 80003
+CPU_NODE = 0
+README = REPO / "README.md"
 
 
 class FakeMachine:
     def __init__(self, root: Path):
         self.root = root
-        self.tools: set[str] = set()
 
     def machine(self) -> Machine:
-        return Machine(root=self.root, which=lambda name: f"/usr/bin/{name}" if name in self.tools else None)
+        return Machine(root=self.root)
+
+    def kfd_node(self, number: int, version: int) -> None:
+        node = self.root / "sys" / "class" / "kfd" / "kfd" / "topology" / "nodes" / str(number)
+        node.mkdir(parents=True)
+        (node / "properties").write_text(f"cpu_cores_count 0\ngfx_target_version {version}\nsimd_count 192\n")
+
+    def amd_card(self, version: int = RX_7900_XTX) -> None:
+        self.render_node("renderD128", "amdgpu")
+        self.device("dev/kfd")
+        self.kfd_node(0, CPU_NODE)
+        self.kfd_node(1, version)
 
     def device(self, relative: str) -> None:
         path = self.root / relative
@@ -53,18 +68,55 @@ def test_an_nvidia_device_node_means_cuda(host):
     assert backend.name == "cuda" and "nvidia" in backend.reason
 
 
-def test_the_nvidia_tool_alone_means_cuda(host):
-    host.tools.add("nvidia-smi")
-    assert resolved(host).name == "cuda"
+def test_a_leftover_nvidia_tool_without_its_device_does_not_mean_cuda(host, tmp_path, monkeypatch):
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    (tools / "nvidia-smi").write_text("#!/bin/sh\nexit 9\n")
+    (tools / "nvidia-smi").chmod(0o755)
+    monkeypatch.setenv("PATH", f"{tools}:{os.environ['PATH']}")
+    host.amd_card()
+    assert resolved(host, runtimes={"rocm": ROCM_RUNTIME}).name == "rocm"
+    assert resolved(host).name == "cpu"
 
 
 def test_an_amd_card_with_kfd_and_a_rocm_runtime_means_rocm(host):
+    host.amd_card()
+    backend = resolved(host, runtimes={"rocm": ROCM_RUNTIME, "vulkan": VULKAN_RUNTIME})
+    assert backend.name == "rocm" and "renderD128" in backend.reason and "gfx1100" in backend.reason
+    assert backend.runner_binary == "/opt/rocm-build/server" and backend.library_path == ("/opt/rocm-libs/lib",)
+    assert backend.cpu_only_environment == {"ROCR_VISIBLE_DEVICES": ""}
+
+
+def test_a_card_the_rocm_build_carries_no_code_for_uses_vulkan(host):
+    host.amd_card(RX_570)
+    backend = resolved(host, runtimes={"rocm": ROCM_RUNTIME, "vulkan": VULKAN_RUNTIME})
+    assert backend.name == "vulkan" and "gfx803" in backend.reason and "not one the ROCm build carries" in backend.reason
+
+
+def test_a_card_target_that_cannot_be_read_never_means_rocm(host):
     host.render_node("renderD128", "amdgpu")
     host.device("dev/kfd")
     backend = resolved(host, runtimes={"rocm": ROCM_RUNTIME, "vulkan": VULKAN_RUNTIME})
-    assert backend.name == "rocm" and "renderD128" in backend.reason
-    assert backend.runner_binary == "/opt/rocm-build/server" and backend.library_path == ("/opt/rocm-libs/lib",)
-    assert backend.cpu_only_environment == {"HIP_VISIBLE_DEVICES": ""}
+    assert backend.name == "vulkan" and "not readable" in backend.reason
+    assert resolved(host, runtimes={"rocm": ROCM_RUNTIME}).name == "cpu"
+
+
+@pytest.mark.parametrize("version, target", [(110000, "gfx1100"), (90010, "gfx90a"), (100300, "gfx1030"),
+                                             (80003, "gfx803"), (120001, "gfx1201"), (90402, "gfx942")])
+def test_kfd_target_versions_become_gfx_names(version, target):
+    assert gfx_target(version) == target
+
+
+def test_the_rocm_build_targets_match_the_readme():
+    listed = " ".join(README.read_text().split("The build carries GPU code for ", 1)[1].split(".", 1)[0].split())
+    named = set()
+    for part in listed.replace(" and ", ", ").split(", "):
+        first, _, last = part.partition(" to ")
+        named.add(first)
+        if last:
+            prefix = first[:-1]
+            named |= {f"{prefix}{digit}" for digit in range(int(first[-1]), int(last[-1]) + 1)}
+    assert named == ROCM_BUILD_TARGETS
 
 
 def test_an_amd_card_without_kfd_falls_back_to_vulkan(host):
@@ -76,8 +128,7 @@ def test_an_amd_card_without_kfd_falls_back_to_vulkan(host):
 
 
 def test_an_amd_card_with_kfd_but_no_rocm_runtime_uses_vulkan(host):
-    host.render_node("renderD128", "amdgpu")
-    host.device("dev/kfd")
+    host.amd_card()
     assert resolved(host, runtimes={"vulkan": VULKAN_RUNTIME}).name == "vulkan"
 
 
@@ -104,7 +155,8 @@ def test_an_amd_card_with_no_runtime_configured_runs_on_the_cpu_and_says_why(hos
 def test_no_gpu_at_all_runs_on_the_cpu(host):
     backend = resolved(host, runtimes={"rocm": ROCM_RUNTIME, "vulkan": VULKAN_RUNTIME})
     assert backend.name == "cpu" and "no NVIDIA card and no render node" in backend.reason
-    assert backend.cpu_only_environment == {}
+    assert backend.cpu_only_environment == {"CUDA_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": ""}
+    assert backend.runs_everything_on_the_cpu
 
 
 def test_a_backend_set_in_the_config_is_used_whatever_is_fitted(host):
@@ -136,7 +188,6 @@ def test_an_installed_config_from_before_resolves_as_before_on_the_nvidia_server
     file = tmp_path / "older.json"
     file.write_text(json.dumps(older))
     host.device("dev/nvidia0")
-    host.tools.add("nvidia-smi")
     backend = resolve_backend(load_config(str(file)), host.machine())
     assert (backend.name, backend.runner_binary, backend.library_path) == ("cuda", SHIPPED_RUNNER, SHIPPED_LIBRARIES)
     assert backend.cpu_only_environment == {"CUDA_VISIBLE_DEVICES": ""}

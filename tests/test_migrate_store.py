@@ -485,3 +485,91 @@ def test_the_same_name_with_other_weights_in_the_other_folder_is_refused(old_sto
     with pytest.raises(migrate_store.MigrationError, match="different model files"):
         migrate_store.migrate(old_store, tmp_path / "backup")
     assert not (old_store / "catalog").exists()
+
+
+def newer_qwen3(root: Path) -> Path:
+    return root / "manifests-v2" / SHORT_HOST / "library" / "qwen3" / "14b"
+
+
+def older_qwen3(root: Path) -> Path:
+    return root / "manifests" / REGISTRY_HOST / "library" / "qwen3" / "14b"
+
+
+def make_unreadable(path: Path) -> None:
+    path.unlink()
+    path.write_text("{")
+
+
+def test_a_damaged_newer_manifest_in_both_folders_points_at_skip_and_skip_gets_past_it(old_store, tmp_path):
+    make_unreadable(newer_qwen3(old_store))
+    with pytest.raises(migrate_store.MigrationError, match="--skip"):
+        migrate_store.dry_run(old_store)
+    lines = migrate_store.dry_run(old_store, skip=("qwen3:14b",))
+    assert any("qwen3:14b" in line and "left out" in line for line in lines)
+
+
+@pytest.mark.parametrize("skip", [(), ("qwen3:14b",)])
+def test_an_unreadable_older_copy_stays_in_the_backup_unread(old_store, skip):
+    make_unreadable(older_qwen3(old_store))
+    lines = migrate_store.dry_run(old_store, skip=skip)
+    assert any("qwen3:14b" in line and "manifests/" in line and "can't be read" in line for line in lines)
+
+
+def test_a_default_host_missing_from_a_folder_is_named_in_the_plan(old_store):
+    lines = migrate_store.dry_run(old_store, default_hosts=(SHORT_HOST,))
+    assert any(line.startswith("note:") and "manifests " in line and REGISTRY_HOST in line and "once per folder" in line
+               for line in lines)
+
+
+def test_undo_refuses_a_backup_already_undone_when_a_later_migration_holds_the_store(tmp_path):
+    root = tmp_path / "models"
+    add_old_model(root, "manifests", REGISTRY_HOST, "library", "alpha", "1", rows=6)
+    beta = add_old_model(root, "manifests", REGISTRY_HOST, "library", "beta", "1", rows=7)
+    migrate_store.migrate(root, tmp_path / "b1")
+    migrate_store.undo(root, tmp_path / "b1")
+    (root / "manifests" / REGISTRY_HOST / "library" / "beta" / "1").unlink()
+    migrate_store.migrate(root, tmp_path / "b2")
+    before = snapshot(root)
+    with pytest.raises(migrate_store.MigrationError, match="already undone"):
+        migrate_store.undo(root, tmp_path / "b1")
+    assert snapshot(root) == before and beta
+
+
+def silent_listener():
+    import socket
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    return listener
+
+
+@pytest.mark.parametrize("form", ["http://127.0.0.1:{port}", "127.0.0.1:{port}", "localhost:{port}"])
+def test_a_listener_that_never_answers_counts_as_running(old_store, tmp_path, form):
+    listener = silent_listener()
+    try:
+        url = form.format(port=listener.getsockname()[1])
+        assert migrate_store.main(["migrate", "--store", str(old_store), "--backup", str(tmp_path / "b"), "--engine-url", url]) == 1
+    finally:
+        listener.close()
+    assert not (old_store / "catalog").exists()
+
+
+def test_migrate_and_undo_clear_empty_probe_folders_of_earlier_runs(old_store, tmp_path):
+    (old_store / ".migrate-probe-4242").mkdir()
+    migrate_store.migrate(old_store, tmp_path / "backup")
+    assert not (old_store / ".migrate-probe-4242").exists()
+    (old_store / ".migrate-probe-4343").mkdir()
+    migrate_store.undo(old_store, tmp_path / "backup")
+    assert not (old_store / ".migrate-probe-4343").exists()
+
+
+def test_an_earlier_tools_backup_without_moved_is_refused_by_name(old_store, tmp_path):
+    migrate_store.migrate(old_store, tmp_path / "backup")
+    record_path = tmp_path / "backup" / "migration.json"
+    record = json.loads(record_path.read_text())
+    del record["finished"]
+    record_path.write_text(json.dumps(record))
+    shutil.rmtree(tmp_path / "backup" / "moved")
+    for action in (migrate_store.undo, migrate_store.tidy):
+        with pytest.raises(migrate_store.MigrationError, match="before 15 Nov 2026"):
+            action(old_store, tmp_path / "backup")

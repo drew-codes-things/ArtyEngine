@@ -4,11 +4,11 @@ import json
 import os
 import re
 import shutil
+import socket
 import stat
 import sys
-import urllib.error
-import urllib.request
-from dataclasses import dataclass
+import urllib.parse
+from dataclasses import dataclass, field
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -57,6 +57,8 @@ class Plan:
     convert: list
     older_copies: list
     skipped: list
+    unread_copies: list = field(default_factory=list)
+    notes: list = field(default_factory=list)
 
 
 def sha256_of(path: Path) -> str:
@@ -157,7 +159,6 @@ def old_manifests(root: Path, default_hosts: tuple[str, ...]) -> tuple[list[OldM
             in_folder[name.display] = path
             entry = OldManifest(folder, path, name)
             if name.display in kept:
-                check_same_model(root, kept[name.display], entry)
                 older_copies.append((entry, kept[name.display]))
             else:
                 kept[name.display] = entry
@@ -177,12 +178,39 @@ def model_file_of(root: Path, path: Path) -> str | None:
     return None
 
 
-def check_same_model(root: Path, kept: OldManifest, other: OldManifest) -> None:
-    model_file = model_file_of(root, kept.path)
-    if model_file is None or model_file != model_file_of(root, other.path):
-        raise MigrationError(f"{kept.path.relative_to(root)} and {other.path.relative_to(root)} would both become "
-                             f"{kept.name.display} but hold different model files (or one can't be read); move one of "
-                             f"them out of the store first; nothing was changed")
+def sort_older_copies(root: Path, older_copies: list, skip: tuple[str, ...]) -> tuple[list, list, list, list]:
+    same, unread, skipped, problems = [], [], [], []
+    for older, kept in older_copies:
+        older_model = model_file_of(root, older.path)
+        if older_model is None:
+            unread.append((older, kept))
+            continue
+        if kept.name.display in skip:
+            skipped.append(older)
+            continue
+        kept_model = model_file_of(root, kept.path)
+        if kept_model is not None and kept_model != older_model:
+            problems.append(f"{kept.name.display}: {kept.path.relative_to(root)} and {older.path.relative_to(root)} hold "
+                            f"different model files; move one of them out of the store first")
+        else:
+            same.append((older, kept))
+    return same, unread, skipped, problems
+
+
+def host_notes(root: Path, default_hosts: tuple[str, ...]) -> list[str]:
+    if not default_hosts:
+        return []
+    chosen = {host.lower() for host in default_hosts}
+    notes = []
+    for folder in OLD_MANIFEST_FOLDERS:
+        base = root / folder
+        if not base.is_dir():
+            continue
+        hosts = sorted(path.name.lower() for path in base.iterdir() if path.is_dir() and path.name.lower() not in HF_HOSTS)
+        if hosts and not chosen & set(hosts):
+            notes.append(f"note: {folder} holds none of the hosts given with --default-host, so its models keep their host "
+                         f"({', '.join(hosts)}) in the name; give --default-host once per folder for short names there")
+    return notes
 
 
 def read_json(path: Path):
@@ -256,7 +284,8 @@ def plan_migration(root: Path, default_hosts: tuple[str, ...] = (), skip: tuple[
     if existing:
         raise MigrationError(f"{existing[0]} already exists, so an earlier migrate stopped part way or finished: run undo with "
                              f"that migrate's backup folder first; nothing was changed")
-    convert, skipped, problems = [], [], []
+    same_copies, unread_copies, skipped, problems = sort_older_copies(root, older_copies, skip)
+    convert = []
     for entry in found:
         if entry.name.display in skip:
             skipped.append(entry)
@@ -268,7 +297,7 @@ def plan_migration(root: Path, default_hosts: tuple[str, ...] = (), skip: tuple[
     if problems:
         raise MigrationError("these old manifests can't be converted; nothing was changed. Leave a model out with "
                              "--skip <name>:\n  " + "\n  ".join(problems))
-    return Plan(convert, older_copies, skipped)
+    return Plan(convert, same_copies, skipped, unread_copies, host_notes(root, default_hosts))
 
 
 def check_backup_folder(root: Path, backup: Path) -> None:
@@ -391,6 +420,7 @@ def migrate(root: Path, backup: Path, default_hosts: tuple[str, ...] = (), skip:
     root, backup = root.resolve(), backup.absolute()
     check_backup_folder(root, backup)
     plan = plan_migration(root, default_hosts, skip)
+    remove_empty_probes(root)
     store_time = root.lstat().st_mtime_ns
     blobs_time = (root / BLOBS_FOLDER).lstat().st_mtime_ns
     (backup / MOVED_FOLDER).mkdir(parents=True)
@@ -423,9 +453,11 @@ def plan_lines(root: Path, plan: Plan) -> list[str]:
              for entry, _ in plan.convert]
     lines += [f"{older.name.display}: {older.path.relative_to(root)} is an older copy of {kept.path.relative_to(root)} "
               f"(same model file); it stays in the backup" for older, kept in plan.older_copies]
+    lines += [f"{older.name.display}: {older.path.relative_to(root)} is an older copy of {kept.path.relative_to(root)} "
+              f"that can't be read; it stays in the backup, unread" for older, kept in plan.unread_copies]
     lines += [f"{entry.name.display}: {entry.path.relative_to(root)} left out (--skip); it stays in the backup"
               for entry in plan.skipped]
-    return lines
+    return lines + plan.notes
 
 
 def dry_run(root: Path, default_hosts: tuple[str, ...] = (), skip: tuple[str, ...] = ()) -> list[str]:
@@ -452,6 +484,15 @@ def check_catalog(root: Path, record: dict) -> None:
                              "move or delete them first, nothing was undone:\n  " + "\n  ".join(extra))
 
 
+def is_earlier_record(record: dict) -> bool:
+    return "finished" not in record
+
+
+def earlier_record_needs_moved(backup: Path) -> str:
+    return (f"{backup} was made by this tool before 15 Nov 2026: its record does not say whether the migration finished, "
+            f"so only its {MOVED_FOLDER}/ folder is trusted to bring the old layout back, and that folder is gone")
+
+
 def run_finished(record: dict, backup: Path) -> bool:
     if "finished" in record:
         return bool(record["finished"])
@@ -472,6 +513,8 @@ def source_of(root: Path, backup: Path, record: dict, before: dict, folder: str)
         if strip_times(describe_tree(base, (folder,))) != expected:
             raise MigrationError(f"{place} does not match what the migration moved; nothing was undone")
         return None if place == in_store else place
+    if is_earlier_record(record):
+        raise MigrationError(earlier_record_needs_moved(backup) + "; nothing was undone")
     if not run_finished(record, backup):
         raise MigrationError(f"{folder} is in neither {root} nor {backup / MOVED_FOLDER}: this backup belongs to a migrate that "
                              f"stopped before it moved the old folders, so they are in a later run's backup; undo with that "
@@ -536,7 +579,11 @@ def undo(root: Path, backup: Path) -> list[str]:
     root, backup = root.resolve(), backup.absolute()
     record = store_record(root, backup)
     before = read_object(backup / LAYOUT_BEFORE)
+    if record.get("undone") and not any((root / folder).exists() for folder in record["moved"]):
+        raise MigrationError(f"{backup} was already undone and its old folders are not in the store, so a later migrate "
+                             f"holds it; undo with that migrate's backup; nothing was undone")
     remove_restoring_leftovers(root, record)
+    remove_empty_probes(root)
     check_catalog(root, record)
     sources = {folder: source_of(root, backup, record, before, folder) for folder in record["moved"]}
     documents = record.get("documents", {})
@@ -560,6 +607,12 @@ def undo(root: Path, backup: Path) -> list[str]:
             + models_missing_blobs(root, [folder for folder in record["moved"] if folder in OLD_MANIFEST_FOLDERS]))
 
 
+def remove_empty_probes(root: Path) -> None:
+    for probe in root.glob(f"{PROBE_PREFIX}*"):
+        if probe.is_dir() and not probe.is_symlink() and not any(probe.iterdir()):
+            probe.rmdir()
+
+
 def remove_restoring_leftovers(root: Path, record: dict) -> None:
     for folder in record["moved"]:
         leftover = root / f"{folder}{RESTORING_SUFFIX}"
@@ -572,6 +625,8 @@ def finished_record(root: Path, backup: Path) -> dict:
     if record.get("undone"):
         raise MigrationError(f"the migration recorded in {backup} was undone; nothing was changed")
     if not run_finished(record, backup):
+        if is_earlier_record(record):
+            raise MigrationError(earlier_record_needs_moved(backup) + "; nothing was changed")
         raise MigrationError(f"{backup} belongs to a migrate that did not finish; undo it first")
     back = [folder for folder in record["moved"] if (root / folder).exists()]
     if back:
@@ -618,28 +673,31 @@ def engine_address(url: str) -> str:
     return url
 
 
-def is_stopped(reason) -> bool:
-    return isinstance(reason, (ConnectionRefusedError, TimeoutError))
+def host_and_port(address: str) -> tuple[str, int]:
+    parts = urllib.parse.urlsplit(address)
+    try:
+        port = parts.port or (443 if parts.scheme == "https" else 80)
+    except ValueError as error:
+        raise MigrationError(f"--engine-url {address} has a port that isn't a number; nothing was changed") from error
+    if not parts.hostname:
+        raise MigrationError(f"--engine-url {address} names no host; nothing was changed")
+    return parts.hostname, port
 
 
 def check_engine_stopped(url: str) -> None:
     if url == NO_ENGINE:
         return
     address = engine_address(url)
+    host, port = host_and_port(address)
     try:
-        with urllib.request.urlopen(f"{address.rstrip('/')}/api/version", timeout=ENGINE_CHECK_SECONDS):
-            pass
-    except urllib.error.HTTPError:
-        pass
-    except urllib.error.URLError as error:
-        if is_stopped(error.reason):
-            return
-        raise MigrationError(f"can't tell whether an engine answers at {address} ({error.reason}); nothing was changed") from error
+        connection = socket.create_connection((host, port), timeout=ENGINE_CHECK_SECONDS)
+    except (ConnectionRefusedError, TimeoutError):
+        return
     except OSError as error:
-        if is_stopped(error):
-            return
-        raise MigrationError(f"can't tell whether an engine answers at {address} ({error}); nothing was changed") from error
-    raise MigrationError(f"an engine answers at {address}; stop it first (or pass --engine-url none when no engine reads this store)")
+        raise MigrationError(f"can't tell whether an engine listens at {address} ({error}); nothing was changed") from error
+    connection.close()
+    raise MigrationError(f"an engine (or something else) listens at {address}; stop it first (or pass --engine-url none "
+                         f"when no engine reads this store)")
 
 
 ACTIONS = {"undo": undo, "tidy": tidy, "untidy": untidy}
@@ -654,10 +712,11 @@ def main(arguments: list[str] | None = None) -> int:
     parser.add_argument("--backup", type=Path, help="an empty folder a rename can reach (migrate), or the one a migration "
                                                     "filled (undo, tidy, untidy)")
     parser.add_argument("--default-host", action="append", default=[],
-                        help="the host whose models were reached by short names, when an old folder holds several")
+                        help="the host whose models were reached by short names; once given, only the hosts given become "
+                             "short names, so give it once per old folder (plan names a folder it leaves out)")
     parser.add_argument("--skip", action="append", default=[], help="a model to leave out (it stays in the backup)")
     parser.add_argument("--engine-url", default=DEFAULT_ENGINE_URL,
-                        help=f"refuse to change the store while an engine answers here (default {DEFAULT_ENGINE_URL}, or none)")
+                        help=f"refuse to change the store while anything listens here (default {DEFAULT_ENGINE_URL}, or none)")
     parsed = parser.parse_args(arguments)
     if parsed.action != "plan" and parsed.backup is None:
         parser.error(f"{parsed.action} needs --backup")

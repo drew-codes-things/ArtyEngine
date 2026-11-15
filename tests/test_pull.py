@@ -532,3 +532,108 @@ def test_an_installed_short_name_that_is_not_supported_answers_409_through_the_a
     add_model(engine.config.roots[0], "qwen2.5vl", "7b", INLINE_VISION, {"blk.0.w": (4, 4), "v.blk.0.w": (4, 4)})
     status, body = pull_answer(engine, "qwen2.5vl:7b")
     assert status == 409 and "delete it first" in body["error"]
+
+
+def test_a_partial_removed_during_the_pull_is_a_clear_pull_error(tmp_path, fake_hf, monkeypatch):
+    real_fetch = pull.Puller._fetch
+
+    def fetch_then_lose_the_partial(self, url, digest, size, partial, progress):
+        hasher = real_fetch(self, url, digest, size, partial, progress)
+        partial.unlink()
+        return hasher
+
+    monkeypatch.setattr(pull.Puller, "_fetch", fetch_then_lose_the_partial)
+    with pytest.raises(pull.PullError, match="pull again") as refused:
+        pull.Puller(tmp_path / "own", 0).pull("hf.co/Someone/Tiny-GGUF:Q8_0", lambda update: None)
+    assert refused.value.status == 502
+
+
+TINY_SOURCE = "hf.co/Someone/Tiny-GGUF:Q8_0"
+OTHER_SOURCE = "hf.co/Someone/Other-GGUF:Q8_0"
+
+
+def model_digest(root, name):
+    return ModelStore([root]).get(name).manifest["layers"][0]["digest"]
+
+
+def test_a_source_installs_under_the_name_given_and_is_recorded(tmp_path, fake_hf):
+    puller = pull.Puller(tmp_path / "own", 0, short_names={})
+    assert puller.pull("qwen2.5vl:7b", lambda update: None, source=TINY_SOURCE) is False
+    manifest = ModelStore([tmp_path / "own"]).get("qwen2.5vl:7b").manifest
+    assert manifest["source"]["name"] == TINY_SOURCE
+
+
+def test_the_same_source_again_downloads_nothing(tmp_path, fake_hf):
+    puller = pull.Puller(tmp_path / "own", 0, short_names={})
+    puller.pull("tiny:1", lambda update: None, source=TINY_SOURCE)
+    asked = list(fake_hf["paths"])
+    updates = []
+    assert puller.pull("tiny:1", updates.append, source=TINY_SOURCE) is False
+    assert fake_hf["paths"] == asked and updates[-1] == {"status": "success"}
+
+
+def test_another_source_replaces_the_model_after_its_download_verified(tmp_path, fake_hf):
+    root = tmp_path / "own"
+    puller = pull.Puller(root, 0, short_names={})
+    puller.pull("tiny:1", lambda update: None, source=TINY_SOURCE)
+    old_digest = model_digest(root, "tiny:1")
+    fake_hf["data"] = fake_hf["data"] + b"\x00" * 8
+    fake_hf["sha"] = hashlib.sha256(fake_hf["data"]).hexdigest()
+    assert puller.pull("tiny:1", lambda update: None, source=OTHER_SOURCE) is True
+    store = ModelStore([root])
+    assert store.get("tiny:1").manifest["source"]["name"] == OTHER_SOURCE
+    assert model_digest(root, "tiny:1") == f"sha256:{fake_hf['sha']}"
+    assert not (root / "blobs" / old_digest.replace(":", "-")).exists()
+
+
+def test_a_replacement_that_fails_its_check_leaves_the_installed_model(tmp_path, fake_hf):
+    root = tmp_path / "own"
+    puller = pull.Puller(root, 0, short_names={})
+    puller.pull("tiny:1", lambda update: None, source=TINY_SOURCE)
+    before = (root / "catalog" / "local" / "library" / "tiny" / "1.json").read_bytes()
+    old_digest = model_digest(root, "tiny:1")
+    fake_hf["sha"] = "3" * 64
+    with pytest.raises(pull.PullError, match="sha256"):
+        puller.pull("tiny:1", lambda update: None, source=OTHER_SOURCE)
+    assert (root / "catalog" / "local" / "library" / "tiny" / "1.json").read_bytes() == before
+    assert (root / "blobs" / old_digest.replace(":", "-")).is_file()
+
+
+@pytest.mark.parametrize("name, source, words", [
+    ("tiny:1", "example.com/someone/model:1", "Hugging Face"),
+    ("hf.co/Someone/Tiny-GGUF:Q8_0", OTHER_SOURCE, "short name"),
+])
+def test_a_source_that_cannot_be_used_is_refused_before_downloading(tmp_path, fake_hf, name, source, words):
+    with pytest.raises(pull.PullError, match=words) as refused:
+        pull.Puller(tmp_path / "own", 0, short_names={}).check(name, source=source)
+    assert refused.value.status == 400 and fake_hf["paths"] == []
+
+
+def test_the_catalogue_source_given_explicitly_keeps_its_pins(tmp_path, fake_hf):
+    puller = pull.Puller(tmp_path / "own", 0, short_names={"tiny:1": pull.ShortName(TINY_SOURCE, "1" * 64)})
+    with pytest.raises(pull.PullError, match="changed"):
+        puller.pull("tiny:1", lambda update: None, source=TINY_SOURCE)
+
+
+@pytest.mark.parametrize("source", [5, "", "example.com/someone/model:1"])
+def test_the_api_refuses_a_source_it_cannot_use(engine, source):
+    status, body = error_of(lambda: http_json(f"{engine.url}/api/pull", {"model": "qwen3:14b", "source": source, "stream": False}))
+    assert status == 400 and body["error"]
+
+
+def test_a_replacing_pull_through_the_api_unloads_the_old_copy(engine, fake_hf):
+    http_json(f"{engine.url}/api/generate", {"model": "qwen3:14b"})
+    assert [model["name"] for model in http_json(f"{engine.url}/api/ps")["models"]] == ["qwen3:14b"]
+    assert http_json(f"{engine.url}/api/pull", {"model": "qwen3:14b", "source": TINY_SOURCE, "stream": False}) == {"status": "success"}
+    assert http_json(f"{engine.url}/api/ps")["models"] == []
+    assert http_json(f"{engine.url}/api/show", {"model": "qwen3:14b"})["details"]["family"] == "qwen3"
+
+
+def test_a_source_for_an_internal_name_is_refused(tmp_path):
+    running = RunningEngine(tmp_path, {}, internal_models=["untemplated"])
+    try:
+        status, body = error_of(lambda: http_json(f"{running.url}/api/pull",
+                                                  {"model": "untemplated", "source": TINY_SOURCE, "stream": False}))
+    finally:
+        running.close()
+    assert status == 409 and "internal_models" in body["error"]

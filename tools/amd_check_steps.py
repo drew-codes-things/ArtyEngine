@@ -1,6 +1,7 @@
 import argparse
 import base64
 import json
+import re
 import socket
 import struct
 import sys
@@ -41,6 +42,9 @@ BUDGET_HEADROOM_MB = 512
 SMALLEST_BUDGET_MB = 1024
 UNKNOWN_CARD_BUDGET_MB = 8192
 CHECK_CONTEXT = 4096
+CHECK_PULL_RESERVE_MB = 512
+OFFLOAD_LINE = re.compile(r"offloaded (\d+)/(\d+) layers to GPU")
+ON_THE_CARD, ON_THE_CPU = "card", "cpu"
 
 
 class CheckFailed(Exception):
@@ -82,6 +86,7 @@ def write_config(out: Path, port: int, work: Path, backend: str, runner: str, li
         "default_ctx": CHECK_CONTEXT,
         "default_keep_alive": "5m",
         "pull_rate_bytes": 0,
+        "pull_keep_free_mb": CHECK_PULL_RESERVE_MB,
     }
     out.write_text(json.dumps(settings, indent=2) + "\n")
     return settings
@@ -168,7 +173,7 @@ def picture(url: str, model: str, image_out: Path) -> str:
                                      "messages": [{"role": "user", "content": PICTURE_QUESTION,
                                                    "images": [base64.b64encode(image).decode()]}]})
     content = (answer.get("message") or {}).get("content", "")
-    words = content.upper().replace(".", " ").split()
+    words = re.findall(r"[A-Z0-9]+", content.upper())
     if not all(word in words for word in PICTURE_TEXT.split()):
         raise CheckFailed(f"{model} read {content[:200]!r}, expected {PICTURE_TEXT!r}")
     return f"{model} read {content.strip()[:60]!r}"
@@ -179,6 +184,37 @@ def loaded(url: str) -> str:
     if not models:
         return "no model loaded"
     return ", ".join(f"{model['name']} size_vram {model.get('size_vram', 0) // gpu.MIB} MiB" for model in models)
+
+
+def log_sizes(logs: Path) -> str:
+    sizes = {path.name: path.stat().st_size for path in sorted(logs.glob("*.log"))} if logs.is_dir() else {}
+    return json.dumps(sizes)
+
+
+def new_log_text(logs: Path, since: Path) -> str:
+    try:
+        before = json.loads(since.read_text())
+    except (OSError, ValueError) as error:
+        raise CheckFailed(f"can't read the log sizes taken before the step: {error}") from error
+    text = ""
+    for path in sorted(logs.glob("*.log")) if logs.is_dir() else []:
+        with open(path, "rb") as log:
+            log.seek(before.get(path.name, 0))
+            text += log.read().decode(errors="replace")
+    return text
+
+
+def offload(logs: Path, since: Path, expect: str) -> str:
+    loads = [(int(on_card), int(total)) for on_card, total in OFFLOAD_LINE.findall(new_log_text(logs, since))]
+    if not loads:
+        raise CheckFailed("the runtime logged no 'offloaded N/M layers to GPU' line for this step, so where the model "
+                          "ran is unknown")
+    described = ", ".join(f"{on_card}/{total} layers on the card" for on_card, total in loads)
+    if expect == ON_THE_CARD and not all(on_card > 0 for on_card, _ in loads):
+        raise CheckFailed(f"{described}: the model ran on the CPU, not on the card")
+    if expect == ON_THE_CPU and any(on_card > 0 for on_card, _ in loads):
+        raise CheckFailed(f"{described}: num_gpu 0 still put layers on the card")
+    return described
 
 
 def card_memory(backend: str) -> str:
@@ -212,6 +248,12 @@ def parser() -> argparse.ArgumentParser:
     steps.choices["picture"].add_argument("--image-out", type=Path, required=True)
     memory = steps.add_parser("card-memory")
     memory.add_argument("--backend", required=True)
+    sizes = steps.add_parser("log-sizes")
+    sizes.add_argument("--logs", type=Path, required=True)
+    layers = steps.add_parser("offload")
+    layers.add_argument("--logs", type=Path, required=True)
+    layers.add_argument("--since", type=Path, required=True)
+    layers.add_argument("--expect", required=True, choices=(ON_THE_CARD, ON_THE_CPU))
     return commands
 
 
@@ -236,6 +278,10 @@ def run(arguments: argparse.Namespace) -> str:
         return picture(arguments.url, arguments.model, arguments.image_out)
     if step == "loaded":
         return loaded(arguments.url)
+    if step == "log-sizes":
+        return log_sizes(arguments.logs)
+    if step == "offload":
+        return offload(arguments.logs, arguments.since, arguments.expect)
     return card_memory(arguments.backend)
 
 

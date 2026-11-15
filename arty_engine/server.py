@@ -17,7 +17,7 @@ from . import gpu, translate
 from .backend import Backend, resolve_backend
 from .config import Config, load_config
 from .gguf import GgufError
-from .pull import Puller, PullError
+from .pull import HF_NAME_FORM, Puller, PullError
 from .runner import LoadError, Runner, RunnerPool, parse_keep_alive
 from .store import ModelNotFound, ModelStore, NotOwned, iso_time, parse_name, roots_in_older_layout
 
@@ -487,14 +487,18 @@ def make_handler(engine: Engine):
             options = translate.merged_options(model.params, request.get("options"))
             started = time.monotonic()
             shape = translate.generate_reply_from_chat if generate else (lambda reply: reply)
+            keep_thinking = request.get("think") is not False
 
             def run(runner: Runner, load_seconds: float):
                 url = f"{runner.base_url}/v1/chat/completions"
                 if not stream:
                     completion = post_json(url, body)
-                    self._send_json(200, shape(translate.chat_reply(model.name, completion, load_seconds, started)))
+                    self._send_json(200, shape(translate.chat_reply(model.name, completion, load_seconds, started,
+                                                                    keep_thinking=keep_thinking)))
                     return
-                translator = translate.StreamTranslator(model.name, load_seconds, started)
+                translator = translate.StreamTranslator(model.name, load_seconds, started,
+                                                        hold_content="thinking" in model.capabilities,
+                                                        keep_thinking=keep_thinking)
                 events = stream_events(url, body)
                 first = next(events, None)
                 self._start_stream()
@@ -549,17 +553,22 @@ def make_handler(engine: Engine):
             name = request.get("model") or request.get("name")
             if not isinstance(name, str) or not name:
                 raise ApiError(400, "model is required")
+            source = request.get("source")
+            if source is not None and (not isinstance(source, str) or not source):
+                raise ApiError(400, f"source must be a Hugging Face name such as {HF_NAME_FORM}")
+            if source is not None and self._pull_target(name) in engine.internal_names:
+                raise ApiError(409, "that name is kept for the engine's own use (internal_models); take it out of the config first")
             stream = request.get("stream", True) is not False
             if not engine.pull_lock.acquire(blocking=False):
                 raise ApiError(409, "another pull is running; the engine pulls one model at a time to spare the link")
             try:
-                engine.puller.check(name)
+                engine.puller.check(name, source)
                 if stream:
                     self._start_stream()
-                    engine.puller.pull(name, self._stream_line)
+                    self._unload_if_replaced(name, engine.puller.pull(name, self._stream_line, source))
                     self._end_stream()
                 else:
-                    engine.puller.pull(name, lambda update: None)
+                    self._unload_if_replaced(name, engine.puller.pull(name, lambda update: None, source))
                     self._send_json(200, {"status": "success"})
             except PullError as error:
                 raise ApiError(error.status, str(error)) from error
@@ -567,6 +576,16 @@ def make_handler(engine: Engine):
                 raise ApiError(400, str(error)) from error
             finally:
                 engine.pull_lock.release()
+
+        def _pull_target(self, name: str) -> str:
+            try:
+                return parse_name(name).display
+            except ModelNotFound as error:
+                raise ApiError(400, str(error)) from error
+
+        def _unload_if_replaced(self, name: str, replaced: bool) -> None:
+            if replaced:
+                engine.pool.unload(parse_name(name).display)
 
     return Handler
 

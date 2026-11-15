@@ -79,7 +79,7 @@ take_gpu_lock() {
     echo "waiting for the GPU lock, held by: $(in_ct 'cat /root/gpu-lock 2>/dev/null')"
     sleep 30
   done
-  trap release_gpu_lock EXIT
+  trap finish_switch EXIT
 }
 
 release_gpu_lock() {
@@ -91,11 +91,24 @@ point_controller_at() {
   local older_setting drop_settings=()
   for older_setting in $CONTROLLER_OLDER_SETTINGS; do drop_settings+=(--drop-setting "$older_setting"); done
   python3 "$CONTROLLER_TOOL" "$1" --settings "$CONTROLLER_SETTINGS" --python "$CONTROLLER_PYTHON" \
-    --unit "$CONTROLLER_UNIT" --module "$CONTROLLER_MODULE" "${drop_settings[@]}" || exit 1
-  systemctl daemon-reload || exit 1
+    --unit "$CONTROLLER_UNIT" --module "$CONTROLLER_MODULE" "${drop_settings[@]}" ||
+    stop_before_moving "the controller settings were not changed"
+  systemctl daemon-reload || stop_before_moving "systemctl daemon-reload failed"
   systemctl restart "$CONTROLLER_UNIT" || return 1
   sleep "$CONTROLLER_SETTLE_SECONDS"
   systemctl is-active --quiet "$CONTROLLER_UNIT"
+}
+
+stop_before_moving() {
+  echo "the engine is started, but Arty was not moved to it: $1. Fix that and run $0 engine again" >&2
+  exit 1
+}
+
+finish_switch() {
+  release_gpu_lock
+  if [ "$controller_running" = no ]; then
+    report_controller_down
+  fi
 }
 
 report_controller_down() {
@@ -156,6 +169,8 @@ echo "arty-engine: $(systemctl is-active arty-engine 2>/dev/null)"
 echo "engine holds: $(curl -s localhost:11438/api/ps 2>/dev/null | python3 -c "import json,sys; print([m[\"name\"] for m in json.load(sys.stdin)[\"models\"]])" 2>/dev/null || echo "not running")"'
 }
 
+controller_running=yes
+
 case "${1:-}" in
   engine|status|settings|engine-config) check_settings ;;
   *) usage ;;
@@ -169,12 +184,10 @@ case "$1" in
     fi
     take_gpu_lock
     start_engine
-    controller_running=yes
     point_controller_at engine || controller_running=no
     move_ct_to_engine
     show_status
     if [ "$controller_running" = no ]; then
-      report_controller_down
       exit 1
     fi
     ;;

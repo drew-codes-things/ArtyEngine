@@ -260,28 +260,47 @@ def backend_pool(tmp_path, name, runtimes=None, memory=None):
     return RunnerPool(config, store, launcher=launcher, memory=memory, backend=backend), store, launcher
 
 
-@pytest.mark.parametrize("name, hidden", [("cuda", {"CUDA_VISIBLE_DEVICES": ""}), ("rocm", {"HIP_VISIBLE_DEVICES": ""}),
-                                          ("vulkan", {}), ("cpu", {})])
+HIDING_VARIABLES = ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES", "ROCR_VISIBLE_DEVICES")
+HIDE_ALL = {"CUDA_VISIBLE_DEVICES": "", "ROCR_VISIBLE_DEVICES": ""}
+
+
+def hidden_in(environment: dict) -> dict:
+    return {key: environment[key] for key in HIDING_VARIABLES if key in environment}
+
+
+@pytest.mark.parametrize("name, hidden", [("cuda", {"CUDA_VISIBLE_DEVICES": ""}), ("rocm", {"ROCR_VISIBLE_DEVICES": ""}),
+                                          ("vulkan", {}), ("cpu", HIDE_ALL)])
 def test_a_cpu_only_request_hides_the_cards_of_the_chosen_backend(tmp_path, monkeypatch, name, hidden):
-    for variable in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
+    for variable in HIDING_VARIABLES:
         monkeypatch.delenv(variable, raising=False)
     pool, store, launcher = backend_pool(tmp_path, name)
     runner, _ = pool.acquire(store.get("nomic-embed-text"), None, cpu_only=True)
     pool.release(runner, FOREVER)
-    environment = launcher.environments[0]
-    assert {key: environment[key] for key in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES") if key in environment} == hidden
+    assert hidden_in(launcher.environments[0]) == hidden
     arguments = launcher.launched[0].arguments
     assert arguments[arguments.index("--device") + 1] == "none"
     pool.shutdown()
 
 
 def test_a_gpu_request_hides_no_card(tmp_path, monkeypatch):
-    for variable in ("CUDA_VISIBLE_DEVICES", "HIP_VISIBLE_DEVICES"):
+    for variable in HIDING_VARIABLES:
         monkeypatch.delenv(variable, raising=False)
     pool, store, launcher = backend_pool(tmp_path, "rocm")
     runner, _ = pool.acquire(store.get("nomic-embed-text"), None)
     pool.release(runner, FOREVER)
-    assert "HIP_VISIBLE_DEVICES" not in launcher.environments[0] and "CUDA_VISIBLE_DEVICES" not in launcher.environments[0]
+    assert hidden_in(launcher.environments[0]) == {}
+    pool.shutdown()
+
+
+def test_the_cpu_backend_keeps_every_request_off_the_cards(tmp_path, monkeypatch):
+    for variable in HIDING_VARIABLES:
+        monkeypatch.delenv(variable, raising=False)
+    pool, store, launcher = backend_pool(tmp_path, "cpu")
+    runner, _ = pool.acquire(store.get("qwen3:14b"), 4096)
+    pool.release(runner, FOREVER)
+    arguments = launcher.launched[0].arguments
+    assert arguments[arguments.index("-ngl") + 1] == "0" and arguments[arguments.index("--device") + 1] == "none"
+    assert hidden_in(launcher.environments[0]) == HIDE_ALL and runner.estimate_mb == 0
     pool.shutdown()
 
 

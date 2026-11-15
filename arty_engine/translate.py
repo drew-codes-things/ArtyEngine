@@ -15,6 +15,8 @@ NO_LIMIT = -1
 THINK_LEVELS = {"low", "medium", "high"}
 FINISH_REASONS = {"stop": "stop", "length": "length", "tool_calls": "stop", "content_filter": "stop"}
 NANOSECONDS_PER_MS = 1_000_000
+THINK_OPEN = "<think>"
+THINK_CLOSE = "</think>"
 LARGEST_TOKEN_COUNT = 2 ** 31 - 1
 INT64_LIMITS = (-(2 ** 63), 2 ** 63 - 1)
 WHOLE_NUMBER_FIELDS = {"top_k", "seed", "repeat_last_n", "mirostat"}
@@ -285,12 +287,21 @@ def finish_reason(reason: str | None) -> str:
     return FINISH_REASONS.get(reason or "stop", "stop")
 
 
-def chat_reply(model_name: str, completion: dict, load_seconds: float, started: float) -> dict:
+def split_leaked_thinking(text: str) -> tuple[str, str]:
+    if THINK_CLOSE not in text:
+        return "", text
+    leaked, _, answer = text.rpartition(THINK_CLOSE)
+    return leaked.replace(THINK_OPEN, "").strip(), answer.lstrip()
+
+
+def chat_reply(model_name: str, completion: dict, load_seconds: float, started: float, keep_thinking: bool = True) -> dict:
     choice = (completion.get("choices") or [{}])[0]
     message = choice.get("message") or {}
-    reply_message = {"role": "assistant", "content": message.get("content") or ""}
-    if message.get("reasoning_content"):
-        reply_message["thinking"] = message["reasoning_content"]
+    leaked, content = split_leaked_thinking(message.get("content") or "")
+    reply_message = {"role": "assistant", "content": content}
+    thinking = "\n".join(part for part in (message.get("reasoning_content") or "", leaked if keep_thinking else "") if part)
+    if thinking:
+        reply_message["thinking"] = thinking
     calls = reply_tool_calls(message.get("tool_calls"))
     if calls:
         reply_message["tool_calls"] = calls
@@ -300,10 +311,14 @@ def chat_reply(model_name: str, completion: dict, load_seconds: float, started: 
 
 
 class StreamTranslator:
-    def __init__(self, model_name: str, load_seconds: float, started: float):
+    def __init__(self, model_name: str, load_seconds: float, started: float, hold_content: bool = False,
+                 keep_thinking: bool = True):
         self.model_name = model_name
         self.load_seconds = load_seconds
         self.started = started
+        self.holding = hold_content
+        self.keep_thinking = keep_thinking
+        self.held = ""
         self.calls: dict[int, dict] = {}
         self.finish = None
         self.timings = None
@@ -321,14 +336,28 @@ class StreamTranslator:
         for choice in event.get("choices") or []:
             delta = choice.get("delta") or {}
             if delta.get("reasoning_content"):
+                out += self._release_held()
                 out.append(self._chunk({"content": "", "thinking": delta["reasoning_content"]}))
             if delta.get("content"):
-                out.append(self._chunk({"content": delta["content"]}))
+                out += self._hold(delta["content"]) if self.holding else [self._chunk({"content": delta["content"]})]
             for piece in delta.get("tool_calls") or []:
                 self._add_call_piece(piece)
             if choice.get("finish_reason"):
                 self.finish = choice["finish_reason"]
         return out
+
+    def _hold(self, text: str) -> list[dict]:
+        self.held += text
+        if THINK_CLOSE not in self.held:
+            return []
+        leaked, answer = split_leaked_thinking(self.held)
+        self.held, self.holding = "", False
+        out = [self._chunk({"content": "", "thinking": leaked})] if leaked and self.keep_thinking else []
+        return out + ([self._chunk({"content": answer})] if answer else [])
+
+    def _release_held(self) -> list[dict]:
+        held, self.held, self.holding = self.held, "", False
+        return [self._chunk({"content": held})] if held else []
 
     def _add_call_piece(self, piece: dict) -> None:
         slot = self.calls.setdefault(int(piece.get("index", len(self.calls))), {"id": "", "function": {"name": "", "arguments": ""}})
@@ -341,7 +370,7 @@ class StreamTranslator:
             slot["function"]["arguments"] += function["arguments"]
 
     def finish_chunks(self) -> list[dict]:
-        out = []
+        out = self._release_held()
         if self.calls:
             ordered = [self.calls[index] for index in sorted(self.calls)]
             out.append(self._chunk({"content": "", "tool_calls": reply_tool_calls(ordered)}))

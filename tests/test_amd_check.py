@@ -1,12 +1,16 @@
 import base64
 import hashlib
+import importlib.util
 import json
 import os
 import re
+import signal
 import socket
 import subprocess
+import sys
 import tarfile
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -28,17 +32,44 @@ while [ $# -gt 1 ]; do
   shift
 done
 echo "$1" >> "$FAKE_ROOT/curl-calls"
+[ -z "${FAKE_CURL_SLOW:-}" ] || sleep "$FAKE_CURL_SLOW"
 case "$1" in
   *api.github.com*) [ -f "$FAKE_ROOT/release.json" ] || exit 22; cp "$FAKE_ROOT/release.json" "$out" ;;
   *) cp "$FAKE_ROOT/runtime.tar.gz" "$out" ;;
 esac
 """
 FAKE_LDD = """#!/bin/bash
-if [ -n "${FAKE_LDD_MISSING:-}" ] && [[ "${LD_LIBRARY_PATH:-}" != *rocm-libs* ]]; then
-  printf '\\tlibamdhip64.so.7 => not found\\n'
+if [ -n "${FAKE_LDD_MISSING:-}" ]; then
+  [[ ":${LD_LIBRARY_PATH:-}:" == *"/_rocm_sdk_core/lib:"* ]] || printf '\\tlibamdhip64.so.7 => not found\\n'
+  [[ ":${LD_LIBRARY_PATH:-}:" == *"/_rocm_sdk_libraries/lib:"* ]] || printf '\\tlibhipblas.so.3 => not found\\n\\tlibrocblas.so.5 => not found\\n'
 fi
 printf '\\tlibc.so.6 => /lib/libc.so.6\\n'
 """
+FAKE_PYTHON = f"""#!/bin/bash
+if [ "${{1:-}}" = -m ] && [ "${{2:-}}" = venv ]; then
+  [ -z "${{FAKE_NO_VENV:-}}" ] || exit 1
+  mkdir -p "$3/bin" "$3/lib/python3.13/site-packages"
+  cp "$FAKE_ROOT/fake-pip" "$3/bin/pip"
+  exit 0
+fi
+exec {sys.executable} "$@"
+"""
+FAKE_PIP = """#!/bin/bash
+echo "$* PIP_CACHE_DIR=${PIP_CACHE_DIR:-}" >> "$FAKE_ROOT/pip-calls"
+[ -z "${FAKE_PIP_FAILS:-}" ] || exit 1
+packages="$(dirname "$0")/../lib/python3.13/site-packages"
+mkdir -p "$packages/_rocm_sdk_core/lib" "$packages/_rocm_sdk_libraries/lib"
+touch "$packages/_rocm_sdk_core/lib/libamdhip64.so.7" "$packages/_rocm_sdk_libraries/lib/libhipblas.so.3" \\
+  "$packages/_rocm_sdk_libraries/lib/librocblas.so.5"
+target=$(echo "$*" | grep -o 'device-gfx[0-9a-f]*' | sed 's/device-//')
+[ -z "$target" ] || mkdir -p "$packages/rocm_sdk_device_$target-10.0.0.dist-info"
+"""
+FAKE_AMD_SMI = """#!/bin/bash
+[ -z "${FAKE_NO_CARD_MEMORY:-}" ] || exit 1
+echo '[{"gpu": 0, "mem_usage": {"total_vram": {"value": 16368, "unit": "MB"}, "used_vram": {"value": 368, "unit": "MB"}}}]'
+"""
+RX_7900_XTX, RX_570 = 110000, 80003
+INTEL_VULKAN_DEVICES = "Available devices:\n  Vulkan0: Intel(R) UHD Graphics 630 (CFL GT2) (8192 MiB, 8000 MiB free)"
 ALLOWED_HOSTS = {"github.com", "api.github.com", "huggingface.co", "hf.co", "stable.repo.amd.com", "rocm.docs.amd.com", "127.0.0.1"}
 FAKE_SERVER = """#!/bin/bash
 if [ "$1" = --list-devices ]; then printf '%b\\n' "$FAKE_DEVICES"; exit 0; fi
@@ -72,9 +103,13 @@ class Rig:
         self.report = root / "report.txt"
         self.environment = {**os.environ, "PATH": f"{self.bin}:{os.environ['PATH']}", "FAKE_ROOT": str(root),
                             "AMD_CHECK_DRM": str(root / "sys" / "class" / "drm"), "AMD_CHECK_DEV": str(root / "dev"),
-                            "TMPDIR": str(root / "tmp"), "FAKE_DEVICES": ROCM_DEVICES}
+                            "AMD_CHECK_KFD": str(root / "kfd"), "TMPDIR": str(root / "tmp"), "FAKE_DEVICES": ROCM_DEVICES}
+        self.environment.pop("HSA_OVERRIDE_GFX_VERSION", None)
         program(self.bin, "curl", FAKE_CURL)
         program(self.bin, "ldd", FAKE_LDD)
+        program(self.bin, "python3", FAKE_PYTHON)
+        program(self.bin, "amd-smi", FAKE_AMD_SMI)
+        program(root, "fake-pip", FAKE_PIP)
         self.lspci(AMD_PCI)
         self.runtime_digest = self.build_runtime()
 
@@ -89,6 +124,15 @@ class Rig:
         (device / "driver").symlink_to(driver_folder)
         if in_dev:
             self.device(f"dri/{name}")
+
+    def kfd_node(self, number: int, version: int) -> None:
+        node = self.root / "kfd" / str(number)
+        node.mkdir(parents=True)
+        (node / "properties").write_text(f"cpu_cores_count 0\ngfx_target_version {version}\n")
+
+    def pip_calls(self) -> list[str]:
+        calls = self.root / "pip-calls"
+        return calls.read_text().splitlines() if calls.exists() else []
 
     def device(self, relative: str) -> None:
         path = self.root / "dev" / relative
@@ -110,6 +154,11 @@ class Rig:
     def release_listing(self, digest: str) -> None:
         assets = [{"name": name, "digest": f"sha256:{digest}"} for name in (ROCM_ASSET, VULKAN_ASSET)]
         (self.root / "release.json").write_text(json.dumps({"assets": assets}))
+
+    def start(self, *arguments: str, **extra) -> subprocess.Popen:
+        return subprocess.Popen(["bash", str(SCRIPT), "--report", str(self.report), *arguments], cwd=self.root,
+                                env={**self.environment, **extra}, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                                text=True, start_new_session=True)
 
     def run(self, *arguments: str, **extra) -> subprocess.CompletedProcess:
         return subprocess.run(["bash", str(SCRIPT), "--report", str(self.report), *arguments], cwd=self.root,
@@ -136,10 +185,26 @@ def rig(tmp_path):
     return Rig(tmp_path)
 
 
-def amd_with_rocm(rig: Rig) -> None:
+def amd_with_rocm(rig: Rig, version: int = RX_7900_XTX) -> None:
     rig.render_node()
     rig.device("kfd")
+    rig.kfd_node(0, 0)
+    rig.kfd_node(1, version)
     rig.release_listing(rig.runtime_digest)
+
+
+def result_line(rig: Rig) -> str:
+    return next(line for line in rig.report.read_text().splitlines() if line.startswith("result: "))
+
+
+def load_steps():
+    spec = importlib.util.spec_from_file_location("amd_check_steps", REPO / "tools" / "amd_check_steps.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+STEPS = load_steps()
 
 
 def port_answers(port: int) -> bool:
@@ -183,16 +248,19 @@ def test_rocm_runs_through_download_config_and_engine_start_then_cleans_up(rig):
     finished = rig.run("--stop-after", "start")
     assert finished.returncode == 0, finished.stdout + finished.stderr
     steps = rig.steps()
-    assert steps["detect"].startswith("PASS backend rocm") and "/dev/kfd: yes" in steps["detect"]
-    assert steps["download"] == f"PASS {ROCM_ASSET}, sha256 {rig.runtime_digest} matches the published digest"
-    assert steps["libraries"].startswith("PASS every library of libfake-hip.so loads")
+    assert steps["detect"].startswith("PASS backend rocm.") and "/dev/kfd: yes" in steps["detect"]
+    assert "card target: gfx1100" in steps["detect"]
+    assert steps["download"] == f"PASS release {RELEASE}, ubuntu-rocm-10.0-x64 build, sha256 {rig.runtime_digest} matches the published digest"
+    assert steps["libraries"].startswith("PASS every library of the rocm backend loads (ROCm libraries: system)")
     assert steps["devices"] == "PASS   ROCm0: Fake Radeon (16368 MiB, 16000 MiB free)"
     assert steps["start"].startswith("PASS version") and "GPU backend rocm (set in the config)" in steps["start"]
+    assert "16000 MiB free of 16368 MiB (amd-smi)" in steps["start"]
     assert steps["cleanup"] == "PASS engine stopped, temporary folder removed"
     port = int(re.search(r"listen 127\.0\.0\.1:(\d+)", steps["config"]).group(1))
     assert not port_answers(port) and rig.leftover_work() == []
     assert any("rocm-10.0" in call for call in rig.curl_calls())
-    assert "result: PASS" in rig.report.read_text() and f"runtime: release {RELEASE} {ROCM_ASSET}" in rig.report.read_text()
+    assert result_line(rig) == "result: INCOMPLETE (stopped after start as asked; every step that ran passed)"
+    assert f"runtime: release {RELEASE}, ubuntu-rocm-10.0-x64 build" in rig.report.read_text()
 
 
 def test_the_written_config_names_the_backend_and_its_runtime(rig):
@@ -203,7 +271,7 @@ def test_the_written_config_names_the_backend_and_its_runtime(rig):
     config = json.loads((work / "engine.json").read_text())
     assert config["gpu_backend"] == "rocm" and config["listen"].startswith("127.0.0.1:")
     assert config["runtimes"] == {"rocm": {"runner_binary": str(work / "runtime" / "fake-server"), "library_path": []}}
-    assert config["store"] == str(work / "models")
+    assert config["store"] == str(work / "models") and config["pull_keep_free_mb"] == 512
 
 
 def test_no_kfd_means_the_vulkan_build(rig):
@@ -212,9 +280,9 @@ def test_no_kfd_means_the_vulkan_build(rig):
     finished = rig.run("--stop-after", "download", FAKE_DEVICES=VULKAN_DEVICES)
     assert finished.returncode == 0, finished.stdout
     steps = rig.steps()
-    assert steps["detect"].startswith("PASS backend vulkan")
-    assert VULKAN_ASSET in steps["download"] and "Vulkan0" in steps["devices"]
-    assert "libfake-vulkan.so" in steps["libraries"]
+    assert steps["detect"].startswith("PASS backend vulkan (no /dev/kfd)")
+    assert "ubuntu-vulkan-x64 build" in steps["download"] and "Vulkan0" in steps["devices"]
+    assert steps["libraries"].startswith("PASS every library of the vulkan backend loads (ROCm libraries: not used)")
 
 
 def test_a_digest_that_does_not_match_the_release_stops_the_check(rig):
@@ -222,17 +290,20 @@ def test_a_digest_that_does_not_match_the_release_stops_the_check(rig):
     rig.release_listing("0" * 64)
     finished = rig.run()
     assert finished.returncode == EXIT_FAILED
-    assert rig.steps()["download"] == f"FAIL {ROCM_ASSET} has sha256 {rig.runtime_digest}, but the release lists {'0' * 64}"
+    assert rig.steps()["download"] == (f"FAIL release {RELEASE}, ubuntu-rocm-10.0-x64 build has sha256 {rig.runtime_digest}, "
+                                       f"but the release lists {'0' * 64}")
     assert "config" not in rig.steps() and rig.leftover_work() == []
 
 
-def test_an_unreachable_release_listing_prints_the_digest_for_a_hand_check(rig):
-    rig.render_node()
-    rig.device("kfd")
-    finished = rig.run("--stop-after", "download")
-    assert finished.returncode == 0, finished.stdout
-    assert rig.steps()["download"].startswith(f"CHECK {ROCM_ASSET} has sha256 {rig.runtime_digest}")
-    assert "result: PASS, with CHECK lines to compare by hand" in rig.report.read_text()
+def test_an_unreachable_release_listing_stops_the_check_and_prints_the_digest_for_a_hand_check(rig):
+    amd_with_rocm(rig)
+    (rig.root / "release.json").unlink()
+    finished = rig.run()
+    assert finished.returncode == EXIT_FAILED, finished.stdout
+    download = rig.steps()["download"]
+    assert download.startswith(f"FAIL release {RELEASE}, ubuntu-rocm-10.0-x64 build has sha256 {rig.runtime_digest}")
+    assert "will not be run" in download and "libraries" not in rig.steps() and "devices" not in rig.steps()
+    assert result_line(rig) == "result: FAIL"
 
 
 def test_a_runtime_that_sees_no_gpu_fails(rig):
@@ -246,14 +317,144 @@ def test_missing_rocm_libraries_without_amd_s_packages_fail_with_their_names(rig
     amd_with_rocm(rig)
     finished = rig.run("--no-rocm-wheels", FAKE_LDD_MISSING="1")
     assert finished.returncode == EXIT_FAILED
-    assert rig.steps()["libraries"].startswith("FAIL the rocm build cannot load: libamdhip64.so.7")
+    assert rig.steps()["libraries"].startswith("FAIL the rocm build cannot load: libamdhip64.so.7 libhipblas.so.3 librocblas.so.5")
+    assert rig.pip_calls() == []
 
 
 def test_amd_s_packages_that_do_not_install_fail_the_library_step(rig):
     amd_with_rocm(rig)
-    finished = rig.run(FAKE_LDD_MISSING="1", PIP_NO_INDEX="1")
+    finished = rig.run(FAKE_LDD_MISSING="1", FAKE_PIP_FAILS="1")
     assert finished.returncode == EXIT_FAILED
-    assert rig.steps()["libraries"] == "FAIL missing libamdhip64.so.7, and AMD's ROCm packages did not install"
+    assert rig.steps()["libraries"] == ("FAIL missing libamdhip64.so.7 libhipblas.so.3 librocblas.so.5, and AMD's ROCm "
+                                        "packages did not install")
+
+
+def test_amd_s_packages_bring_both_library_folders_and_the_card_s_kernels(rig):
+    amd_with_rocm(rig)
+    finished = rig.run("--stop-after", "config", "--keep", FAKE_LDD_MISSING="1")
+    assert finished.returncode == 0, finished.stdout
+    work = rig.leftover_work()[0]
+    [call] = rig.pip_calls()
+    assert "rocm[libraries,device-gfx1100]==10.0.0" in call and "--index-url https://stable.repo.amd.com/rocm/whl-next/" in call
+    assert call.endswith(f"PIP_CACHE_DIR={work}/pip-cache")
+    folders = json.loads((work / "engine.json").read_text())["runtimes"]["rocm"]["library_path"]
+    packages = work / "rocm-libs" / "lib" / "python3.13" / "site-packages"
+    assert folders == [str(packages / "_rocm_sdk_core" / "lib"), str(packages / "_rocm_sdk_libraries" / "lib")]
+    assert "installed: rocm-sdk-device-gfx1100" in rig.steps()["libraries"]
+    assert "rocm-sdk-device-gfx1100" in rig.report.read_text().split("ROCm libraries: ", 1)[1].splitlines()[0]
+
+
+def test_a_card_target_given_by_override_picks_its_kernel_package(rig):
+    amd_with_rocm(rig, RX_570)
+    finished = rig.run("--backend", "rocm", "--stop-after", "download", FAKE_LDD_MISSING="1", HSA_OVERRIDE_GFX_VERSION="10.3.0")
+    assert finished.returncode == 0, finished.stdout
+    assert "rocm[libraries,device-gfx1030]==10.0.0" in rig.pip_calls()[0]
+
+
+def test_no_kernel_package_is_guessed_for_a_card_target_that_cannot_be_read(rig):
+    rig.render_node()
+    rig.device("kfd")
+    rig.release_listing(rig.runtime_digest)
+    finished = rig.run("--backend", "rocm", FAKE_LDD_MISSING="1")
+    assert finished.returncode == EXIT_FAILED
+    assert "no kernel package for card target not readable" in rig.steps()["libraries"] and rig.pip_calls() == []
+
+
+def test_a_card_the_rocm_build_has_no_code_for_is_checked_on_vulkan(rig):
+    amd_with_rocm(rig, RX_570)
+    finished = rig.run("--stop-after", "detect")
+    assert finished.returncode == 0, finished.stdout
+    assert rig.steps()["detect"].startswith("PASS backend vulkan (the ROCm build carries no code for card target gfx803)")
+
+
+def test_a_missing_venv_module_fails_before_anything_is_downloaded(rig):
+    amd_with_rocm(rig)
+    finished = rig.run(FAKE_NO_VENV="1")
+    assert finished.returncode == EXIT_FAILED
+    assert "python3-venv" in rig.steps()["tools"] and rig.curl_calls() == []
+
+
+def test_unreadable_card_memory_fails_the_start(rig):
+    amd_with_rocm(rig)
+    finished = rig.run("--stop-after", "start", FAKE_NO_CARD_MEMORY="1")
+    assert finished.returncode == EXIT_FAILED
+    assert "card memory not readable" in rig.steps()["start"] and rig.steps()["start"].startswith("FAIL")
+
+
+def test_only_an_intel_vulkan_device_fails_the_device_step(rig):
+    rig.render_node()
+    rig.release_listing(rig.runtime_digest)
+    finished = rig.run(FAKE_DEVICES=INTEL_VULKAN_DEVICES)
+    assert finished.returncode == EXIT_FAILED
+    assert rig.steps()["devices"].startswith("FAIL the runtime lists only other vendors' Vulkan devices")
+
+
+def test_an_interrupted_check_is_never_a_pass(rig):
+    amd_with_rocm(rig)
+    check = rig.start(FAKE_CURL_SLOW="20")
+    deadline = time.monotonic() + SCRIPT_TIMEOUT_SECONDS
+    while not rig.curl_calls() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    os.killpg(check.pid, signal.SIGINT)
+    check.communicate(timeout=SCRIPT_TIMEOUT_SECONDS)
+    assert check.returncode == 130
+    assert result_line(rig) == "result: INCOMPLETE (interrupted; only the steps below ran)" and rig.leftover_work() == []
+
+
+def test_the_temporary_folder_defaults_to_a_disk_backed_place(rig):
+    finished = rig.run("--dry-run", TMPDIR="")
+    assert "temporary folder under /var/tmp" in finished.stdout
+
+
+def test_the_kit_s_own_output_names_the_runtime_only_in_url_lines(rig):
+    amd_with_rocm(rig)
+    finished = rig.run("--stop-after", "start", FAKE_LDD_MISSING="1")
+    assert finished.returncode == 0, finished.stdout
+    for line in finished.stdout.splitlines() + rig.report.read_text().splitlines():
+        if any(word in line.lower() for word in RUNTIME_PROJECT_WORDS):
+            assert "https://" in line, line
+    assert ROCM_ASSET not in finished.stdout + rig.report.read_text()
+    assert "libfake-hip.so" not in finished.stdout
+
+
+@pytest.mark.parametrize("log, expect, passes", [
+    ("load_tensors: offloaded 29/29 layers to GPU\n", "card", True),
+    ("load_tensors: offloaded 0/29 layers to GPU\n", "card", False),
+    ("load_tensors: offloaded 0/29 layers to GPU\n", "cpu", True),
+    ("load_tensors: offloaded 29/29 layers to GPU\n", "cpu", False),
+    ("nothing about layers\n", "card", False),
+    ("nothing about layers\n", "cpu", False),
+])
+def test_the_offload_step_reads_only_what_the_step_logged(tmp_path, log, expect, passes):
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    (logs / "model.log").write_text("load_tensors: offloaded 29/29 layers to GPU\nload_tensors: offloaded 0/29 layers to GPU\n")
+    since = tmp_path / "sizes.json"
+    since.write_text(STEPS.log_sizes(logs))
+    with open(logs / "model.log", "a") as appended:
+        appended.write(log)
+    if passes:
+        assert "layers on the card" in STEPS.offload(logs, since, expect)
+    else:
+        with pytest.raises(STEPS.CheckFailed):
+            STEPS.offload(logs, since, expect)
+
+
+@pytest.mark.parametrize("answer", ['"ROCK 42"', "**ROCK 42**", "Rock 42!", "The text reads: ROCK 42."])
+def test_the_picture_check_reads_past_punctuation(tmp_path, monkeypatch, answer):
+    monkeypatch.setattr(STEPS, "call", lambda *args, **kwargs: {"message": {"content": answer}})
+    assert STEPS.picture("http://127.0.0.1:1", "m", tmp_path / "p.png").startswith("m read")
+
+
+def test_the_picture_check_still_fails_a_wrong_reading(tmp_path, monkeypatch):
+    monkeypatch.setattr(STEPS, "call", lambda *args, **kwargs: {"message": {"content": "ROCKY 4"}})
+    with pytest.raises(STEPS.CheckFailed):
+        STEPS.picture("http://127.0.0.1:1", "m", tmp_path / "p.png")
+
+
+def test_the_kit_s_rocm_targets_match_the_engine_s():
+    from arty_engine.backend import ROCM_BUILD_TARGETS
+    assert set(script_value("ROCM_BUILD_TARGETS").strip('"').split()) == ROCM_BUILD_TARGETS
 
 
 class FakeEngine:
@@ -320,6 +521,7 @@ def test_the_model_checks_against_a_running_engine(rig, fake_engine):
     for step in ("pull-chat", "pull-embed", "pull-vision", "chat", "chat-cpu-only", "embed", "picture", "loaded"):
         assert steps[step].startswith("PASS"), (step, steps[step])
     assert steps["memory"].startswith("INFO") and "download" not in steps
+    assert result_line(rig).startswith("result: INCOMPLETE (not checked: GPU offload")
     posts = [body for method, path, body in engine.requests if method == "POST"]
     assert [body["model"] for body in posts if "messages" not in body and "input" not in body] == [
         "hf.co/Qwen/Qwen3-0.6B-GGUF:Q8_0", "nomic-embed-text", "hf.co/Qwen/Qwen3-VL-2B-Instruct-GGUF:Q4_K_M"]

@@ -123,28 +123,36 @@ python3 tools/migrate_store.py undo --store /srv/ai/arty-engine/models --backup 
 a copy of the old folders in the backup folder, then moves the old folders and the old manifest documents in `blobs/`
 there. Model files are never touched, copied or renamed. Short names stay short, and a name with a namespace keeps
 it (`someone/model:tag`); a model from another registry keeps that registry's host in its name. The one registry of
-an old folder becomes the short names; when a folder holds several, or when you want to choose, `--default-host`
-names it (only the hosts given then become short names). Two old names that would become one are refused, and a
-name in both old folders counts as an older copy only when both hold the same model file. A model whose old manifest can't be converted stops the run until it is left out with `--skip
-<name>`. The backup folder must be empty and reachable by a rename (the same mount). Every command that changes the
-store refuses while an engine answers on `--engine-url` (`http://127.0.0.1:11438` unless given, `http://` added
-when the address has no scheme, `none` to skip), and when it can't tell.
+an old folder becomes the short names. When a folder holds several, or when you want to choose, `--default-host`
+names it; once given, only the hosts given become short names in every folder, so give it once per old folder (`plan`
+adds a note for a folder it leaves out). Two old names that would become one are refused, and a name in both old
+folders counts as an older copy only when both hold the same model file; an older copy that can't be read stays in
+the backup unread. A model whose old manifest can't be converted, or whose two copies hold different model files,
+stops the run until it is left out with `--skip <name>`. The backup folder must be empty and reachable by a rename
+(the same mount). Every command that changes the store refuses while anything accepts a connection on `--engine-url`
+(`http://127.0.0.1:11438` unless given, `http://` added when the address has no scheme, `none` to skip), and when it
+can't tell; a stalled engine counts as running.
 
 `undo` first checks that the backup can bring the old layout back (from `moved/`, or from `copy/` when `moved/` is
 gone) and changes nothing when it can't; then it moves everything back, removes the catalog manifests the migration
 wrote and checks the old layout byte for byte against the record taken before the migration. It refuses when a
-migrated manifest changed or a model was pulled since, and names any model whose blobs were deleted in between or
-whose old manifest can't be read. An undo that stopped while copying can be run again. `tidy` moves the old manifest
-documents of a store migrated by an earlier version of this tool into its backup (and finishes a move that stopped);
-`untidy` puts them back. Both refuse once the migration was undone. At startup the engine names every root that is still in the older layout.
+migrated manifest changed or a model was pulled since, or when the backup was already undone and a later migrate
+holds the store, and names any model whose blobs were deleted in between or whose old manifest can't be read. An undo
+that stopped while copying can be run again. A backup made before 15 Nov 2026 needs its `moved/` folder: its record
+does not say whether the run finished, so its `copy/` alone is not trusted. `tidy` moves the old manifest documents
+of a store migrated by an earlier version of this tool into its backup (and finishes a move that stopped); `untidy`
+puts them back. Both refuse once the migration was undone. Empty probe folders (`.migrate-probe-*`) left by a stopped
+run are removed by the next migrate or undo. At startup the engine names every root that is still in the older layout.
 
 `tools/unused_blobs.py --store <store>` lists what no catalog manifest names: partial downloads, model files, old
 manifest documents and anything else in `blobs/`, each with its kind and size. `--remove` deletes the list once it
-is printed, and refuses (exit 2, nothing removed) while the store still holds an old manifest folder, has no catalog
-manifest, holds the leftovers of a stopped migration or manifest write, or lists old manifest documents (use `tidy`
-for those, so undo can bring them back). Model files no manifest names, such as the weights of a model left out of a
-migration with `--skip`, are removed only with `--remove-model-files` as well. Run it with no pull in progress, and
-never on a store in the older layout: there every blob counts as unused.
+is printed, and refuses (exit 2, nothing removed) while anything listens on `--engine-url` (the engine's address
+unless given, `none` to skip), while the store still holds an old manifest folder, has no catalog manifest, holds the
+leftovers of a stopped migration, undo or manifest write (the refusal names which; remove it by hand if nothing is
+running), or lists old manifest documents (use `tidy` for those, so undo can bring them back). Plain `--remove`
+deletes only partial downloads; model files and other blobs no manifest names, such as the weights, template, system
+prompt or parameters of a model left out of a migration with `--skip` or of an older copy in its backup, go only with
+`--remove-unnamed-blobs` as well. Never run it on a store in the older layout: there every blob counts as unused.
 
 ### Upgrading an install from before 14 Nov 2026
 
@@ -156,6 +164,9 @@ never on a store in the older layout: there every blob counts as unused.
   `arty_engine_url` setting.
 - Bench configs need a `listen` of their own (the shipped `engine-test.json` uses 11439).
 - Convert the store as above.
+- Rolling back to a version from before `gpu_backend` existed: that version stops with "unknown settings
+  gpu_backend" on the newer `engine.json`, so put back the older `engine.json` (or rewrite it with the older
+  `tools/write_config.py`) together with the older code, before the engine restarts.
 
 ---
 
@@ -198,12 +209,16 @@ The shipped `deploy/engine.json` is Arty's setup, not these defaults: a 24576 co
 (`default_keep_alive` `-1`), n-gram speculation for `qwen3:14b` and `mimo-v2.6:9b`, the Qwen3-0.6B draft listed
 as an internal model, and `gpu_backend` `cuda`.
 
-`auto` picks `cuda` when `nvidia-smi` or `/dev/nvidia0` is there; otherwise `rocm` when `/dev/kfd` and a render node
-of the amdgpu driver are there and `runtimes` lists `rocm`; otherwise `vulkan` when a render node (amdgpu first) is
-there and `runtimes` lists `vulkan`; otherwise `cpu`. The engine logs its choice, the reason and the card's free memory
-once at start. A config without `gpu_backend` or `runtimes` works as before: on an NVIDIA machine it resolves to
-`cuda` with the top-level `runner_binary` and `library_path`. A request with `num_gpu: 0` runs on the CPU with
-`--device none` and, for `cuda` and `rocm`, the backend's visible-devices variable set empty.
+`auto` picks `cuda` when `/dev/nvidia0` is there (`nvidia-smi` alone, without the device, does not count); otherwise
+`rocm` when `/dev/kfd` and a render node of the amdgpu driver are there, `runtimes` lists `rocm` and the card's gfx
+target (read from `/sys/class/kfd/kfd/topology/nodes/*/properties`) is one the ROCm build carries code for (the list
+under AMD GPUs below); otherwise `vulkan` when a render node (amdgpu first) is there and `runtimes` lists `vulkan`;
+otherwise `cpu`. The engine logs its choice, the reason and the card's free memory once at start. A config without
+`gpu_backend` or `runtimes` works as before: on an NVIDIA machine it resolves to `cuda` with the top-level
+`runner_binary` and `library_path`. A request with `num_gpu: 0` runs on the CPU with `-ngl 0 --device none` and the
+devices hidden: `CUDA_VISIBLE_DEVICES` empty for `cuda`, `ROCR_VISIBLE_DEVICES` empty for `rocm` (an empty
+`HIP_VISIBLE_DEVICES` hides nothing), nothing more for `vulkan`. With `cpu` every request runs that way, with both
+variables empty.
 
 `draft_ctx` is accepted in `speculative` but not passed to the runtime yet. Pulls from Hugging Face send `HF_TOKEN`
 from the environment when it is set, for gated repositories. Without it, Hugging Face answers 401 for a repository
@@ -229,10 +244,15 @@ model server binary (not the RPC server), as for CUDA.
 
 - The **ROCm** build loads ROCm 10.0's `libamdhip64.so.7`, `libhipblas.so.3` and `librocblas.so.5`, which it does not
   include. Either install ROCm 10.0 on the system, or install AMD's own Python packages of it into a folder, the way
-  the build itself was made:
-  `python3 -m venv /srv/ai/arty-engine/rocm-10.0 && /srv/ai/arty-engine/rocm-10.0/bin/pip install --index-url https://stable.repo.amd.com/rocm/whl-next/ "rocm[libraries]==10.0.0"`,
-  then list the folder that holds `libamdhip64.so.7` (`find /srv/ai/arty-engine/rocm-10.0 -name 'libamdhip64.so.7*'`)
-  in `runtimes.rocm.library_path`. The build carries GPU code for gfx908, gfx90a, gfx942, gfx950, gfx1010 to gfx1012,
+  the build itself was made. Name the card's kernel package as an extra, `device-<gfx target>` (such as
+  `device-gfx1100` for an RX 7900 XTX; `rocminfo` or the `gfx_target_version` in
+  `/sys/class/kfd/kfd/topology/nodes/*/properties` gives it), never the plain `device` extra, which falls back to
+  gfx1010 on a machine without AMD's tools:
+  `python3 -m venv /srv/ai/arty-engine/rocm-10.0 && /srv/ai/arty-engine/rocm-10.0/bin/pip install --no-cache-dir --index-url https://stable.repo.amd.com/rocm/whl-next/ "rocm[libraries,device-gfx1100]==10.0.0"`.
+  The libraries land in two folders, `_rocm_sdk_core/lib` (`libamdhip64.so.7`) and `_rocm_sdk_libraries/lib`
+  (`libhipblas.so.3`, `librocblas.so.5`): list both in `runtimes.rocm.library_path`
+  (`find /srv/ai/arty-engine/rocm-10.0 -name 'libamdhip64.so.7*' -o -name 'libhipblas.so.3*' -o -name 'librocblas.so.5*'`
+  shows them). The build carries GPU code for gfx908, gfx90a, gfx942, gfx950, gfx1010 to gfx1012,
   gfx1030 to gfx1036, gfx1100 to gfx1103, gfx1150 to gfx1152, gfx1200 and gfx1201.
 - The **Vulkan** build needs the Vulkan loader (`libvulkan.so.1`) and a Vulkan driver for the card, on Debian
   `apt install libvulkan1 mesa-vulkan-drivers` (Mesa's RADV driver for AMD).
@@ -247,12 +267,16 @@ rented machine; it changes between releases.
 **Older cards need Vulkan.** Cards such as the RX 570 (Polaris, gfx803) are neither on AMD's list nor among the GPU
 code the ROCm build carries, so they run on the Vulkan build, or on the CPU.
 
-**Config.** Name both runtimes and let `auto` choose, or set `gpu_backend` to `rocm` or `vulkan`:
+**Config.** Name both runtimes and let `auto` choose (it takes ROCm only for a card the ROCm build carries code for,
+so an RX 570 lands on Vulkan), or set `gpu_backend` to `rocm` or `vulkan`. A card made to pass as another target with
+`HSA_OVERRIDE_GFX_VERSION` needs `gpu_backend` set to `rocm`, since `auto` reads the card's own target:
 
 ```json
 "gpu_backend": "auto",
 "runtimes": {
-  "rocm": {"runner_binary": "/srv/ai/arty-engine/runtime-rocm/server", "library_path": ["<the folder with libamdhip64.so.7>"]},
+  "rocm": {"runner_binary": "/srv/ai/arty-engine/runtime-rocm/server",
+           "library_path": ["<venv>/lib/python3.X/site-packages/_rocm_sdk_core/lib",
+                            "<venv>/lib/python3.X/site-packages/_rocm_sdk_libraries/lib"]},
   "vulkan": {"runner_binary": "/srv/ai/arty-engine/runtime-vulkan/server"}
 }
 ```
@@ -282,7 +306,7 @@ cards, the engine reads the one with the most memory.
 | `POST /api/chat` | Streamed or not; tools; `think` (true, false, unset, a level); `format` (`"json"`, a schema); images; `keep_alive`; sampling; `num_ctx`; `num_gpu: 0`; `_debug_render_only` |
 | `POST /api/generate` | Prompts, streamed and not; an empty prompt loads a model, and with `keep_alive: 0` unloads it; `raw` prompts |
 | `POST /api/embed`, `POST /api/embeddings` | Embeddings |
-| `POST /api/pull` | Hugging Face names (`hf.co/<owner>/<repo>:<quant>`) and the short names in `arty_engine/short_names.json`, with progress; one pull at a time (more below) |
+| `POST /api/pull` | Hugging Face names (`hf.co/<owner>/<repo>:<quant>`) and the short names in `arty_engine/short_names.json`, or a short name with its own `source`, with progress; one pull at a time (more below) |
 | `DELETE /api/delete` | Models in the engine's own store. Models read in place from `model_roots` answer 405, internal models and deletes during a pull answer 409 |
 | `POST /api/generate` with `suffix` | **501** |
 | `POST /api/generate` raw with images or a `format` | **501** |
@@ -293,12 +317,29 @@ cards, the engine reads the one with the most memory.
 
 Every answer carries `Server: arty-engine/<version>`.
 
+Thinking that leaks into the answer: some models (seen with `mimo-v2.6:9b`) write their reasoning and a closing
+`</think>` into the reply even with `think` false. Chat and generate replies (not raw ones) keep only the text after
+the last closing tag as content; the text before it goes into `thinking`, or is dropped when the request has `think`
+false. For a model with the thinking capability a streamed reply holds its content back until a closing tag, reasoning
+from the model or the end of the reply rules a leak out, so reasoning is never streamed as content; such replies can
+arrive in one piece at the end.
+
 Pulls: a short name already in the store is not downloaded again; one the engine can't run or read answers 409
 (delete it, then pull). Each short name is pinned to the sha256 of its files, so a file changed on Hugging Face is
 refused (502), and a short name that pins no projector takes none. A file listed without a size is refused (502).
 Pulled manifests record the repo and revision. Any other name answers 400 with the form to use. With
 `"stream": false` a pull that would break `pull_keep_free_mb` answers 507; a streamed pull reports that and a pin
 mismatch inside the stream.
+
+A pull can also name its own source: `{"model": "qwen2.5vl:7b", "source": "hf.co/<owner>/<repo>:Q4_K_M"}` fetches that
+repository and quant and installs it under the short name given, and the manifest records the source. Without
+`source` the short names in `arty_engine/short_names.json` decide, as above. Pulling a name already installed from
+the same source downloads nothing. From a different source the new files are downloaded and checked first, and only
+then does the new manifest replace the old one; the old copy is unloaded and the blobs only it used are removed (all
+are kept when any manifest can't be read). Projector rules, size checks and `pull_keep_free_mb` apply as for any
+pull, and a source that matches a short name's catalogue entry keeps its sha256 pins. `source` must be a Hugging Face
+name (400 otherwise), only a short name or that same Hugging Face name can take it (400), and an internal model's name
+answers 409.
 
 ---
 

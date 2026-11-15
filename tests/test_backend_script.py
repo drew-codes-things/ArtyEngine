@@ -122,7 +122,7 @@ def test_the_status_reads_the_engine_url_setting(tmp_path):
     assert "ARTY_ENGINE_URL=" in calls(tmp_path) and "11434" not in calls(tmp_path)
 
 
-def run_engine_switch(folder: Path, unit_state: int, extra_site: str = ""):
+def run_engine_switch(folder: Path, unit_state: int, extra_site: str = "", tool_state: int = 0, ct_refuses: str = ""):
     code = folder / "controller.py"
     code.write_text("def reload_arty(): pass\n")
     site = folder / "site.env"
@@ -132,7 +132,10 @@ def run_engine_switch(folder: Path, unit_state: int, extra_site: str = ""):
     bin_dir = fake_pct(folder)
     (bin_dir / "systemctl").write_text(f'#!/bin/sh\necho "systemctl $@" >> {folder / "calls.log"}\n'
                                        f'[ "$1" = is-active ] && exit {unit_state}\nexit 0\n')
-    (bin_dir / "python3").write_text(f'#!/bin/sh\necho "python3 $@" >> {folder / "calls.log"}\nexit 0\n')
+    (bin_dir / "python3").write_text(f'#!/bin/sh\necho "python3 $@" >> {folder / "calls.log"}\nexit {tool_state}\n')
+    if ct_refuses:
+        (bin_dir / "pct").write_text(f'#!/bin/sh\necho "pct $@" >> {folder / "calls.log"}\n'
+                                     f'case "$*" in *{ct_refuses}*) exit 1;; esac\nexit 0\n')
     (bin_dir / "python3").chmod(0o755)
     environment = {key: value for key, value in os.environ.items() if not key.startswith("ARTY_")}
     environment.update(ARTY_ENGINE_SITE=str(site), ARTY_CONTROLLER_SETTLE_SECONDS="0", PATH=f"{bin_dir}:{os.environ['PATH']}")
@@ -168,4 +171,17 @@ def test_the_switch_moves_arty_over_before_it_fails_on_the_controller(tmp_path):
     finished = run_engine_switch(tmp_path, 3)
     assert finished.returncode != 0
     assert "brain-through-engine.conf" in calls(tmp_path) and "keep_alive" in calls(tmp_path)
+    assert "trainer-controller is not running" in finished.stderr.rstrip().splitlines()[-1]
+
+
+def test_a_settings_tool_failure_says_the_engine_started_and_arty_was_not_moved(tmp_path):
+    finished = run_engine_switch(tmp_path, 0, tool_state=1)
+    assert finished.returncode != 0
+    assert "Arty was not moved" in finished.stderr
+    assert "brain-through-engine.conf" not in calls(tmp_path)
+
+
+def test_the_controller_line_comes_last_even_when_caddy_refuses(tmp_path):
+    finished = run_engine_switch(tmp_path, 3, ct_refuses="Caddyfile")
+    assert finished.returncode != 0
     assert "trainer-controller is not running" in finished.stderr.rstrip().splitlines()[-1]

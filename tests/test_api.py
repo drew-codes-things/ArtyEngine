@@ -8,7 +8,22 @@ from engine_harness import RunningEngine, error_of, http_json, stream_chat
 TIMINGS = {"prompt_n": 40, "prompt_ms": 20.0, "predicted_n": 5, "predicted_ms": 50.0}
 
 
+LEAK_PROMPT = "how many orange stars?"
+LEAK_PIECES = ["Yes, 14 ", "orange stars.</th", "ink>14"]
+
+
+def leaked_reply(body):
+    if body.get("stream"):
+        events = [{"choices": [{"delta": {"content": piece}}]} for piece in LEAK_PIECES]
+        events.append({"choices": [{"delta": {}, "finish_reason": "stop"}], "timings": TIMINGS})
+        return {"sse": [f"data: {json.dumps(event)}" for event in events] + ["data: [DONE]"]}
+    return {"json": {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "".join(LEAK_PIECES)}}],
+                     "timings": TIMINGS}}
+
+
 def chat_reply(body):
+    if any(message.get("content") == LEAK_PROMPT for message in body.get("messages", [])):
+        return leaked_reply(body)
     if body.get("tools"):
         return {"json": {"choices": [{"finish_reason": "tool_calls", "message": {"role": "assistant", "content": "", "tool_calls": [
             {"id": "x1", "type": "function", "function": {"name": "calculate", "arguments": "{\"expression\":\"12*15\"}"}}]}}], "timings": TIMINGS}}
@@ -308,3 +323,24 @@ def test_params_that_are_not_an_object_are_ignored(tmp_path, params):
         assert http_json(f"{running.url}/api/show", {"model": "odd:1"})["parameters"] == ""
     finally:
         running.close()
+
+
+def streamed_lines(engine, path, body):
+    request = urllib.request.Request(f"{engine.url}{path}", data=json.dumps({**body, "stream": True}).encode(), method="POST")
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return [json.loads(line) for line in response if line.strip()]
+
+
+@pytest.mark.parametrize("think, thinking", [(None, "Yes, 14 orange stars."), (False, "")])
+def test_leaked_reasoning_never_reaches_chat_or_generate_as_content(engine, think, thinking):
+    extra = {} if think is None else {"think": think}
+    chat = {"model": "qwen3:14b", "messages": [{"role": "user", "content": LEAK_PROMPT}], **extra}
+    generate = {"model": "qwen3:14b", "prompt": LEAK_PROMPT, **extra}
+    reply = http_json(f"{engine.url}/api/chat", {**chat, "stream": False})
+    assert reply["message"]["content"] == "14" and reply["message"].get("thinking", "") == thinking
+    assert http_json(f"{engine.url}/api/generate", {**generate, "stream": False})["response"] == "14"
+    lines = streamed_lines(engine, "/api/chat", chat)
+    assert "".join(line["message"].get("content", "") for line in lines) == "14"
+    assert "".join(line["message"].get("thinking", "") for line in lines) == thinking
+    lines = streamed_lines(engine, "/api/generate", generate)
+    assert "".join(line.get("response", "") for line in lines) == "14"

@@ -169,3 +169,58 @@ def test_embed_inputs_accept_text_or_lists():
 def test_cached_prompt_tokens_are_counted_in_the_prompt():
     reply = translate.chat_reply("m", {"choices": [{"message": {"content": "x"}}], "timings": {"prompt_n": 12, "cache_n": 150}}, 0, 0)
     assert reply["prompt_eval_count"] == 162 and reply["prompt_eval_cached_count"] == 150
+
+
+LEAKED = "Yes, 14 orange stars.</think>14"
+
+
+@pytest.mark.parametrize("keep_thinking, thinking", [(True, "Yes, 14 orange stars."), (False, None)])
+def test_reasoning_leaked_into_a_reply_is_moved_or_dropped(keep_thinking, thinking):
+    completion = {"choices": [{"finish_reason": "stop", "message": {"content": LEAKED}}]}
+    reply = translate.chat_reply("mimo-v2.6:9b", completion, 0, 0, keep_thinking=keep_thinking)
+    assert reply["message"]["content"] == "14"
+    assert reply["message"].get("thinking") == thinking
+
+
+def stream_of(pieces, hold_content=True, keep_thinking=True, reasoning_first=False):
+    stream = translate.StreamTranslator("mimo-v2.6:9b", 0.0, 0.0, hold_content=hold_content, keep_thinking=keep_thinking)
+    chunks = []
+    if reasoning_first:
+        chunks.append(stream.feed({"choices": [{"delta": {"reasoning_content": "plan"}}]}))
+    for piece in pieces:
+        chunks.append(stream.feed({"choices": [{"delta": {"content": piece}}]}))
+    chunks.append(stream.finish_chunks())
+    return chunks
+
+
+def contents(chunks) -> list[str]:
+    return [chunk["message"]["content"] for batch in chunks for chunk in batch if chunk["message"].get("content")]
+
+
+def test_a_streamed_leak_never_reaches_the_client_as_content():
+    chunks = stream_of(["Yes, 14 ", "orange stars.</th", "ink>14"])
+    assert contents(chunks) == ["14"]
+    assert chunks[0] == [] and chunks[1] == []
+    assert [chunk["message"]["thinking"] for batch in chunks for chunk in batch if chunk["message"].get("thinking")] == ["Yes, 14 orange stars."]
+
+
+def test_a_streamed_leak_is_dropped_when_thinking_was_turned_off():
+    chunks = stream_of(["Yes, 14 orange stars.</think>", "14"], keep_thinking=False)
+    assert contents(chunks) == ["14"]
+    assert not any(chunk["message"].get("thinking") for batch in chunks for chunk in batch)
+
+
+def test_held_text_without_a_tag_comes_out_before_the_end():
+    chunks = stream_of(["Fourteen", " stars."])
+    assert contents(chunks) == ["Fourteen stars."]
+    assert chunks[-1][-1]["done"] is True
+
+
+def test_reasoning_from_the_runner_is_a_safe_point_and_content_flows_at_once():
+    chunks = stream_of(["Four", "teen"], reasoning_first=True)
+    assert contents(chunks) == ["Four", "teen"]
+
+
+def test_a_model_without_thinking_streams_at_once():
+    chunks = stream_of(["Four", "teen"], hold_content=False)
+    assert chunks[0][0]["message"]["content"] == "Four"

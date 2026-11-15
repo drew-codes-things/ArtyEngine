@@ -203,6 +203,7 @@ class RunnerPool:
         self._reaper.start()
 
     def plan(self, model: Model, ctx: int | None, cpu_only: bool = False) -> LaunchPlan:
+        cpu_only = cpu_only or self.backend.runs_everything_on_the_cpu
         if model.is_embedding:
             ctx = model.context_length or self.config.default_ctx
         else:

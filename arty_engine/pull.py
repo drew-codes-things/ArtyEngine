@@ -15,7 +15,7 @@ from pathlib import Path
 
 from .gguf import GgufError
 from .store import (LOCAL_HOST, MODEL_LAYER, PROJECTOR_LAYER, ModelName, ModelNotFound, ModelStore, blob_path,
-                    engine_manifest, is_digest, parse_name, write_manifest)
+                    engine_manifest, is_digest, parse_name, remove_unreferenced_blobs, write_manifest)
 
 HF_HOSTS = ("hf.co", "huggingface.co")
 TOKEN_HOSTS = ("huggingface.co",)
@@ -35,6 +35,14 @@ SHORT_NAMES_FILE = Path(__file__).with_name("short_names.json")
 RANGE_NOT_SATISFIABLE = 416
 DOWNLOAD_ATTEMPTS = 2
 BYTES_PER_GIB = 1024 ** 3
+
+
+@dataclass(frozen=True)
+class PullPlan:
+    source: ModelName | None
+    target: ModelName
+    pins: "ShortName | None"
+    replaces: bool = False
 
 
 @dataclass(frozen=True)
@@ -178,14 +186,46 @@ class Puller:
         self.store = store
         self.keep_free_bytes = keep_free_bytes
 
-    def check(self, name: str) -> None:
-        self._source_of(name)
+    def check(self, name: str, source: str | None = None) -> None:
+        self._plan(name, source)
 
-    def pull(self, name: str, progress) -> None:
-        source, target, pins = self._source_of(name)
-        if source:
-            self._pull_hf(source, target, progress, pins)
+    def pull(self, name: str, progress, source: str | None = None) -> bool:
+        plan = self._plan(name, source)
+        if plan.source is None:
+            if source is not None:
+                progress({"status": f"{plan.target.display} is already installed from {source}"})
+            progress({"status": "success"})
+            return False
+        old_digests = installed_digests(self.root, plan.target) if plan.replaces else set()
+        self._pull_hf(plan.source, plan.target, progress, plan.pins)
+        if plan.replaces:
+            removed = remove_unreferenced_blobs(self.root, old_digests)
+            progress({"status": f"replaced {plan.target.display}; {len(removed)} blobs only the old copy used were removed"})
         progress({"status": "success"})
+        return plan.replaces
+
+    def _plan(self, name: str, source: str | None) -> PullPlan:
+        if source is None:
+            return PullPlan(*self._source_of(name))
+        chosen = parse_name(source)
+        target = parse_name(name)
+        if chosen.host not in HF_HOSTS:
+            raise PullError(f"a source must be a Hugging Face name ({HF_NAME_FORM}), not {source}", HTTPStatus.BAD_REQUEST)
+        if target.host != LOCAL_HOST and target != chosen:
+            raise PullError(f"{target.display} is a full name; install a source under a short name (such as qwen2.5vl:7b), "
+                            f"or pull {chosen.display} itself", HTTPStatus.BAD_REQUEST)
+        short = self.short_names.get(target.display)
+        pins = short if short and parse_name(short.source) == chosen else None
+        installed_at = self._installed_root(target)
+        if installed_at is None:
+            return PullPlan(chosen, target, pins)
+        if installed_source(installed_at, target) == chosen.display:
+            return PullPlan(None, target, None)
+        return PullPlan(chosen, target, pins, replaces=True)
+
+    def _installed_root(self, target: ModelName) -> Path | None:
+        roots = self.store.roots if self.store is not None else [self.root]
+        return next((root for root in roots if target.manifest_path(root).is_file()), None)
 
     def _source_of(self, name: str) -> tuple[ModelName | None, ModelName, ShortName | None]:
         target = parse_name(name)
@@ -289,9 +329,9 @@ class Puller:
                 partial.unlink()
         progress({"status": "verifying sha256 digest"})
         if f"sha256:{hasher.hexdigest()}" != digest:
-            partial.unlink()
+            partial.unlink(missing_ok=True)
             raise PullError(f"{digest} failed its sha256 check; the partial file was removed")
-        partial.rename(target)
+        keep_download(partial, target, digest)
 
     def _fetch(self, url: str, digest: str, size: int, partial: Path, progress):
         have = partial.stat().st_size if partial.exists() else 0
@@ -327,6 +367,33 @@ class Puller:
             partial.unlink()
             raise PullError(f"{HF_SOURCE} sent more than the {size} bytes it listed for {digest}; the partial file was removed")
         return hasher
+
+
+def installed_manifest(root: Path, target: ModelName):
+    try:
+        return json.loads(target.manifest_path(root).read_text())
+    except (OSError, ValueError, RecursionError):
+        return None
+
+
+def installed_source(root: Path, target: ModelName) -> str | None:
+    manifest = installed_manifest(root, target)
+    source = manifest.get("source") if isinstance(manifest, dict) else None
+    return source.get("name") if isinstance(source, dict) else None
+
+
+def installed_digests(root: Path, target: ModelName) -> set[str]:
+    manifest = installed_manifest(root, target)
+    layers = manifest.get("layers") if isinstance(manifest, dict) else None
+    return {layer.get("digest") for layer in layers if isinstance(layer, dict)} if isinstance(layers, list) else set()
+
+
+def keep_download(partial: Path, target: Path, digest: str) -> None:
+    try:
+        partial.rename(target)
+    except FileNotFoundError as error:
+        raise PullError(f"the download of {digest} disappeared from the store before it could be kept (was the store "
+                        f"cleaned during the pull?); pull again") from error
 
 
 def partial_path(blob: Path) -> Path:

@@ -1,5 +1,3 @@
-import shutil
-from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -7,12 +5,21 @@ from .config import AUTO_BACKEND, Config
 from .gpu import AMD_DRIVER, driver_name
 
 CUDA, ROCM, VULKAN, CPU = "cuda", "rocm", "vulkan", "cpu"
-HIDDEN_DEVICES = {CUDA: {"CUDA_VISIBLE_DEVICES": ""}, ROCM: {"HIP_VISIBLE_DEVICES": ""}, VULKAN: {}, CPU: {}}
-NVIDIA_TOOL = "nvidia-smi"
+HIDDEN_CUDA_DEVICES = {"CUDA_VISIBLE_DEVICES": ""}
+HIDDEN_ROCM_DEVICES = {"ROCR_VISIBLE_DEVICES": ""}
+HIDDEN_DEVICES = {CUDA: HIDDEN_CUDA_DEVICES, ROCM: HIDDEN_ROCM_DEVICES, VULKAN: {},
+                  CPU: {**HIDDEN_CUDA_DEVICES, **HIDDEN_ROCM_DEVICES}}
 NVIDIA_DEVICE = "dev/nvidia0"
 AMD_COMPUTE_DEVICE = "dev/kfd"
 RENDER_NODES = "dev/dri"
 DRM_SYSFS = "sys/class/drm"
+KFD_NODES = "sys/class/kfd/kfd/topology/nodes"
+KFD_TARGET_KEY = "gfx_target_version"
+ROCM_BUILD_TARGETS = frozenset({
+    "gfx908", "gfx90a", "gfx942", "gfx950", "gfx1010", "gfx1011", "gfx1012", "gfx1030", "gfx1031", "gfx1032", "gfx1033",
+    "gfx1034", "gfx1035", "gfx1036", "gfx1100", "gfx1101", "gfx1102", "gfx1103", "gfx1150", "gfx1151", "gfx1152",
+    "gfx1200", "gfx1201",
+})
 
 
 @dataclass(frozen=True)
@@ -26,14 +33,42 @@ class Backend:
     def cpu_only_environment(self) -> dict[str, str]:
         return dict(HIDDEN_DEVICES[self.name])
 
+    @property
+    def runs_everything_on_the_cpu(self) -> bool:
+        return self.name == CPU
+
+
+def gfx_target(version: int) -> str:
+    major, minor, stepping = version // 10000, version // 100 % 100, version % 100
+    return f"gfx{major}{minor:x}{stepping:x}"
+
+
+def kfd_target_version(properties: Path) -> int:
+    try:
+        lines = properties.read_text().splitlines()
+    except OSError:
+        return 0
+    for line in lines:
+        key, _, value = line.partition(" ")
+        if key == KFD_TARGET_KEY:
+            return int(value) if value.strip().isdigit() else 0
+    return 0
+
 
 @dataclass(frozen=True)
 class Machine:
     root: Path = Path("/")
-    which: Callable[[str], str | None] = shutil.which
 
     def has_nvidia(self) -> bool:
-        return bool(self.which(NVIDIA_TOOL)) or (self.root / NVIDIA_DEVICE).exists()
+        return (self.root / NVIDIA_DEVICE).exists()
+
+    def gfx_targets(self) -> list[str]:
+        try:
+            nodes = sorted((self.root / KFD_NODES).glob("*/properties"))
+        except OSError:
+            return []
+        versions = [kfd_target_version(properties) for properties in nodes]
+        return [gfx_target(version) for version in versions if version]
 
     def has_amd_compute(self) -> bool:
         return (self.root / AMD_COMPUTE_DEVICE).exists()
@@ -52,14 +87,20 @@ def choose_backend(config: Config, machine: Machine) -> tuple[str, str]:
     if config.gpu_backend != AUTO_BACKEND:
         return config.gpu_backend, "set in the config"
     if machine.has_nvidia():
-        return CUDA, f"auto: {NVIDIA_TOOL} or /{NVIDIA_DEVICE} found"
+        return CUDA, f"auto: /{NVIDIA_DEVICE} found"
     amd_nodes = machine.amd_render_nodes()
+    rocm_note = ""
     if amd_nodes and machine.has_amd_compute() and ROCM in config.runtimes:
-        return ROCM, f"auto: /{AMD_COMPUTE_DEVICE} and amdgpu render node {amd_nodes[0]} found, ROCm runtime configured"
+        targets = machine.gfx_targets()
+        built_for = [target for target in targets if target in ROCM_BUILD_TARGETS]
+        if built_for:
+            return ROCM, (f"auto: /{AMD_COMPUTE_DEVICE} and amdgpu render node {amd_nodes[0]} found, card {built_for[0]} "
+                          f"is a ROCm build target, ROCm runtime configured")
+        rocm_note = f"; not ROCm: the card's target ({', '.join(targets) or 'not readable'}) is not one the ROCm build carries"
     nodes = amd_nodes or machine.render_nodes()
     if nodes and VULKAN in config.runtimes:
-        return VULKAN, f"auto: render node {nodes[0]} found, Vulkan runtime configured"
-    return CPU, f"auto: {no_gpu_reason(config, amd_nodes, nodes)}"
+        return VULKAN, f"auto: render node {nodes[0]} found, Vulkan runtime configured{rocm_note}"
+    return CPU, f"auto: {no_gpu_reason(config, amd_nodes, nodes)}{rocm_note}"
 
 
 def no_gpu_reason(config: Config, amd_nodes: list[str], nodes: list[str]) -> str:
