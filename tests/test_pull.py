@@ -5,12 +5,14 @@ import socket
 import socketserver
 import subprocess
 import threading
+import urllib.error
+import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from arty_engine import pull
-from arty_engine.store import CONFIG_MEDIA_TYPE, MANIFEST_MEDIA_TYPE, MODEL_LAYER, ModelStore, parse_name
+from arty_engine.store import CONFIG_MEDIA_TYPE, MANIFEST_MEDIA_TYPE, MODEL_LAYER, ModelStore, parse_name, write_manifest
 from engine_harness import RunningEngine, error_of, http_json
 from fake_store import GO_TEMPLATE, QWEN3, add_model, build_store
 from gguf_writer import write_gguf
@@ -779,3 +781,46 @@ def test_the_cleanup_command_a_replace_prints_refuses_while_the_engine_runs_on_a
         running.close()
     assert finished.returncode != 0 and f"listens at http://{address}" in finished.stderr
     assert "files removed" not in finished.stdout
+
+
+def pull_answer_of(engine, body) -> tuple[int, list[dict]]:
+    request = urllib.request.Request(f"{engine.url}/api/pull", data=json.dumps(body).encode(), method="POST")
+    try:
+        with urllib.request.urlopen(request, timeout=30) as response:
+            return response.status, [json.loads(line) for line in response if line.strip()]
+    except urllib.error.HTTPError as error:
+        return error.code, [json.loads(error.read())]
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_pull_of_a_file_the_engine_cannot_read_still_ends_in_success(engine, fake_hf, caplog, stream):
+    fake_hf["data"] = b"this is not a model file"
+    fake_hf["sha"] = hashlib.sha256(fake_hf["data"]).hexdigest()
+    caplog.set_level("WARNING")
+    for _ in range(2):
+        status, lines = pull_answer_of(engine, {"model": "hf.co/Someone/Tiny-GGUF:Q8_0", "stream": stream})
+        assert (status, lines[-1]) == (200, {"status": "success"})
+        assert not any("error" in line for line in lines)
+    assert "/api/pull failed" not in caplog.text
+
+
+def test_a_loaded_model_whose_file_was_damaged_still_pulls_to_success(engine, fake_hf, caplog):
+    name = "hf.co/Someone/Tiny-GGUF:Q8_0"
+    http_json(f"{engine.url}/api/pull", {"model": name, "stream": False})
+    http_json(f"{engine.url}/api/generate", {"model": name})
+    engine.engine.store.get(name).model_path.write_bytes(b"damaged on disk")
+    caplog.set_level("WARNING")
+    status, lines = pull_answer_of(engine, {"model": name, "stream": False})
+    assert (status, lines[-1]) == (200, {"status": "success"})
+    assert f"pulled {name}, but its record could not be read to update the loaded copy" in caplog.text
+    assert "/api/pull failed" not in caplog.text
+
+
+def test_a_source_only_pull_leaves_a_loaded_copy_whose_record_was_changed_on_disk(engine, fake_hf):
+    http_json(f"{engine.url}/api/pull", {"model": "tiny:1", "source": TINY_SOURCE, "stream": False})
+    http_json(f"{engine.url}/api/generate", {"model": "tiny:1"})
+    loaded = loaded_digests(engine)
+    model = engine.engine.store.get("tiny:1")
+    write_manifest(model.root, parse_name("tiny:1"), {**model.manifest, "annotations": {"edited": "by hand"}})
+    http_json(f"{engine.url}/api/pull", {"model": "tiny:1", "source": MIRROR_SOURCE, "stream": False})
+    assert loaded_digests(engine) == loaded and listed_digest(engine, "tiny:1") not in loaded

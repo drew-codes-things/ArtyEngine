@@ -371,9 +371,17 @@ class LeakSplitter:
     def leaks_caught(self) -> int:
         return len(self.leaks)
 
+    def leaks_by_rule(self) -> dict[str, tuple[int, int]]:
+        grouped: dict[str, tuple[int, int]] = {}
+        for rule, length in self.leaks:
+            moves, characters = grouped.get(rule, (0, 0))
+            grouped[rule] = (moves + 1, characters + length)
+        return grouped
+
     def _caught(self, rule: str, moved: str) -> None:
-        if not self.runner_reasoned:
-            self.leaks.append((rule, len(moved)))
+        reasoning = without_think_tags(moved).strip()
+        if reasoning and not self.runner_reasoned:
+            self.leaks.append((rule, len(reasoning)))
 
     def _cut_after_opening_tag(self, held: str) -> list[tuple[str, str]]:
         preamble, _, reasoning = held.partition(THINK_OPEN)

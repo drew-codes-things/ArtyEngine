@@ -91,11 +91,20 @@ class Engine:
             with self.leak_lock:
                 self.replies_with_leaks[model_name] += 1
                 replies_so_far = self.replies_with_leaks[model_name]
-            moved = "; ".join(f"{rule}, {length} characters" for rule, length in splitter.leaks)
+            moved = "; ".join(f"{rule}: {moves} move(s), {characters} characters"
+                              for rule, (moves, characters) in splitter.leaks_by_rule().items())
             log.info("leak caught: %s wrote reasoning into its answer with no reasoning from the runner; moved to thinking: %s "
                      "(%d replies of %s with a caught leak since the engine started)", model_name, moved, replies_so_far,
                      model_name)
         report_late_signs(model_name, splitter)
+
+    def refresh_loaded_record(self, name: str) -> None:
+        try:
+            model = self.store.get(name)
+        except (ModelNotFound, GgufError, OSError, ValueError, RecursionError) as error:
+            log.warning("pulled %s, but its record could not be read to update the loaded copy: %s", name, error)
+            return
+        self.pool.refresh_record(model)
 
     def listed_models(self) -> list:
         return [model for model in self.store.models() if model.name not in self.internal_names]
@@ -616,7 +625,8 @@ def make_handler(engine: Engine):
             if replaced:
                 engine.pool.unload(display)
                 return
-            engine.pool.refresh_record(engine.store.get(display))
+            if engine.pool.holds(display):
+                engine.refresh_loaded_record(display)
 
     return Handler
 

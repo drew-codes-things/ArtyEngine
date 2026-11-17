@@ -383,4 +383,19 @@ def test_tagged_blocks_taken_out_after_the_runner_s_reasoning_are_not_counted_as
 def test_each_caught_leak_records_its_rule_and_the_length_moved():
     assert splitter_after("plan one</think>Blue. <think>or red</think>Red.", "stop").leaks == [
         (translate.BEFORE_FIRST_CLOSE, 8), (translate.TAGGED_BLOCK, 6)]
-    assert splitter_after("Okay.\n<think>\nGot it", "length").leaks == [(translate.CUT_AFTER_OPEN, len("\nGot it"))]
+    assert splitter_after("Okay.\n<think>\nGot it", "length").leaks == [(translate.CUT_AFTER_OPEN, len("Got it"))]
+
+
+@pytest.mark.parametrize("text", ["</think>Two rows.", "\n\n</think>Two rows.", "<think>\n</think>Two rows."])
+def test_a_closing_tag_with_no_reasoning_in_front_of_it_is_not_counted(text):
+    splitter = splitter_after(text, "stop")
+    assert splitter.leaks == [] and splitter.leaks_caught == 0
+
+
+def test_the_recorded_length_is_what_reaches_thinking():
+    assert splitter_after("<think>plan</think>Two rows.", "stop").leaks == [(translate.BEFORE_FIRST_CLOSE, len("plan"))]
+
+
+def test_caught_leaks_are_grouped_by_rule():
+    splitter = splitter_after("x</think>a" + " <think>b</think>" * 1000, "stop")
+    assert splitter.leaks_by_rule() == {translate.BEFORE_FIRST_CLOSE: (1, 1), translate.TAGGED_BLOCK: (1000, 1000)}
