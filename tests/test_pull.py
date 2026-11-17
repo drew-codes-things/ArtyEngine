@@ -730,7 +730,8 @@ def replace_and_read_cleanup(root):
     old_manifest = ModelStore([root]).get("qwen3:14b").manifest
     old_entries = [*old_manifest["layers"], old_manifest["config"]]
     updates = []
-    pull.Puller(root, 0, short_names={}).pull("qwen3:14b", updates.append, source=TINY_SOURCE)
+    pull.Puller(root, 0, short_names={}, engine_listen=f"127.0.0.1:{unused_port()}").pull("qwen3:14b", updates.append,
+                                                                                         source=TINY_SOURCE)
     freed = [entry for entry in old_entries if entry["digest"] not in digests_named_in(root)]
     replaced = next(update["status"] for update in updates if update["status"].startswith("replaced"))
     return replaced, freed, shlex.split(replaced.split(" then run ", 1)[1].split(" (it removes", 1)[0])
@@ -758,7 +759,7 @@ def unused_port() -> int:
 def test_the_cleanup_command_a_replace_prints_refuses_while_the_engine_runs_on_another_port(tmp_path, fake_hf):
     build_store(tmp_path / "own")
     address = f"127.0.0.1:{unused_port()}"
-    running = RunningEngine(tmp_path, {}, listen=address)
+    running = RunningEngine(tmp_path, {}, bind_listen=True, listen=address)
     updates = []
     try:
         running.engine.puller.pull("qwen3:14b", updates.append, source=TINY_SOURCE)

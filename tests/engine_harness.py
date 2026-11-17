@@ -14,7 +14,7 @@ from fake_store import build_store
 
 
 class RunningEngine:
-    def __init__(self, tmp_path, replies: dict, **settings):
+    def __init__(self, tmp_path, replies: dict, bind_listen: bool = False, **settings):
         build_store(tmp_path / "other")
         self.config = Config(store=str(tmp_path / "own"), model_roots=[str(tmp_path / "other")], state_dir=str(tmp_path / "state"),
                              runner_binary="/opt/runtime/server", load_overhead_mb=100, **settings)
@@ -22,7 +22,7 @@ class RunningEngine:
         self.launcher = FakeLauncher(replies)
         pool = RunnerPool(self.config, store, launcher=self.launcher, memory=lambda: GpuMemory(total_mb=12288, used_mb=0))
         self.engine = Engine(self.config, pool=pool, store=store)
-        port = int(self.config.listen.rsplit(":", 1)[1]) if "listen" in settings else 0
+        port = int(self.config.listen.rsplit(":", 1)[1]) if bind_listen else 0
         self.http = ThreadingHTTPServer(("127.0.0.1", port), make_handler(self.engine))
         threading.Thread(target=self.http.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.http.server_address[1]}"
