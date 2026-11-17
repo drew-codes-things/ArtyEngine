@@ -333,7 +333,7 @@ class ModelStore:
         except (OSError, ValueError, RecursionError) as error:
             log.warning("couldn't read %s, so its blobs count as unused: %s", path, error)
             return set()
-        digests = {entry.get("digest") for entry in _entries_of(manifest)}
+        digests = {entry.get("digest") for entry in manifest_entries(manifest)}
         return {blob_path(root, digest).resolve() for digest in digests if is_digest(digest)}
 
     @staticmethod
@@ -348,13 +348,13 @@ def named_digests(root: Path) -> set[str]:
     named = set()
     for path in _manifest_files(root):
         try:
-            named |= {entry.get("digest") for entry in _entries_of(_read_json(path))}
+            named |= {entry.get("digest") for entry in manifest_entries(_read_json(path))}
         except (OSError, ValueError, RecursionError) as error:
             log.warning("couldn't read %s while counting the blobs models name: %s", path, error)
     return named
 
 
-def _entries_of(manifest) -> list[dict]:
+def manifest_entries(manifest) -> list[dict]:
     if not isinstance(manifest, dict):
         return []
     layers = manifest.get("layers")

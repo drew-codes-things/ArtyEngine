@@ -1,6 +1,7 @@
 import hashlib
 import json
 import shlex
+import socket
 import socketserver
 import subprocess
 import threading
@@ -9,9 +10,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from arty_engine import pull
-from arty_engine.store import MANIFEST_MEDIA_TYPE, MODEL_LAYER, ModelStore, parse_name
+from arty_engine.store import CONFIG_MEDIA_TYPE, MANIFEST_MEDIA_TYPE, MODEL_LAYER, ModelStore, parse_name
 from engine_harness import RunningEngine, error_of, http_json
-from fake_store import build_store
+from fake_store import GO_TEMPLATE, QWEN3, add_model, build_store
 from gguf_writer import write_gguf
 
 
@@ -704,6 +705,8 @@ def test_a_pull_that_only_changes_the_recorded_source_keeps_the_loaded_runner(en
     http_json(f"{engine.url}/api/generate", {"model": "tiny:1"})
     assert len(engine.launcher.launched) == 1
     assert [model["name"] for model in http_json(f"{engine.url}/api/ps")["models"]] == ["tiny:1"]
+    listed = {model["name"]: model["digest"] for model in http_json(f"{engine.url}/api/tags")["models"]}
+    assert [model["digest"] for model in http_json(f"{engine.url}/api/ps")["models"]] == [listed["tiny:1"]]
 
 
 @pytest.mark.parametrize("spelling", ["hf.co/someone/tiny-gguf:Q8_0", "huggingface.co/Someone/Tiny-GGUF:Q8_0",
@@ -721,18 +724,49 @@ def digests_named_in(root):
     return {entry["digest"] for manifest in manifests for entry in [*manifest["layers"], manifest.get("config") or {}] if entry}
 
 
-def test_the_cleanup_command_a_replace_prints_works_as_written(tmp_path, fake_hf):
-    root = tmp_path / "store"
+def replace_and_read_cleanup(root):
     build_store(root)
-    old_layers = ModelStore([root]).get("qwen3:14b").manifest["layers"]
+    add_model(root, "qwen3", "14b", QWEN3, {"blk.0.w": (1000, 1000)}, template=GO_TEMPLATE, config_fields={"copy": "old"})
+    old_manifest = ModelStore([root]).get("qwen3:14b").manifest
+    old_entries = [*old_manifest["layers"], old_manifest["config"]]
     updates = []
     pull.Puller(root, 0, short_names={}).pull("qwen3:14b", updates.append, source=TINY_SOURCE)
-    freed = [layer for layer in old_layers if layer["digest"] not in digests_named_in(root)]
+    freed = [entry for entry in old_entries if entry["digest"] not in digests_named_in(root)]
     replaced = next(update["status"] for update in updates if update["status"].startswith("replaced"))
-    assert "stop the engine" in replaced and freed
-    assert f"({sum(layer['size'] for layer in freed)} bytes)" in replaced
-    command = shlex.split(replaced.split(" then run ", 1)[1].split(" (it removes", 1)[0])
+    return replaced, freed, shlex.split(replaced.split(" then run ", 1)[1].split(" (it removes", 1)[0])
+
+
+def test_the_cleanup_command_a_replace_prints_works_as_written(tmp_path, fake_hf):
+    root = tmp_path / "store"
+    replaced, freed, command = replace_and_read_cleanup(root)
+    assert "stop the engine" in replaced and any(entry["mediaType"] == CONFIG_MEDIA_TYPE for entry in freed)
+    assert f"({sum(entry['size'] for entry in freed)} bytes)" in replaced
+    listed = subprocess.run(command[:command.index("--remove")], capture_output=True, text=True, timeout=60)
+    assert all(entry["digest"].replace(":", "-") in listed.stdout for entry in freed)
     finished = subprocess.run(command, capture_output=True, text=True, timeout=60)
     assert finished.returncode == 0, finished.stderr
     assert not any((root / "blobs" / layer["digest"].replace(":", "-")).exists() for layer in freed)
     assert ModelStore([root]).get("qwen3:14b").model_path.read_bytes() == fake_hf["data"]
+
+
+def unused_port() -> int:
+    with socket.socket() as probe:
+        probe.bind(("127.0.0.1", 0))
+        return probe.getsockname()[1]
+
+
+def test_the_cleanup_command_a_replace_prints_refuses_while_the_engine_runs_on_another_port(tmp_path, fake_hf):
+    build_store(tmp_path / "own")
+    address = f"127.0.0.1:{unused_port()}"
+    running = RunningEngine(tmp_path, {}, listen=address)
+    updates = []
+    try:
+        running.engine.puller.pull("qwen3:14b", updates.append, source=TINY_SOURCE)
+        replaced = next(update["status"] for update in updates if update["status"].startswith("replaced"))
+        command = shlex.split(replaced.split(" then run ", 1)[1].split(" (it removes", 1)[0])
+        finished = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        assert http_json(f"{running.url}/api/version")
+    finally:
+        running.close()
+    assert finished.returncode != 0 and f"listens at http://{address}" in finished.stderr
+    assert "files removed" not in finished.stdout

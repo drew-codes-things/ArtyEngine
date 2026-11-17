@@ -172,6 +172,8 @@ class Rig:
         text = re.sub(rf"^{constant}=.*$", f"{constant}={self.runtime_digest}", SCRIPT.read_text(), count=1, flags=re.M)
         (tools / SCRIPT.name).write_text(text)
         shutil.copy(SCRIPT.with_name("amd_check_steps.py"), tools)
+        shutil.copytree(SCRIPT.parents[1] / "arty_engine", tools.parent / "arty_engine",
+                        ignore=shutil.ignore_patterns("__pycache__"))
         self.environment.pop("AMD_CHECK_RUNTIME_SHA256")
         return tools / SCRIPT.name
 
@@ -591,6 +593,7 @@ def test_the_rocm_build_is_checked_against_the_rocm_pin(rig):
     finished = rig.run("--stop-after", "download", script=kit)
     assert finished.returncode == 0, finished.stdout
     assert rig.steps()["download"].startswith(f"PASS release {RELEASE}, ubuntu-rocm-10.0-x64 build, sha256 {rig.runtime_digest}")
+    assert rig.steps()["download"].endswith("(the release listing agrees)")
 
 
 def test_the_vulkan_build_is_checked_against_the_vulkan_pin(rig):
@@ -600,6 +603,16 @@ def test_the_vulkan_build_is_checked_against_the_vulkan_pin(rig):
     finished = rig.run("--stop-after", "download", script=kit, FAKE_DEVICES=VULKAN_DEVICES)
     assert finished.returncode == 0, finished.stdout
     assert rig.steps()["download"].startswith(f"PASS release {RELEASE}, ubuntu-vulkan-x64 build, sha256 {rig.runtime_digest}")
+    assert rig.steps()["download"].endswith("(the release listing agrees)")
+
+
+def test_the_copied_kit_still_fails_a_runtime_the_release_listing_does_not_name(rig):
+    amd_with_rocm(rig)
+    rig.release_listing("0" * 64)
+    kit = rig.kit_pinned_to_this_runtime("ROCM_RUNTIME_SHA256")
+    finished = rig.run("--stop-after", "download", script=kit)
+    assert finished.returncode == EXIT_FAILED, finished.stdout
+    assert rig.steps()["download"].endswith(f"but the release lists {'0' * 64}")
 
 
 def test_a_build_is_never_checked_against_the_other_build_s_pin(rig):

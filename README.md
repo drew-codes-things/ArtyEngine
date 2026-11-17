@@ -328,17 +328,20 @@ same answer. Until the first closing tag, reasoning from the model or the end of
 streamed reply without a closing tag arrives in one piece at the end, however long it is. The text before the first
 closing tag goes into `thinking`, or is dropped when the request has `think` false, and the answer starts after it,
 without the blank lines that follow the tag. After that, a `<think>` ... `</think>` block in the answer is a second
-block of reasoning and goes into `thinking` too, a lone closing tag is taken out, and both are logged as a warning;
-an opening tag there that is never closed stays in the answer as written, unless the reply was cut by the length
-limit, when the text after it is thinking.
-The same characters mean both things, so an answer from such a model that writes the tags itself keeps only what
-follows the first closing tag, without any later tagged block. A reply with no closing tag at all is delivered
-exactly as written, unless it opens with `<think>` and was cut by the length limit: that reply is all thinking, with
-no content. A reply cut by the length limit before any tag can't be told from a cut answer, so it is delivered as
-written and logged as a warning, since it may be reasoning. Once the model's runner has delivered reasoning of its own,
-a model that is held only because its template does not read `enable_thinking` has its answer passed on exactly as
-written; one named in `thinking_leakers` still has tagged blocks taken out of the answer. A name in
-`thinking_leakers` that matches no installed model is logged as a warning at start.
+block of reasoning and goes into `thinking` too, a lone closing tag is taken out, and both are logged as a warning; an
+opening tag there that is never closed stays in the answer as written, unless the reply was cut by the length limit,
+when the text after it is thinking. The same characters mean both things, so an answer from such a model that writes
+the tags itself keeps only what follows the first closing tag, without any later tagged block. A reply with no closing
+tag at all is delivered exactly as written, unless it was cut by the length limit after an opening tag: then the text
+after the tag is thinking, the words before it (if any) are the answer, and a reply with words before the tag is
+logged as a warning. A reply cut by the length limit before any tag can't be told from a cut answer, so it is
+delivered as written and logged as a warning, since it may be reasoning. Once the model's runner has delivered
+reasoning of its own, a model that is held only because its template does not read `enable_thinking` has its answer
+passed on exactly as written; one named in `thinking_leakers` still has tagged blocks taken out of the answer. A name
+in `thinking_leakers` that matches no installed model is logged as a warning at start. Every reply from which
+reasoning was taken out of the answer is logged at the normal level as `leak caught:` with the model's name and the
+number of its replies with a caught leak since the engine started, so the journal shows how often a model leaks in
+real use.
 
 Pulls: a short name already in the store is not downloaded again; one the engine can't run or read answers 409
 (delete it, then pull). Each short name is pinned to the sha256 of its files, so a file changed on Hugging Face is
@@ -355,19 +358,20 @@ compared without regard to case. From a different source the new files are downl
 does the new manifest replace the old one, and the old copy is unloaded. A replace keeps only the new weights: the old
 copy's template, system prompt and parameters are not carried over (the status line names the ones dropped), and the
 old copy's files stay in the store, since a migration backup or a model left out with `--skip` may still need them.
-The status line says how much space they hold and prints the cleanup command in full, with the store's path; it runs
-only with the engine stopped, and it removes every blob no model names, not only the old copy's, so run it without
-`--remove` first to see the list. Until then the old files count against `pull_keep_free_mb`, so a second replace of a
-large model may answer 507. Like any pull that writes a manifest, a replace means a migration made before it can no
-longer be undone. A new source whose files are the old copy's is not a replace: only the recorded source changes,
-nothing is unloaded, and the loaded copy keeps answering (the recorded source is not part of what decides whether a
-loaded model can be reused). A name installed only in another store root gets its new copy in the engine's own store
-and the other root's copy is left as it is, no longer used. Every pull that names a source is logged as a warning with
-the caller's address, the name and the source, and every replace with the old and the new source; `/api/show` shows a
-model's recorded source (`name` and `revision`) when it has one. Projector rules, size checks and `pull_keep_free_mb`
-apply as for any pull, and a source that matches a short name's catalogue entry, in any of the spellings above, keeps
-its sha256 pins. `source` must be a Hugging Face name (400 otherwise), only a short name or that same Hugging Face
-name can take it (400), and an internal model's name answers 409.
+The status line says how much space they hold (their model, settings and config files) and prints the cleanup command
+in full, with the store's path and the engine's address; it runs only with the engine stopped, and it removes every
+blob no model names, not only the old copy's, so run it without `--remove` first to see the list. Until then the old
+files count against `pull_keep_free_mb`, so a second replace of a large model may answer 507. Like any pull that
+writes a manifest, a replace means a migration made before it can no longer be undone. A new source whose files are
+the old copy's is not a replace: only the recorded source changes, nothing is unloaded, and the loaded copy keeps
+answering (the recorded source is not part of what decides whether a loaded model can be reused). A name installed
+only in another store root gets its new copy in the engine's own store and the other root's copy is left as it is, no
+longer used. Every pull that names a source is logged as a warning with the caller's address, the name and the source,
+and every replace with the old and the new source; `/api/show` shows a model's recorded source (`name` and `revision`)
+when it has one. Projector rules, size checks and `pull_keep_free_mb` apply as for any pull, and a source that matches
+a short name's catalogue entry, in any of the spellings above, keeps its sha256 pins. `source` must be a Hugging Face
+name (400 otherwise), only a short name or that same Hugging Face name can take it (400), and an internal model's name
+answers 409.
 
 ---
 
@@ -398,12 +402,12 @@ copied from `deploy/site.env.example`:
 
 The script stops before changing anything when a setting it needs is missing. When a controller is set, the switch
 writes it into the installed `engine.json` as `trainer_url`, with the allowed hosts and origins and the model roots
-(`tools/write_config.py`), and sets the controller's `arty_engine_url` setting (`tools/host/controller_backend.py`).
-A failed `engine` run ends with one line that says how far it got: the config could not be written (nothing started
-or moved), the engine did not start, the engine started but Arty was not moved (with the reason), the move did not
-finish (some parts may already point at the engine), or Arty uses the engine but the main model did not load or the
-controller is not running. When the engine did not start or the move did not finish it prints `status` first, so the
-parts that already point at the engine can be seen.
+(`tools/write_config.py`), and sets the controller's `arty_engine_url` setting (`tools/host/controller_backend.py`). A
+failed `engine` run ends with one line that says how far it got: the config could not be written or the engine's unit
+file could not be installed (nothing started or moved), the engine did not start, the engine started but Arty was not
+moved (with the reason), the move did not finish (some parts may already point at the engine), or Arty uses the engine
+but the main model did not load or the controller is not running. When the engine did not start or the move did not
+finish it prints `status` first, so the parts that already point at the engine can be seen.
 
 `tools/container/` holds the bench helpers that run inside the container: `slice.sh` takes the GPU lock, asks the
 controller for the card, unloads the engine's models, runs one bench and puts Arty's main model back; `slice.sh

@@ -22,7 +22,8 @@ class RunningEngine:
         self.launcher = FakeLauncher(replies)
         pool = RunnerPool(self.config, store, launcher=self.launcher, memory=lambda: GpuMemory(total_mb=12288, used_mb=0))
         self.engine = Engine(self.config, pool=pool, store=store)
-        self.http = ThreadingHTTPServer(("127.0.0.1", 0), make_handler(self.engine))
+        port = int(self.config.listen.rsplit(":", 1)[1]) if "listen" in settings else 0
+        self.http = ThreadingHTTPServer(("127.0.0.1", port), make_handler(self.engine))
         threading.Thread(target=self.http.serve_forever, daemon=True).start()
         self.url = f"http://127.0.0.1:{self.http.server_address[1]}"
 

@@ -287,6 +287,7 @@ class RunnerPool:
         with self.state:
             runner = self.runners.get(plan.model.name)
             if runner and runner.alive and runner.plan.key == plan.key:
+                runner.plan.model = plan.model
                 runner.in_flight += 1
                 runner.expires_at = None
                 runner.expires_wall = None

@@ -32,9 +32,12 @@ class Runtime:
     library_path: list
 
 
+DEFAULT_LISTEN = "127.0.0.1:11438"
+
+
 @dataclass
 class Config:
-    listen: str = "127.0.0.1:11438"
+    listen: str = DEFAULT_LISTEN
     store: str = "/srv/ai/arty-engine/models"
     model_roots: list = field(default_factory=list)
     runner_binary: str = "/srv/ai/arty-engine/runtime/server"

@@ -108,6 +108,7 @@ finish_switch() {
   release_gpu_lock
   case "$switch_stage" in
     configuring) report_config_not_written ;;
+    installing) report_unit_not_installed ;;
     starting) show_status_after_failure; report_engine_not_started ;;
     started) report_not_moved ;;
     moving) show_status_after_failure; report_move_unfinished ;;
@@ -123,6 +124,11 @@ show_status_after_failure() {
 report_config_not_written() {
   echo "the engine's config could not be written (see the lines above), so this run started nothing and moved nothing." \
     "Fix that and run $0 engine again" >&2
+}
+
+report_unit_not_installed() {
+  echo "the engine's unit file could not be installed (see the lines above), so this run started nothing and moved" \
+    "nothing. Fix that and run $0 engine again" >&2
 }
 
 report_engine_not_started() {
@@ -167,10 +173,14 @@ install_engine_config() {
   in_ct "python3 /srv/ai/arty-engine/src/tools/write_config.py /srv/ai/arty-engine/src/deploy/engine.json /srv/ai/arty-engine/engine.json --trainer-url '$(trainer_url)'$(repeated_option --allowed-host "$ALLOWED_HOSTS")$(repeated_option --allowed-origin "$ALLOWED_ORIGINS")$(repeated_option --model-root "$MODEL_ROOTS")"
 }
 
-start_engine() {
+install_engine_unit() {
   in_ct 'set -e
 install -m 644 /srv/ai/arty-engine/src/deploy/arty-engine.service /etc/systemd/system/arty-engine.service
-systemctl daemon-reload
+systemctl daemon-reload'
+}
+
+start_engine() {
+  in_ct 'set -e
 systemctl enable --now arty-engine
 for attempt in $(seq 1 40); do curl -sf localhost:11438/api/version >/dev/null && exit 0; sleep 0.5; done
 echo "arty-engine did not answer on 11438" >&2; exit 1'
@@ -232,6 +242,8 @@ case "$1" in
     take_gpu_lock
     switch_stage=configuring
     install_engine_config
+    switch_stage=installing
+    install_engine_unit
     switch_stage=starting
     start_engine
     switch_stage=started
