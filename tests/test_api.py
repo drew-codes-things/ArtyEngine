@@ -5,6 +5,7 @@ import urllib.request
 
 import pytest
 
+from arty_engine import translate
 from engine_harness import RunningEngine, error_of, http_json, stream_chat
 
 TIMINGS = {"prompt_n": 40, "prompt_ms": 20.0, "predicted_n": 5, "predicted_ms": 50.0}
@@ -564,7 +565,7 @@ def test_every_reply_with_a_caught_leak_is_logged_and_counted_at_the_normal_leve
     leaker_answers(engine, BLANK_LINES_PROMPT, False, True)
     caught = [record for record in caplog.records if record.getMessage().startswith("leak caught: mimo:9b")]
     assert [record.levelname for record in caught] == ["INFO"] * 4
-    assert all("moved to thinking: text before the first closing tag, 21 characters" in record.getMessage()
+    assert all("moved to thinking: text before the first closing tag: 1 move(s), 21 characters" in record.getMessage()
                for record in caught)
     assert [record.getMessage().split("(")[-1] for record in caught] == [
         f"{count} replies of mimo:9b with a caught leak since the engine started)" for count in range(1, 5)]
@@ -595,3 +596,43 @@ def test_a_caught_leak_is_counted_when_the_reader_hangs_up(engine):
                        f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
         assert len(reader.recv(HANG_UP_AFTER_BYTES)) > 0
     assert leaks_counted_within(engine, "mimo:9b", COUNT_WAIT_SECONDS) == 1
+
+
+LEAK_LINE_LIMIT = 500
+
+
+def test_the_leak_line_stays_short_however_many_blocks_a_reply_has(engine, caplog):
+    caplog.set_level("INFO")
+    splitter = translate.LeakSplitter()
+    splitter.feed("x</think>a" + " <think>b</think>" * 3000)
+    splitter.finish("stop")
+    engine.engine.report_leak_signs("mimo:9b", splitter)
+    line = next(record.getMessage() for record in caplog.records if record.getMessage().startswith("leak caught"))
+    assert "a tagged block in the answer: 3000 move(s), 3000 characters" in line and len(line) < LEAK_LINE_LIMIT
+
+
+def count_when_sent(engine, monkeypatch, method_name: str, is_last) -> list[int]:
+    handler = engine.http.RequestHandlerClass
+    original = getattr(handler, method_name)
+    seen = []
+
+    def spying(self, *arguments):
+        if is_last(arguments):
+            seen.append(engine.engine.replies_with_leaks["mimo:9b"])
+        return original(self, *arguments)
+
+    monkeypatch.setattr(handler, method_name, spying)
+    return seen
+
+
+def test_a_plain_reply_is_counted_before_it_is_sent(engine, monkeypatch):
+    seen = count_when_sent(engine, monkeypatch, "_send_json", lambda arguments: True)
+    leaker_answers(engine, BLANK_LINES_PROMPT, False, False)
+    assert seen[0] == 1
+
+
+def test_a_stream_is_counted_before_its_last_line_is_sent(engine, monkeypatch):
+    seen = count_when_sent(engine, monkeypatch, "_stream_line", lambda arguments: arguments[0].get("done") is True)
+    streamed_lines(engine, "/api/chat", {"model": "mimo:9b", "think": False,
+                                         "messages": [{"role": "user", "content": BLANK_LINES_PROMPT}]})
+    assert seen == [1]

@@ -91,7 +91,8 @@ class Engine:
             with self.leak_lock:
                 self.replies_with_leaks[model_name] += 1
                 replies_so_far = self.replies_with_leaks[model_name]
-            moved = "; ".join(f"{rule}, {length} characters" for rule, length in splitter.leaks)
+            moved = "; ".join(f"{rule}: {moves} move(s), {characters} characters"
+                              for rule, (moves, characters) in splitter.leaks_by_rule().items())
             log.info("leak caught: %s wrote reasoning into its answer with no reasoning from the runner; moved to thinking: %s "
                      "(%d replies of %s with a caught leak since the engine started)", model_name, moved, replies_so_far,
                      model_name)
