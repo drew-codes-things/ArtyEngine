@@ -9,6 +9,7 @@ import time
 import urllib.error
 import urllib.request
 import uuid
+from collections import Counter
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
@@ -79,7 +80,21 @@ class Engine:
         self.puller = Puller(config.roots[0], config.pull_rate_bytes, store=self.store,
                              keep_free_bytes=config.pull_keep_free_mb * 1024 * 1024)
         self.pull_lock = threading.Lock()
+        self.leak_lock = threading.Lock()
+        self.replies_with_leaks: Counter[str] = Counter()
         self.internal_names = {parse_name(name).display for name in config.internal_models}
+
+    def report_leak_signs(self, model_name: str, splitter: translate.LeakSplitter | None) -> None:
+        if splitter is None:
+            return
+        if splitter.leaks_caught:
+            with self.leak_lock:
+                self.replies_with_leaks[model_name] += 1
+                replies_so_far = self.replies_with_leaks[model_name]
+            log.info("leak caught: %s wrote its reasoning into the answer; %d part(s) of this reply were moved to thinking "
+                     "(%d replies of %s with a caught leak since the engine started)", model_name, splitter.leaks_caught,
+                     replies_so_far, model_name)
+        report_late_signs(model_name, splitter)
 
     def listed_models(self) -> list:
         return [model for model in self.store.models() if model.name not in self.internal_names]
@@ -497,7 +512,7 @@ def make_handler(engine: Engine):
                     completion = post_json(url, body)
                     self._send_json(200, shape(translate.chat_reply(model.name, completion, load_seconds, started,
                                                                     keep_thinking=keep_thinking, splitter=splitter)))
-                    report_leak_signs(model.name, splitter)
+                    engine.report_leak_signs(model.name, splitter)
                     return
                 translator = translate.StreamTranslator(model.name, load_seconds, started, keep_thinking=keep_thinking,
                                                         splitter=splitter)
@@ -513,7 +528,7 @@ def make_handler(engine: Engine):
                 for chunk in translator.finish_chunks():
                     self._stream_line(shape(chunk))
                 self._end_stream()
-                report_leak_signs(model.name, splitter)
+                engine.report_leak_signs(model.name, splitter)
 
             engine.with_runner(model, options, keep_alive, run)
 
@@ -595,9 +610,7 @@ def make_handler(engine: Engine):
     return Handler
 
 
-def report_leak_signs(model_name: str, splitter: translate.LeakSplitter | None) -> None:
-    if splitter is None:
-        return
+def report_late_signs(model_name: str, splitter: translate.LeakSplitter) -> None:
     if splitter.late_tags:
         log.warning("%s wrote %d think tag(s) after its answer had started; they were taken out of the answer, check that "
                     "no reasoning reached it", model_name, splitter.late_tags)

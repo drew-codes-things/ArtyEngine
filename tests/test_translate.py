@@ -178,13 +178,15 @@ LEAKED = "Yes, 14 orange stars.</think>14"
 @pytest.mark.parametrize("keep_thinking, thinking", [(True, "Yes, 14 orange stars."), (False, None)])
 def test_reasoning_leaked_into_a_reply_is_moved_or_dropped(keep_thinking, thinking):
     completion = {"choices": [{"finish_reason": "stop", "message": {"content": LEAKED}}]}
-    reply = translate.chat_reply("mimo-v2.6:9b", completion, 0, 0, keep_thinking=keep_thinking, may_leak=True)
+    reply = translate.chat_reply("mimo-v2.6:9b", completion, 0, 0, keep_thinking=keep_thinking,
+                                 splitter=translate.LeakSplitter())
     assert reply["message"]["content"] == "14"
     assert reply["message"].get("thinking") == thinking
 
 
-def stream_of(pieces, hold_content=True, keep_thinking=True, reasoning_first=False):
-    stream = translate.StreamTranslator("mimo-v2.6:9b", 0.0, 0.0, hold_content=hold_content, keep_thinking=keep_thinking)
+def stream_of(pieces, can_leak=True, keep_thinking=True, reasoning_first=False):
+    splitter = translate.LeakSplitter() if can_leak else None
+    stream = translate.StreamTranslator("mimo-v2.6:9b", 0.0, 0.0, keep_thinking=keep_thinking, splitter=splitter)
     chunks = []
     if reasoning_first:
         chunks.append(stream.feed({"choices": [{"delta": {"reasoning_content": "plan"}}]}))
@@ -223,7 +225,7 @@ def test_reasoning_from_the_runner_is_a_safe_point_and_content_flows_at_once():
 
 
 def test_a_model_without_thinking_streams_at_once():
-    chunks = stream_of(["Four", "teen"], hold_content=False)
+    chunks = stream_of(["Four", "teen"], can_leak=False)
     assert chunks[0][0]["message"]["content"] == "Four"
 
 
@@ -260,13 +262,14 @@ def test_a_lone_angle_bracket_at_the_end_still_comes_out():
 
 def test_a_model_that_cannot_leak_streams_think_tags_as_it_wrote_them():
     pieces = ["print(\"<thi", "nk>a</th", "ink>\")"]
-    assert "".join(contents(stream_of(pieces, hold_content=False))) == "".join(pieces)
+    assert "".join(contents(stream_of(pieces, can_leak=False))) == "".join(pieces)
     completion = {"choices": [{"finish_reason": "stop", "message": {"content": "".join(pieces)}}]}
     assert translate.chat_reply("qwen3:14b", completion, 0, 0, keep_thinking=False)["message"]["content"] == "".join(pieces)
 
 
-def leaker_reply(text, keep_thinking, finish="stop", reasoning="", piece_size=None):
-    stream = translate.StreamTranslator("mimo-v2.6:9b", 0.0, 0.0, hold_content=True, keep_thinking=keep_thinking)
+def leaker_reply(text, keep_thinking, finish="stop", reasoning="", piece_size=None, named_leaker=False):
+    stream = translate.StreamTranslator("mimo-v2.6:9b", 0.0, 0.0, keep_thinking=keep_thinking,
+                                        splitter=translate.LeakSplitter(named_leaker=named_leaker))
     chunks = stream.feed({"choices": [{"delta": {"reasoning_content": reasoning}}]}) if reasoning else []
     pieces = re.findall(r"\s*\S+\s*|\s+", text) if piece_size is None else [text[index:index + piece_size]
                                                                            for index in range(0, len(text), piece_size)]
@@ -277,7 +280,7 @@ def leaker_reply(text, keep_thinking, finish="stop", reasoning="", piece_size=No
                 "".join(chunk["message"].get("thinking", "") for chunk in chunks))
     message = translate.chat_reply("mimo-v2.6:9b", {"choices": [{"finish_reason": finish, "message": {
         "content": text, **({"reasoning_content": reasoning} if reasoning else {})}}]}, 0, 0,
-        keep_thinking=keep_thinking, may_leak=True)["message"]
+        keep_thinking=keep_thinking, splitter=translate.LeakSplitter(named_leaker=named_leaker))["message"]
     return streamed, (message["content"], message.get("thinking", ""))
 
 
@@ -297,15 +300,18 @@ LEAKER_SHAPES = {
                                                "Count the rows first, the top one has a cable and"),
     "a leak cut by the length limit after its opening tag": ("<think>\nCount the rows first, the top one", "length", ""),
     "a late block cut by the length limit": ("plan</think>Two rows. <think>or three, the", "length", "Two rows. "),
+    "a leak cut by the length limit after a first line": ("Okay.\n<think>\nCount the rows first, the top one", "length",
+                                                          "Okay.\n"),
 }
 
 
+@pytest.mark.parametrize("named_leaker", [False, True])
 @pytest.mark.parametrize("piece_size", [None, 1, 5])
 @pytest.mark.parametrize("keep_thinking", [False, True])
 @pytest.mark.parametrize("label", list(LEAKER_SHAPES))
-def test_a_leaker_s_reply_is_the_same_streamed_and_not_streamed(label, keep_thinking, piece_size):
+def test_a_leaker_s_reply_is_the_same_streamed_and_not_streamed(label, keep_thinking, piece_size, named_leaker):
     text, finish, answer = LEAKER_SHAPES[label]
-    streamed, plain = leaker_reply(text, keep_thinking, finish, piece_size=piece_size)
+    streamed, plain = leaker_reply(text, keep_thinking, finish, piece_size=piece_size, named_leaker=named_leaker)
     assert streamed == plain
     assert plain[0] == answer
 
@@ -324,6 +330,39 @@ def test_a_finished_answer_that_opens_with_the_tag_is_not_emptied(keep_thinking)
 def test_a_reply_cut_after_its_opening_tag_is_thinking():
     streamed, plain = leaker_reply("<think>\nCount the rows first", True, "length")
     assert streamed == plain == ("", "Count the rows first")
+
+
+@pytest.mark.parametrize("named_leaker", [False, True])
+@pytest.mark.parametrize("piece_size", [None, 1])
+def test_a_reply_cut_after_an_opening_tag_that_follows_its_first_words_keeps_only_those_words(named_leaker, piece_size):
+    text = "Okay.\n<think>\nGot it, let's look at the picture. The total is in the corner, with the currency."
+    streamed, plain = leaker_reply(text, True, "length", piece_size=piece_size, named_leaker=named_leaker)
+    assert streamed == plain == ("Okay.\n", "Got it, let's look at the picture. The total is in the corner, with the currency.")
+
+
+def splitter_after(text, finish):
+    splitter = translate.LeakSplitter()
+    splitter.feed(text)
+    splitter.finish(finish)
+    return splitter
+
+
+def test_a_cut_after_an_opening_tag_that_follows_the_first_words_is_counted_and_flagged():
+    splitter = splitter_after("Okay.\n<think>\nGot it, the total", "length")
+    assert (splitter.leaks_caught, splitter.late_tags, splitter.cut_without_tag) == (1, 1, False)
+
+
+@pytest.mark.parametrize("text, finish, caught", [
+    ("Count the rows first.\n</think>\n\nTwo rows.", "stop", 1),
+    ("plan one</think>Blue. <think>or red</think>Red.", "stop", 2),
+    ("<think>\nCount the rows first", "length", 1),
+    ("plan</think>Two rows. <think>or three, the", "length", 2),
+    ("Two rows.", "stop", 0),
+    ("The tag <think> opens a reasoning block.", "stop", 0),
+    ("Count the rows first, the top one", "length", 0),
+])
+def test_every_leak_the_splitter_takes_out_of_the_answer_is_counted(text, finish, caught):
+    assert splitter_after(text, finish).leaks_caught == caught
 
 
 @pytest.mark.parametrize("piece_size", [None, 1])

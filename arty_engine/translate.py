@@ -314,6 +314,7 @@ class LeakSplitter:
         self.thinking_given = False
         self.runner_reasoned = False
         self.late_tags = 0
+        self.leaks_caught = 0
         self.cut_without_tag = False
 
     def runner_reasoning(self) -> list[tuple[str, str]]:
@@ -341,6 +342,7 @@ class LeakSplitter:
             return []
         leaked, _, rest = self.held.partition(THINK_CLOSE)
         self.held, self.phase, self.trim_answer_start = "", ANSWER, True
+        self.leaks_caught += 1
         return self._thinking(leaked) + self._answer(rest)
 
     def finish(self, finish_reason: str | None) -> list[tuple[str, str]]:
@@ -348,16 +350,25 @@ class LeakSplitter:
         phase, held, tail = self.phase, self.held, self.tail
         self.phase, self.held, self.tail = AS_WRITTEN, "", ""
         if phase == HOLDING:
-            if was_cut and held.lstrip().startswith(THINK_OPEN):
-                return self._thinking(held)
-            self.cut_without_tag = was_cut and not self.runner_reasoned and not any(tag in held for tag in THINK_TAGS)
+            if was_cut and THINK_OPEN in held:
+                return self._cut_after_opening_tag(held)
+            self.cut_without_tag = was_cut and not self.runner_reasoned
             return [(CONTENT, held)] if held else []
         if phase == LATE_BLOCK:
             if was_cut:
                 self.late_tags += 1
+                self.leaks_caught += 1
                 return self._thinking(held + tail)
             return self._content(THINK_OPEN + held + tail)
         return self._content(tail)
+
+    def _cut_after_opening_tag(self, held: str) -> list[tuple[str, str]]:
+        preamble, _, reasoning = held.partition(THINK_OPEN)
+        self.leaks_caught += 1
+        if not preamble.strip():
+            return self._thinking(reasoning)
+        self.late_tags += 1
+        return [(CONTENT, preamble)] + self._thinking(reasoning)
 
     def _answer(self, text: str) -> list[tuple[str, str]]:
         text, self.tail = self.tail + text, ""
@@ -392,6 +403,7 @@ class LeakSplitter:
             return ""
         block, self.held = self.held + text[:end], ""
         self.late_tags += 2
+        self.leaks_caught += 1
         self.phase = ANSWER
         out += self._thinking(block)
         return text[end + len(THINK_CLOSE):]
@@ -416,12 +428,11 @@ def joined(events: list[tuple[str, str]], kind: str) -> str:
 
 
 def chat_reply(model_name: str, completion: dict, load_seconds: float, started: float, keep_thinking: bool = True,
-               may_leak: bool = False, splitter: LeakSplitter | None = None) -> dict:
+               splitter: LeakSplitter | None = None) -> dict:
     choice = (completion.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     content = message.get("content") or ""
     reasoning = message.get("reasoning_content") or ""
-    splitter = splitter or (LeakSplitter() if may_leak else None)
     leaked = ""
     if splitter:
         events = (splitter.runner_reasoning() if reasoning else []) + splitter.feed(content)
@@ -448,12 +459,12 @@ def partial_tag_length(text: str) -> int:
 
 
 class StreamTranslator:
-    def __init__(self, model_name: str, load_seconds: float, started: float, hold_content: bool = False,
-                 keep_thinking: bool = True, splitter: LeakSplitter | None = None):
+    def __init__(self, model_name: str, load_seconds: float, started: float, keep_thinking: bool = True,
+                 splitter: LeakSplitter | None = None):
         self.model_name = model_name
         self.load_seconds = load_seconds
         self.started = started
-        self.splitter = splitter or (LeakSplitter() if hold_content else None)
+        self.splitter = splitter
         self.keep_thinking = keep_thinking
         self.calls: dict[int, dict] = {}
         self.finish = None

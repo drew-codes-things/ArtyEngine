@@ -30,6 +30,8 @@ TAG_ANSWER = "<think> is the tag some models put in front of their reasoning. It
 REASONED_CODE_PROMPT = "write a function that strips reasoning blocks"
 REASONED_CODE_REASONING = "The user wants a regex that removes the blocks."
 REASONED_CODE_PIECES = ["return re.sub(r\"<thi", "nk>.*?</th", "ink>\", \"\", text, flags=re.DOTALL)"]
+CUT_MID_TAG_PROMPT = "what is the total, briefly?"
+CUT_MID_TAG_REPLY = "Okay.\n<think>\n" + UNLISTED_OPENER_REASONING
 
 
 def leaked_reply(body):
@@ -86,6 +88,8 @@ def chat_reply(body):
         return pieces_reply(body, [TAG_ANSWER[index:index + 6] for index in range(0, len(TAG_ANSWER), 6)])
     if any(message.get("content") == REASONED_CODE_PROMPT for message in body.get("messages", [])):
         return reasoned_reply(body, REASONED_CODE_REASONING, REASONED_CODE_PIECES)
+    if any(message.get("content") == CUT_MID_TAG_PROMPT for message in body.get("messages", [])):
+        return pieces_reply(body, [CUT_MID_TAG_REPLY[index:index + 9] for index in range(0, len(CUT_MID_TAG_REPLY), 9)], "length")
     if any(message.get("content") == CUT_PROMPT for message in body.get("messages", [])):
         return pieces_reply(body, [CUT_REASONING[index:index + 7] for index in range(0, len(CUT_REASONING), 7)], "length")
     if body.get("tools"):
@@ -524,3 +528,26 @@ def test_a_named_leaker_s_reply_after_the_runner_s_reasoning_is_the_same_streame
     assert streamed == plain
     assert plain[0] == 'return re.sub(r"", "", text, flags=re.DOTALL)'
     assert "mimo:9b wrote 2 think tag(s)" in caplog.text
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("think", [None, False])
+def test_a_reply_cut_inside_reasoning_that_follows_its_first_words_keeps_only_those_words(engine, think, stream, caplog):
+    caplog.set_level("WARNING")
+    content, thinking, response = leaker_answers(engine, CUT_MID_TAG_PROMPT, think, stream)
+    assert content == "Okay.\n" and response == "Okay.\n"
+    assert thinking == ("" if think is False else UNLISTED_OPENER_REASONING)
+    assert "mimo:9b wrote 1 think tag(s) after its answer had started" in caplog.text
+
+
+def test_every_reply_with_a_caught_leak_is_logged_and_counted_at_the_normal_level(engine, caplog):
+    caplog.set_level("INFO")
+    leaker_answers(engine, TAG_ANSWER_PROMPT, False, False)
+    leaker_answers(engine, TAG_ANSWER_PROMPT, False, True)
+    assert "leak caught" not in caplog.text
+    leaker_answers(engine, BLANK_LINES_PROMPT, False, False)
+    leaker_answers(engine, BLANK_LINES_PROMPT, False, True)
+    caught = [record for record in caplog.records if record.getMessage().startswith("leak caught: mimo:9b")]
+    assert [record.levelname for record in caught] == ["INFO"] * 4
+    assert [record.getMessage().split("(")[-1] for record in caught] == [
+        f"{count} replies of mimo:9b with a caught leak since the engine started)" for count in range(1, 5)]

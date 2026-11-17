@@ -328,17 +328,20 @@ same answer. Until the first closing tag, reasoning from the model or the end of
 streamed reply without a closing tag arrives in one piece at the end, however long it is. The text before the first
 closing tag goes into `thinking`, or is dropped when the request has `think` false, and the answer starts after it,
 without the blank lines that follow the tag. After that, a `<think>` ... `</think>` block in the answer is a second
-block of reasoning and goes into `thinking` too, a lone closing tag is taken out, and both are logged as a warning;
-an opening tag there that is never closed stays in the answer as written, unless the reply was cut by the length
-limit, when the text after it is thinking.
-The same characters mean both things, so an answer from such a model that writes the tags itself keeps only what
-follows the first closing tag, without any later tagged block. A reply with no closing tag at all is delivered
-exactly as written, unless it opens with `<think>` and was cut by the length limit: that reply is all thinking, with
-no content. A reply cut by the length limit before any tag can't be told from a cut answer, so it is delivered as
-written and logged as a warning, since it may be reasoning. Once the model's runner has delivered reasoning of its own,
-a model that is held only because its template does not read `enable_thinking` has its answer passed on exactly as
-written; one named in `thinking_leakers` still has tagged blocks taken out of the answer. A name in
-`thinking_leakers` that matches no installed model is logged as a warning at start.
+block of reasoning and goes into `thinking` too, a lone closing tag is taken out, and both are logged as a warning; an
+opening tag there that is never closed stays in the answer as written, unless the reply was cut by the length limit,
+when the text after it is thinking. The same characters mean both things, so an answer from such a model that writes
+the tags itself keeps only what follows the first closing tag, without any later tagged block. A reply with no closing
+tag at all is delivered exactly as written, unless it was cut by the length limit after an opening tag: then the text
+after the tag is thinking, the words before it (if any) are the answer, and a reply with words before the tag is
+logged as a warning. A reply cut by the length limit before any tag can't be told from a cut answer, so it is
+delivered as written and logged as a warning, since it may be reasoning. Once the model's runner has delivered
+reasoning of its own, a model that is held only because its template does not read `enable_thinking` has its answer
+passed on exactly as written; one named in `thinking_leakers` still has tagged blocks taken out of the answer. A name
+in `thinking_leakers` that matches no installed model is logged as a warning at start. Every reply from which
+reasoning was taken out of the answer is logged at the normal level as `leak caught:` with the model's name and the
+number of its replies with a caught leak since the engine started, so the journal shows how often a model leaks in
+real use.
 
 Pulls: a short name already in the store is not downloaded again; one the engine can't run or read answers 409
 (delete it, then pull). Each short name is pinned to the sha256 of its files, so a file changed on Hugging Face is
