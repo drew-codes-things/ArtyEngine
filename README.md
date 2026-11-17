@@ -402,12 +402,12 @@ copied from `deploy/site.env.example`:
 
 The script stops before changing anything when a setting it needs is missing. When a controller is set, the switch
 writes it into the installed `engine.json` as `trainer_url`, with the allowed hosts and origins and the model roots
-(`tools/write_config.py`), and sets the controller's `arty_engine_url` setting (`tools/host/controller_backend.py`).
-A failed `engine` run ends with one line that says how far it got: the config could not be written (nothing started
-or moved), the engine did not start, the engine started but Arty was not moved (with the reason), the move did not
-finish (some parts may already point at the engine), or Arty uses the engine but the main model did not load or the
-controller is not running. When the engine did not start or the move did not finish it prints `status` first, so the
-parts that already point at the engine can be seen.
+(`tools/write_config.py`), and sets the controller's `arty_engine_url` setting (`tools/host/controller_backend.py`). A
+failed `engine` run ends with one line that says how far it got: the config could not be written or the engine's unit
+file could not be installed (nothing started or moved), the engine did not start, the engine started but Arty was not
+moved (with the reason), the move did not finish (some parts may already point at the engine), or Arty uses the engine
+but the main model did not load or the controller is not running. When the engine did not start or the move did not
+finish it prints `status` first, so the parts that already point at the engine can be seen.
 
 `tools/container/` holds the bench helpers that run inside the container: `slice.sh` takes the GPU lock, asks the
 controller for the card, unloads the engine's models, runs one bench and puts Arty's main model back; `slice.sh

@@ -232,3 +232,12 @@ def test_an_engine_that_does_not_start_shows_where_arty_points(tmp_path):
     finished = run_engine_switch(tmp_path, 0, ct_refuses="api/version")
     assert "still uses its old backend" not in finished.stderr
     assert "where things point now:" in finished.stdout and "systemctl show brain" in calls(tmp_path)
+
+
+def test_a_unit_file_that_cannot_be_installed_says_nothing_was_started_or_moved(tmp_path):
+    finished = run_engine_switch(tmp_path, 0, ct_refuses="arty-engine.service")
+    assert finished.returncode != 0
+    assert "unit file could not be installed" in last_line(finished)
+    assert "started nothing and moved nothing" in last_line(finished)
+    assert "did not start" not in finished.stderr and "journalctl -u arty-engine" not in finished.stderr
+    assert "enable --now arty-engine" not in calls(tmp_path)
