@@ -97,6 +97,14 @@ class Engine:
                      model_name)
         report_late_signs(model_name, splitter)
 
+    def refresh_loaded_record(self, name: str) -> None:
+        try:
+            model = self.store.get(name)
+        except (ModelNotFound, GgufError, OSError, ValueError, RecursionError) as error:
+            log.warning("pulled %s, but its record could not be read to update the loaded copy: %s", name, error)
+            return
+        self.pool.refresh_record(model)
+
     def listed_models(self) -> list:
         return [model for model in self.store.models() if model.name not in self.internal_names]
 
@@ -616,7 +624,8 @@ def make_handler(engine: Engine):
             if replaced:
                 engine.pool.unload(display)
                 return
-            engine.pool.refresh_record(engine.store.get(display))
+            if engine.pool.holds(display):
+                engine.refresh_loaded_record(display)
 
     return Handler
 

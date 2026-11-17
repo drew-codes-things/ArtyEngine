@@ -320,6 +320,11 @@ class RunnerPool:
         self.release(runner, keep_alive)
         return True
 
+    def holds(self, name: str) -> bool:
+        with self.state:
+            runner = self.runners.get(name)
+            return bool(runner and runner.alive)
+
     def refresh_record(self, model: Model) -> None:
         with self.state:
             runner = self.runners.get(model.name)
