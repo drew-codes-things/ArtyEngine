@@ -15,9 +15,10 @@ from dataclasses import dataclass
 from http import HTTPStatus
 from pathlib import Path
 
+from .config import DEFAULT_LISTEN
 from .gguf import GgufError
 from .store import (LOCAL_HOST, MODEL_LAYER, PARAMS_LAYER, PROJECTOR_LAYER, SYSTEM_LAYER, TEMPLATE_LAYER, ModelName,
-                    ModelNotFound, ModelStore, blob_path, engine_manifest, is_digest, named_digests, parse_name,
+                    ModelNotFound, ModelStore, blob_path, engine_manifest, is_digest, manifest_entries, named_digests, parse_name,
                     write_manifest)
 
 log = logging.getLogger("arty-engine.pull")
@@ -188,8 +189,9 @@ def load_short_names(path: Path = SHORT_NAMES_FILE) -> dict[str, ShortName]:
 
 class Puller:
     def __init__(self, store_root: Path, rate_bytes: int, short_names: dict[str, ShortName] | None = None,
-                 store: ModelStore | None = None, keep_free_bytes: int = 0):
+                 store: ModelStore | None = None, keep_free_bytes: int = 0, engine_listen: str = DEFAULT_LISTEN):
         self.root = Path(store_root)
+        self.engine_listen = engine_listen
         self.limiter = RateLimiter(rate_bytes)
         self.short_names = load_short_names() if short_names is None else short_names
         self.store = store
@@ -229,11 +231,11 @@ class Puller:
         dropped = [word for media_type, word in SETTING_LAYER_WORDS.items() if any(layer.get("mediaType") == media_type
                                                                                    for layer in old_layers)]
         not_carried = f"; its {', '.join(dropped)} were not carried over" if dropped else ""
-        kept_bytes = old_copy_bytes(old_layers, named_digests(self.root))
+        kept_bytes = old_copy_bytes(old_manifest, named_digests(self.root))
+        cleanup = cleanup_command(self.root, self.engine_listen)
         progress({"status": f"replaced {target} with {source}{not_carried}; the old copy's files ({readable_size(kept_bytes)}) stay "
-                            f"in the store. To free them, stop the engine, then run "
-                            f"{cleanup_command(self.root)} (it removes every blob no model names, not only these; run it "
-                            f"without --remove first to see the list)"})
+                            f"in the store. To free them, stop the engine, then run {cleanup} (it removes every blob no "
+                            f"model names, not only these; run it without --remove first to see the list)"})
         return True
 
     def _plan(self, name: str, source: str | None) -> PullPlan:
@@ -426,8 +428,9 @@ def weight_digests(layers: list[dict]) -> set[str]:
     return {layer.get("digest") for layer in layers if layer.get("mediaType") in WEIGHT_LAYERS}
 
 
-def old_copy_bytes(old_layers: list[dict], still_named: set[str]) -> int:
-    unnamed = {layer.get("digest"): int(layer.get("size") or 0) for layer in old_layers if layer.get("digest") not in still_named}
+def old_copy_bytes(old_manifest: dict, still_named: set[str]) -> int:
+    unnamed = {entry.get("digest"): int(entry.get("size") or 0) for entry in manifest_entries(old_manifest)
+               if entry.get("digest") not in still_named}
     return sum(unnamed.values())
 
 
@@ -439,8 +442,10 @@ def readable_size(size: int) -> str:
     return f"{size} bytes"
 
 
-def cleanup_command(root: Path) -> str:
-    return f"python3 {shlex.quote(str(CLEANUP_TOOL))} --store {shlex.quote(str(root))} --remove --remove-unnamed-blobs"
+def cleanup_command(root: Path, engine_listen: str) -> str:
+    engine_url = shlex.quote(f"http://{engine_listen}")
+    return (f"python3 {shlex.quote(str(CLEANUP_TOOL))} --store {shlex.quote(str(root))} --engine-url {engine_url} --remove "
+            f"--remove-unnamed-blobs")
 
 
 def source_key(name: ModelName) -> tuple[str, str, str]:

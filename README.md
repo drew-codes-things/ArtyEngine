@@ -358,19 +358,20 @@ compared without regard to case. From a different source the new files are downl
 does the new manifest replace the old one, and the old copy is unloaded. A replace keeps only the new weights: the old
 copy's template, system prompt and parameters are not carried over (the status line names the ones dropped), and the
 old copy's files stay in the store, since a migration backup or a model left out with `--skip` may still need them.
-The status line says how much space they hold and prints the cleanup command in full, with the store's path; it runs
-only with the engine stopped, and it removes every blob no model names, not only the old copy's, so run it without
-`--remove` first to see the list. Until then the old files count against `pull_keep_free_mb`, so a second replace of a
-large model may answer 507. Like any pull that writes a manifest, a replace means a migration made before it can no
-longer be undone. A new source whose files are the old copy's is not a replace: only the recorded source changes,
-nothing is unloaded, and the loaded copy keeps answering (the recorded source is not part of what decides whether a
-loaded model can be reused). A name installed only in another store root gets its new copy in the engine's own store
-and the other root's copy is left as it is, no longer used. Every pull that names a source is logged as a warning with
-the caller's address, the name and the source, and every replace with the old and the new source; `/api/show` shows a
-model's recorded source (`name` and `revision`) when it has one. Projector rules, size checks and `pull_keep_free_mb`
-apply as for any pull, and a source that matches a short name's catalogue entry, in any of the spellings above, keeps
-its sha256 pins. `source` must be a Hugging Face name (400 otherwise), only a short name or that same Hugging Face
-name can take it (400), and an internal model's name answers 409.
+The status line says how much space they hold (their model, settings and config files) and prints the cleanup command
+in full, with the store's path and the engine's address; it runs only with the engine stopped, and it removes every
+blob no model names, not only the old copy's, so run it without `--remove` first to see the list. Until then the old
+files count against `pull_keep_free_mb`, so a second replace of a large model may answer 507. Like any pull that
+writes a manifest, a replace means a migration made before it can no longer be undone. A new source whose files are
+the old copy's is not a replace: only the recorded source changes, nothing is unloaded, and the loaded copy keeps
+answering (the recorded source is not part of what decides whether a loaded model can be reused). A name installed
+only in another store root gets its new copy in the engine's own store and the other root's copy is left as it is, no
+longer used. Every pull that names a source is logged as a warning with the caller's address, the name and the source,
+and every replace with the old and the new source; `/api/show` shows a model's recorded source (`name` and `revision`)
+when it has one. Projector rules, size checks and `pull_keep_free_mb` apply as for any pull, and a source that matches
+a short name's catalogue entry, in any of the spellings above, keeps its sha256 pins. `source` must be a Hugging Face
+name (400 otherwise), only a short name or that same Hugging Face name can take it (400), and an internal model's name
+answers 409.
 
 ---
 

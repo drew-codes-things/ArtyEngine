@@ -78,7 +78,7 @@ class Engine:
         self.pool = pool or RunnerPool(config, self.store, backend=backend)
         self.trainer = TrainerClient(config.trainer_url)
         self.puller = Puller(config.roots[0], config.pull_rate_bytes, store=self.store,
-                             keep_free_bytes=config.pull_keep_free_mb * 1024 * 1024)
+                             keep_free_bytes=config.pull_keep_free_mb * 1024 * 1024, engine_listen=config.listen)
         self.pull_lock = threading.Lock()
         self.leak_lock = threading.Lock()
         self.replies_with_leaks: Counter[str] = Counter()
