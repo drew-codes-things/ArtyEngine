@@ -702,11 +702,19 @@ def test_a_pull_that_only_changes_the_recorded_source_keeps_the_loaded_runner(en
     http_json(f"{engine.url}/api/generate", {"model": "tiny:1"})
     assert len(engine.launcher.launched) == 1
     http_json(f"{engine.url}/api/pull", {"model": "tiny:1", "source": MIRROR_SOURCE, "stream": False})
+    assert loaded_digests(engine) == [listed_digest(engine, "tiny:1")]
     http_json(f"{engine.url}/api/generate", {"model": "tiny:1"})
     assert len(engine.launcher.launched) == 1
     assert [model["name"] for model in http_json(f"{engine.url}/api/ps")["models"]] == ["tiny:1"]
-    listed = {model["name"]: model["digest"] for model in http_json(f"{engine.url}/api/tags")["models"]}
-    assert [model["digest"] for model in http_json(f"{engine.url}/api/ps")["models"]] == [listed["tiny:1"]]
+    assert loaded_digests(engine) == [listed_digest(engine, "tiny:1")]
+
+
+def loaded_digests(engine) -> list[str]:
+    return [model["digest"] for model in http_json(f"{engine.url}/api/ps")["models"]]
+
+
+def listed_digest(engine, name: str) -> str:
+    return {model["name"]: model["digest"] for model in http_json(f"{engine.url}/api/tags")["models"]}[name]
 
 
 @pytest.mark.parametrize("spelling", ["hf.co/someone/tiny-gguf:Q8_0", "huggingface.co/Someone/Tiny-GGUF:Q8_0",

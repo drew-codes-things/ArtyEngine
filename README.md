@@ -370,14 +370,14 @@ blob no model names, not only the old copy's, so run it without `--remove` first
 files count against `pull_keep_free_mb`, so a second replace of a large model may answer 507. Like any pull that
 writes a manifest, a replace means a migration made before it can no longer be undone. A new source whose files are
 the old copy's is not a replace: only the recorded source changes, nothing is unloaded, and the loaded copy keeps
-answering (the recorded source is not part of what decides whether a loaded model can be reused). A name installed
-only in another store root gets its new copy in the engine's own store and the other root's copy is left as it is, no
-longer used. Every pull that names a source is logged as a warning with the caller's address, the name and the source,
-and every replace with the old and the new source; `/api/show` shows a model's recorded source (`name` and `revision`)
-when it has one. Projector rules, size checks and `pull_keep_free_mb` apply as for any pull, and a source that matches
-a short name's catalogue entry, in any of the spellings above, keeps its sha256 pins. `source` must be a Hugging Face
-name (400 otherwise), only a short name or that same Hugging Face name can take it (400), and an internal model's name
-answers 409.
+answering (the recorded source is not part of what decides whether a loaded model can be reused), and `/api/ps` shows
+the new digest at once. A name installed only in another store root gets its new copy in the engine's own store and
+the other root's copy is left as it is, no longer used. Every pull that names a source is logged as a warning with the
+caller's address, the name and the source, and every replace with the old and the new source; `/api/show` shows a
+model's recorded source (`name` and `revision`) when it has one. Projector rules, size checks and `pull_keep_free_mb`
+apply as for any pull, and a source that matches a short name's catalogue entry, in any of the spellings above, keeps
+its sha256 pins. `source` must be a Hugging Face name (400 otherwise), only a short name or that same Hugging Face
+name can take it (400), and an internal model's name answers 409.
 
 ---
 

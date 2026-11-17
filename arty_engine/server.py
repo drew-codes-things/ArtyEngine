@@ -593,10 +593,10 @@ def make_handler(engine: Engine):
                     log.warning("%s asked to pull %s from %s", self.client_address[0], name, source)
                 if stream:
                     self._start_stream()
-                    self._unload_if_replaced(name, engine.puller.pull(name, self._stream_line, source))
+                    self._follow_pull(name, engine.puller.pull(name, self._stream_line, source))
                     self._end_stream()
                 else:
-                    self._unload_if_replaced(name, engine.puller.pull(name, lambda update: None, source))
+                    self._follow_pull(name, engine.puller.pull(name, lambda update: None, source))
                     self._send_json(200, {"status": "success"})
             except PullError as error:
                 raise ApiError(error.status, str(error)) from error
@@ -611,9 +611,12 @@ def make_handler(engine: Engine):
             except ModelNotFound as error:
                 raise ApiError(400, str(error)) from error
 
-        def _unload_if_replaced(self, name: str, replaced: bool) -> None:
+        def _follow_pull(self, name: str, replaced: bool) -> None:
+            display = parse_name(name).display
             if replaced:
-                engine.pool.unload(parse_name(name).display)
+                engine.pool.unload(display)
+                return
+            engine.pool.refresh_record(engine.store.get(display))
 
     return Handler
 
