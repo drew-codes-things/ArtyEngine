@@ -88,6 +88,10 @@ AMD GPU was found, 64 a wrong option, 130 interrupted.
 | `memory` | the free card memory the engine reads now | (information) |
 | `cleanup` | stops the engine and its runtimes, removes the temporary folder | |
 
+The variables `AMD_CHECK_DRM`, `AMD_CHECK_DEV`, `AMD_CHECK_KFD` and `AMD_CHECK_RUNTIME_SHA256` exist for the kit's own
+tests, which run it against fake folders and a fake runtime; leave them unset on a real run. `AMD_CHECK_RUNTIME_SHA256`
+replaces the pinned digest of the runtime, so with it set the `download` step no longer checks the real archive.
+
 ## When a step fails
 
 - `libraries` names the missing files. For ROCm, a system install of ROCm 10.0 or AMD's packages (the default) fix

@@ -289,23 +289,146 @@ def finish_reason(reason: str | None) -> str:
     return FINISH_REASONS.get(reason or "stop", "stop")
 
 
-def split_leaked_thinking(text: str) -> tuple[str, str]:
-    if THINK_CLOSE in text:
-        leaked, _, answer = text.rpartition(THINK_CLOSE)
-        return leaked.replace(THINK_OPEN, "").strip(), answer.lstrip()
-    if text.lstrip().startswith(THINK_OPEN):
-        return text.replace(THINK_OPEN, "").strip(), ""
-    return "", text
+HOLDING = "holding"
+ANSWER = "answer"
+LATE_BLOCK = "late block"
+AS_WRITTEN = "as written"
+CONTENT = "content"
+THINKING = "thinking"
+CUT_FINISH = "length"
+
+
+def without_think_tags(text: str) -> str:
+    for tag in THINK_TAGS:
+        text = text.replace(tag, "")
+    return text
+
+
+class LeakSplitter:
+    def __init__(self, named_leaker: bool = False):
+        self.named_leaker = named_leaker
+        self.phase = HOLDING
+        self.held = ""
+        self.tail = ""
+        self.trim_answer_start = False
+        self.thinking_given = False
+        self.runner_reasoned = False
+        self.late_tags = 0
+        self.cut_without_tag = False
+
+    def runner_reasoning(self) -> list[tuple[str, str]]:
+        self.runner_reasoned = True
+        if self.phase != HOLDING:
+            self.thinking_given = True
+            return []
+        held, self.held = self.held, ""
+        if not self.named_leaker:
+            self.phase = AS_WRITTEN
+            self.thinking_given = True
+            return [(CONTENT, held)] if held else []
+        self.phase = ANSWER
+        out = self._answer(held)
+        self.thinking_given = True
+        return out
+
+    def feed(self, text: str) -> list[tuple[str, str]]:
+        if self.phase == AS_WRITTEN:
+            return [(CONTENT, text)] if text else []
+        if self.phase != HOLDING:
+            return self._answer(text)
+        self.held += text
+        if THINK_CLOSE not in self.held:
+            return []
+        leaked, _, rest = self.held.partition(THINK_CLOSE)
+        self.held, self.phase, self.trim_answer_start = "", ANSWER, True
+        return self._thinking(leaked) + self._answer(rest)
+
+    def finish(self, finish_reason: str | None) -> list[tuple[str, str]]:
+        was_cut = finish_reason == CUT_FINISH
+        phase, held, tail = self.phase, self.held, self.tail
+        self.phase, self.held, self.tail = AS_WRITTEN, "", ""
+        if phase == HOLDING:
+            if was_cut and held.lstrip().startswith(THINK_OPEN):
+                return self._thinking(held)
+            self.cut_without_tag = was_cut and not self.runner_reasoned and not any(tag in held for tag in THINK_TAGS)
+            return [(CONTENT, held)] if held else []
+        if phase == LATE_BLOCK:
+            if was_cut:
+                self.late_tags += 1
+                return self._thinking(held + tail)
+            return self._content(THINK_OPEN + held + tail)
+        return self._content(tail)
+
+    def _answer(self, text: str) -> list[tuple[str, str]]:
+        text, self.tail = self.tail + text, ""
+        out = []
+        while text:
+            if self.phase == LATE_BLOCK:
+                text = self._late_block(text, out)
+                continue
+            opening, closing = text.find(THINK_OPEN), text.find(THINK_CLOSE)
+            found = [position for position in (opening, closing) if position >= 0]
+            if not found:
+                kept = partial_tag_length(text)
+                out += self._content(text[:len(text) - kept])
+                self.tail = text[len(text) - kept:]
+                return out
+            first = min(found)
+            out += self._content(text[:first])
+            if first == opening:
+                self.phase = LATE_BLOCK
+                text = text[first + len(THINK_OPEN):]
+            else:
+                self.late_tags += 1
+                text = text[first + len(THINK_CLOSE):]
+        return out
+
+    def _late_block(self, text: str, out: list) -> str:
+        end = text.find(THINK_CLOSE)
+        if end < 0:
+            kept = partial_tag_length(text)
+            self.held += text[:len(text) - kept]
+            self.tail = text[len(text) - kept:]
+            return ""
+        block, self.held = self.held + text[:end], ""
+        self.late_tags += 2
+        self.phase = ANSWER
+        out += self._thinking(block)
+        return text[end + len(THINK_CLOSE):]
+
+    def _content(self, text: str) -> list[tuple[str, str]]:
+        if self.trim_answer_start:
+            text = text.lstrip()
+            self.trim_answer_start = not text
+        return [(CONTENT, text)] if text else []
+
+    def _thinking(self, text: str) -> list[tuple[str, str]]:
+        text = without_think_tags(text).strip()
+        if not text:
+            return []
+        separator = "\n" if self.thinking_given else ""
+        self.thinking_given = True
+        return [(THINKING, separator + text)]
+
+
+def joined(events: list[tuple[str, str]], kind: str) -> str:
+    return "".join(text for event_kind, text in events if event_kind == kind)
 
 
 def chat_reply(model_name: str, completion: dict, load_seconds: float, started: float, keep_thinking: bool = True,
-               may_leak: bool = False) -> dict:
+               may_leak: bool = False, splitter: LeakSplitter | None = None) -> dict:
     choice = (completion.get("choices") or [{}])[0]
     message = choice.get("message") or {}
     content = message.get("content") or ""
-    leaked, content = split_leaked_thinking(content) if may_leak else ("", content)
+    reasoning = message.get("reasoning_content") or ""
+    splitter = splitter or (LeakSplitter() if may_leak else None)
+    leaked = ""
+    if splitter:
+        events = (splitter.runner_reasoning() if reasoning else []) + splitter.feed(content)
+        events += splitter.finish(choice.get("finish_reason"))
+        content, leaked = joined(events, CONTENT), joined(events, THINKING)
     reply_message = {"role": "assistant", "content": content}
-    thinking = "\n".join(part for part in (message.get("reasoning_content") or "", leaked if keep_thinking else "") if part)
+    thinking = reasoning + (leaked if keep_thinking else "")
     if thinking:
         reply_message["thinking"] = thinking
     calls = reply_tool_calls(message.get("tool_calls"))
@@ -326,24 +449,32 @@ def partial_tag_length(text: str) -> int:
 
 class StreamTranslator:
     def __init__(self, model_name: str, load_seconds: float, started: float, hold_content: bool = False,
-                 keep_thinking: bool = True):
+                 keep_thinking: bool = True, splitter: LeakSplitter | None = None):
         self.model_name = model_name
         self.load_seconds = load_seconds
         self.started = started
-        self.may_leak = hold_content
-        self.holding = hold_content
+        self.splitter = splitter or (LeakSplitter() if hold_content else None)
         self.keep_thinking = keep_thinking
-        self.held = ""
-        self.tag_tail = ""
-        self.trim_answer_start = False
-        self.late_tags = 0
         self.calls: dict[int, dict] = {}
         self.finish = None
         self.timings = None
         self.usage = None
 
+    @property
+    def late_tags(self) -> int:
+        return self.splitter.late_tags if self.splitter else 0
+
     def _chunk(self, message: dict) -> dict:
         return {"model": self.model_name, "created_at": now_iso(), "message": {"role": "assistant", **message}, "done": False}
+
+    def _chunks(self, events: list[tuple[str, str]]) -> list[dict]:
+        out = []
+        for kind, text in events:
+            if kind == CONTENT:
+                out.append(self._chunk({"content": text}))
+            elif self.keep_thinking:
+                out.append(self._chunk({"content": "", "thinking": text}))
+        return out
 
     def feed(self, event: dict) -> list[dict]:
         if event.get("timings"):
@@ -354,51 +485,16 @@ class StreamTranslator:
         for choice in event.get("choices") or []:
             delta = choice.get("delta") or {}
             if delta.get("reasoning_content"):
-                out += self._release_held()
+                out += self._chunks(self.splitter.runner_reasoning()) if self.splitter else []
                 out.append(self._chunk({"content": "", "thinking": delta["reasoning_content"]}))
             if delta.get("content"):
-                out += self._hold(delta["content"]) if self.holding else self._pass(delta["content"])
+                text = delta["content"]
+                out += self._chunks(self.splitter.feed(text)) if self.splitter else [self._chunk({"content": text})]
             for piece in delta.get("tool_calls") or []:
                 self._add_call_piece(piece)
             if choice.get("finish_reason"):
                 self.finish = choice["finish_reason"]
         return out
-
-    def _hold(self, text: str) -> list[dict]:
-        self.held += text
-        return self._split_held() if THINK_CLOSE in self.held else []
-
-    def _split_held(self) -> list[dict]:
-        if not self.holding:
-            return []
-        leaked, answer = split_leaked_thinking(self.held)
-        self.held, self.holding = "", False
-        self.trim_answer_start = True
-        out = [self._chunk({"content": "", "thinking": leaked})] if leaked and self.keep_thinking else []
-        return out + self._pass(answer)
-
-    def _release_held(self) -> list[dict]:
-        held, self.held, self.holding = self.held, "", False
-        return self._pass(held)
-
-    def _pass(self, text: str) -> list[dict]:
-        if not self.may_leak:
-            return [self._chunk({"content": text})] if text else []
-        text = self.tag_tail + text
-        self.late_tags += sum(text.count(tag) for tag in THINK_TAGS)
-        for tag in THINK_TAGS:
-            text = text.replace(tag, "")
-        if self.trim_answer_start:
-            text = text.lstrip()
-            self.trim_answer_start = not text
-        kept = partial_tag_length(text)
-        self.tag_tail = text[len(text) - kept:] if kept else ""
-        text = text[:len(text) - kept]
-        return [self._chunk({"content": text})] if text else []
-
-    def _flush_tag_tail(self) -> list[dict]:
-        tail, self.tag_tail = self.tag_tail, ""
-        return [self._chunk({"content": tail})] if tail else []
 
     def _add_call_piece(self, piece: dict) -> None:
         slot = self.calls.setdefault(int(piece.get("index", len(self.calls))), {"id": "", "function": {"name": "", "arguments": ""}})
@@ -411,7 +507,7 @@ class StreamTranslator:
             slot["function"]["arguments"] += function["arguments"]
 
     def finish_chunks(self) -> list[dict]:
-        out = self._split_held() + self._flush_tag_tail()
+        out = self._chunks(self.splitter.finish(self.finish)) if self.splitter else []
         if self.calls:
             ordered = [self.calls[index] for index in sorted(self.calls)]
             out.append(self._chunk({"content": "", "tool_calls": reply_tool_calls(ordered)}))

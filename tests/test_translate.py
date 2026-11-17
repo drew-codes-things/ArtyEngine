@@ -1,4 +1,5 @@
 import json
+import re
 
 import pytest
 
@@ -246,8 +247,11 @@ def test_text_that_reads_like_reasoning_stays_held_until_its_tag():
 def test_a_tag_that_turns_up_after_the_answer_was_released_is_dropped_from_the_rest():
     chunks = stream_of(["count</think>Fourteen", " stars.</th", "ink> Fourteen."])
     assert "".join(contents(chunks)) == "Fourteen stars. Fourteen."
+
+
+def test_an_opening_tag_after_the_answer_started_that_never_closes_stays_in_the_answer():
     chunks = stream_of(["count</think>Fourteen <think>", "stars."])
-    assert "".join(contents(chunks)) == "Fourteen stars."
+    assert "".join(contents(chunks)) == "Fourteen <think>stars."
 
 
 def test_a_lone_angle_bracket_at_the_end_still_comes_out():
@@ -259,3 +263,70 @@ def test_a_model_that_cannot_leak_streams_think_tags_as_it_wrote_them():
     assert "".join(contents(stream_of(pieces, hold_content=False))) == "".join(pieces)
     completion = {"choices": [{"finish_reason": "stop", "message": {"content": "".join(pieces)}}]}
     assert translate.chat_reply("qwen3:14b", completion, 0, 0, keep_thinking=False)["message"]["content"] == "".join(pieces)
+
+
+def leaker_reply(text, keep_thinking, finish="stop", reasoning="", piece_size=None):
+    stream = translate.StreamTranslator("mimo-v2.6:9b", 0.0, 0.0, hold_content=True, keep_thinking=keep_thinking)
+    chunks = stream.feed({"choices": [{"delta": {"reasoning_content": reasoning}}]}) if reasoning else []
+    pieces = re.findall(r"\s*\S+\s*|\s+", text) if piece_size is None else [text[index:index + piece_size]
+                                                                           for index in range(0, len(text), piece_size)]
+    for piece in pieces:
+        chunks += stream.feed({"choices": [{"delta": {"content": piece}}]})
+    chunks += stream.feed({"choices": [{"delta": {}, "finish_reason": finish}]}) + stream.finish_chunks()
+    streamed = ("".join(chunk["message"].get("content", "") for chunk in chunks),
+                "".join(chunk["message"].get("thinking", "") for chunk in chunks))
+    message = translate.chat_reply("mimo-v2.6:9b", {"choices": [{"finish_reason": finish, "message": {
+        "content": text, **({"reasoning_content": reasoning} if reasoning else {})}}]}, 0, 0,
+        keep_thinking=keep_thinking, may_leak=True)["message"]
+    return streamed, (message["content"], message.get("thinking", ""))
+
+
+TAG_ANSWER = "<think> is the tag some models put in front of their reasoning. It is not HTML."
+CODE_WITH_TAGS = 'return re.sub(r"<think>.*?</think>", "", text, flags=re.DOTALL)'
+LEAKER_SHAPES = {
+    "a leak, its tag, then the answer": ("Count the rows first.\n</think>\n\nTwo rows.", "stop", "Two rows."),
+    "a plain answer": ("Two rows.", "stop", "Two rows."),
+    "an answer that starts with an indented line": ("    for row in rows:\n        print(row)\n", "stop",
+                                                    "    for row in rows:\n        print(row)\n"),
+    "an answer that starts with blank lines": ("\n\nTwo rows.", "stop", "\n\nTwo rows."),
+    "an answer that names the opening tag": ("The tag <think> opens a reasoning block in some models.", "stop",
+                                             "The tag <think> opens a reasoning block in some models."),
+    "a finished answer that opens with the tag": (TAG_ANSWER, "stop", TAG_ANSWER),
+    "two reasoning blocks": ("plan one</think>Blue. <think>or red, the user may want red</think>Red.", "stop", "Blue. Red."),
+    "a tagless leak cut by the length limit": ("Count the rows first, the top one has a cable and", "length",
+                                               "Count the rows first, the top one has a cable and"),
+    "a leak cut by the length limit after its opening tag": ("<think>\nCount the rows first, the top one", "length", ""),
+    "a late block cut by the length limit": ("plan</think>Two rows. <think>or three, the", "length", "Two rows. "),
+}
+
+
+@pytest.mark.parametrize("piece_size", [None, 1, 5])
+@pytest.mark.parametrize("keep_thinking", [False, True])
+@pytest.mark.parametrize("label", list(LEAKER_SHAPES))
+def test_a_leaker_s_reply_is_the_same_streamed_and_not_streamed(label, keep_thinking, piece_size):
+    text, finish, answer = LEAKER_SHAPES[label]
+    streamed, plain = leaker_reply(text, keep_thinking, finish, piece_size=piece_size)
+    assert streamed == plain
+    assert plain[0] == answer
+
+
+def test_a_second_reasoning_block_goes_to_thinking_streamed_and_not():
+    streamed, plain = leaker_reply(LEAKER_SHAPES["two reasoning blocks"][0], True)
+    assert streamed == plain == ("Blue. Red.", "plan one\nor red, the user may want red")
+
+
+@pytest.mark.parametrize("keep_thinking", [False, True])
+def test_a_finished_answer_that_opens_with_the_tag_is_not_emptied(keep_thinking):
+    streamed, plain = leaker_reply(TAG_ANSWER, keep_thinking)
+    assert streamed == plain == (TAG_ANSWER, "")
+
+
+def test_a_reply_cut_after_its_opening_tag_is_thinking():
+    streamed, plain = leaker_reply("<think>\nCount the rows first", True, "length")
+    assert streamed == plain == ("", "Count the rows first")
+
+
+@pytest.mark.parametrize("piece_size", [None, 1])
+def test_a_template_only_leaker_s_answer_is_left_alone_once_the_runner_gave_its_reasoning(piece_size):
+    streamed, plain = leaker_reply(CODE_WITH_TAGS, False, reasoning="The user wants a regex.", piece_size=piece_size)
+    assert streamed == plain == (CODE_WITH_TAGS, "The user wants a regex.")

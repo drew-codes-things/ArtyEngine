@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+import shutil
 import signal
 import socket
 import subprocess
@@ -161,9 +162,18 @@ class Rig:
                                 env={**self.environment, **extra}, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                 text=True, start_new_session=True)
 
-    def run(self, *arguments: str, **extra) -> subprocess.CompletedProcess:
-        return subprocess.run(["bash", str(SCRIPT), "--report", str(self.report), *arguments], cwd=self.root,
+    def run(self, *arguments: str, script: Path = SCRIPT, **extra) -> subprocess.CompletedProcess:
+        return subprocess.run(["bash", str(script), "--report", str(self.report), *arguments], cwd=self.root,
                               env={**self.environment, **extra}, capture_output=True, text=True, timeout=SCRIPT_TIMEOUT_SECONDS)
+
+    def kit_pinned_to_this_runtime(self, constant: str) -> Path:
+        tools = self.root / "kit" / "tools"
+        tools.mkdir(parents=True)
+        text = re.sub(rf"^{constant}=.*$", f"{constant}={self.runtime_digest}", SCRIPT.read_text(), count=1, flags=re.M)
+        (tools / SCRIPT.name).write_text(text)
+        shutil.copy(SCRIPT.with_name("amd_check_steps.py"), tools)
+        self.environment.pop("AMD_CHECK_RUNTIME_SHA256")
+        return tools / SCRIPT.name
 
     def curl_calls(self) -> list[str]:
         calls = self.root / "curl-calls"
@@ -573,3 +583,34 @@ def test_the_runtime_project_s_name_appears_only_on_its_download_url_lines():
         for line in path.read_text().splitlines():
             if any(word in line.lower() for word in RUNTIME_PROJECT_WORDS):
                 assert "https://" in line, (path.name, line)
+
+
+def test_the_rocm_build_is_checked_against_the_rocm_pin(rig):
+    amd_with_rocm(rig)
+    kit = rig.kit_pinned_to_this_runtime("ROCM_RUNTIME_SHA256")
+    finished = rig.run("--stop-after", "download", script=kit)
+    assert finished.returncode == 0, finished.stdout
+    assert rig.steps()["download"].startswith(f"PASS release {RELEASE}, ubuntu-rocm-10.0-x64 build, sha256 {rig.runtime_digest}")
+
+
+def test_the_vulkan_build_is_checked_against_the_vulkan_pin(rig):
+    rig.render_node()
+    rig.release_listing(rig.runtime_digest)
+    kit = rig.kit_pinned_to_this_runtime("VULKAN_RUNTIME_SHA256")
+    finished = rig.run("--stop-after", "download", script=kit, FAKE_DEVICES=VULKAN_DEVICES)
+    assert finished.returncode == 0, finished.stdout
+    assert rig.steps()["download"].startswith(f"PASS release {RELEASE}, ubuntu-vulkan-x64 build, sha256 {rig.runtime_digest}")
+
+
+def test_a_build_is_never_checked_against_the_other_build_s_pin(rig):
+    rig.render_node()
+    rig.release_listing(rig.runtime_digest)
+    kit = rig.kit_pinned_to_this_runtime("ROCM_RUNTIME_SHA256")
+    finished = rig.run("--stop-after", "download", script=kit, FAKE_DEVICES=VULKAN_DEVICES)
+    assert finished.returncode == EXIT_FAILED
+    assert f"this kit pins {script_value('VULKAN_RUNTIME_SHA256')}" in rig.steps()["download"]
+
+
+def test_the_test_hook_that_replaces_the_pin_is_documented():
+    guide = (SCRIPT.parents[1] / "docs" / "amd-check.md").read_text()
+    assert "`AMD_CHECK_RUNTIME_SHA256`" in guide and "leave them unset on a real run" in guide
