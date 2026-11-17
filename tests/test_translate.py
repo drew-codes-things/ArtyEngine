@@ -369,3 +369,18 @@ def test_every_leak_the_splitter_takes_out_of_the_answer_is_counted(text, finish
 def test_a_template_only_leaker_s_answer_is_left_alone_once_the_runner_gave_its_reasoning(piece_size):
     streamed, plain = leaker_reply(CODE_WITH_TAGS, False, reasoning="The user wants a regex.", piece_size=piece_size)
     assert streamed == plain == (CODE_WITH_TAGS, "The user wants a regex.")
+
+
+def test_tagged_blocks_taken_out_after_the_runner_s_reasoning_are_not_counted_as_leaks():
+    splitter = translate.LeakSplitter(named_leaker=True)
+    splitter.runner_reasoning()
+    events = splitter.feed('return re.sub(r"<think>.*?</think>", "", text)')
+    splitter.finish("stop")
+    assert translate.joined(events, translate.CONTENT) == 'return re.sub(r"", "", text)'
+    assert (splitter.leaks_caught, splitter.late_tags) == (0, 2)
+
+
+def test_each_caught_leak_records_its_rule_and_the_length_moved():
+    assert splitter_after("plan one</think>Blue. <think>or red</think>Red.", "stop").leaks == [
+        (translate.BEFORE_FIRST_CLOSE, 8), (translate.TAGGED_BLOCK, 6)]
+    assert splitter_after("Okay.\n<think>\nGot it", "length").leaks == [(translate.CUT_AFTER_OPEN, len("\nGot it"))]

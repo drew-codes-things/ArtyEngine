@@ -91,9 +91,10 @@ class Engine:
             with self.leak_lock:
                 self.replies_with_leaks[model_name] += 1
                 replies_so_far = self.replies_with_leaks[model_name]
-            log.info("leak caught: %s wrote its reasoning into the answer; %d part(s) of this reply were moved to thinking "
-                     "(%d replies of %s with a caught leak since the engine started)", model_name, splitter.leaks_caught,
-                     replies_so_far, model_name)
+            moved = "; ".join(f"{rule}, {length} characters" for rule, length in splitter.leaks)
+            log.info("leak caught: %s wrote reasoning into its answer with no reasoning from the runner; moved to thinking: %s "
+                     "(%d replies of %s with a caught leak since the engine started)", model_name, moved, replies_so_far,
+                     model_name)
         report_late_signs(model_name, splitter)
 
     def listed_models(self) -> list:
@@ -509,28 +510,35 @@ def make_handler(engine: Engine):
                 splitter = (translate.LeakSplitter(named_leaker=runner.plan.named_thinking_leaker)
                             if runner.plan.may_leak_thinking else None)
                 if not stream:
-                    completion = post_json(url, body)
-                    self._send_json(200, shape(translate.chat_reply(model.name, completion, load_seconds, started,
-                                                                    keep_thinking=keep_thinking, splitter=splitter)))
-                    engine.report_leak_signs(model.name, splitter)
+                    try:
+                        reply = translate.chat_reply(model.name, post_json(url, body), load_seconds, started,
+                                                     keep_thinking=keep_thinking, splitter=splitter)
+                    finally:
+                        engine.report_leak_signs(model.name, splitter)
+                    self._send_json(200, shape(reply))
                     return
                 translator = translate.StreamTranslator(model.name, load_seconds, started, keep_thinking=keep_thinking,
                                                         splitter=splitter)
-                events = stream_events(url, body)
-                first = next(events, None)
-                self._start_stream()
-                for event in ([first] if first else []):
-                    for chunk in translator.feed(event):
-                        self._stream_line(shape(chunk))
-                for event in events:
-                    for chunk in translator.feed(event):
-                        self._stream_line(shape(chunk))
-                for chunk in translator.finish_chunks():
+                try:
+                    last_chunks = self._stream_all_but_the_last(translator, stream_events(url, body), shape)
+                finally:
+                    engine.report_leak_signs(model.name, splitter)
+                for chunk in last_chunks:
                     self._stream_line(shape(chunk))
                 self._end_stream()
-                engine.report_leak_signs(model.name, splitter)
 
             engine.with_runner(model, options, keep_alive, run)
+
+        def _stream_all_but_the_last(self, translator: translate.StreamTranslator, events, shape) -> list[dict]:
+            first = next(events, None)
+            self._start_stream()
+            for event in ([first] if first else []):
+                for chunk in translator.feed(event):
+                    self._stream_line(shape(chunk))
+            for event in events:
+                for chunk in translator.feed(event):
+                    self._stream_line(shape(chunk))
+            return translator.finish_chunks()
 
         def _embed_vectors(self, request: dict, inputs: list[str]):
             model = engine.runnable_model(request.get("model"))

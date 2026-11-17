@@ -338,10 +338,16 @@ logged as a warning. A reply cut by the length limit before any tag can't be tol
 delivered as written and logged as a warning, since it may be reasoning. Once the model's runner has delivered
 reasoning of its own, a model that is held only because its template does not read `enable_thinking` has its answer
 passed on exactly as written; one named in `thinking_leakers` still has tagged blocks taken out of the answer. A name
-in `thinking_leakers` that matches no installed model is logged as a warning at start. Every reply from which
-reasoning was taken out of the answer is logged at the normal level as `leak caught:` with the model's name and the
-number of its replies with a caught leak since the engine started, so the journal shows how often a model leaks in
-real use.
+in `thinking_leakers` that matches no installed model is logged as a warning at start. A reply from which the engine
+moved text to `thinking` while the runner gave no reasoning of its own is logged at the normal level as `leak caught:`
+with the model's name, each rule that moved text (text before the first closing tag, a tagged block in the answer, or
+text after an opening tag in a reply cut by the length limit) with the number of characters it moved, and the number
+of that model's replies with a caught leak since the engine started. It is logged before the reply's last line is
+sent, and also when the reader hangs up or the runner fails after the move. Tagged blocks taken out after the runner's
+own reasoning are not counted (they are logged as late tags). The count is of replies the engine edited, not of proven
+leaks: an answer of a held model that writes the tags itself, with no reasoning from the runner, cannot be told apart
+from a leak and is counted too, so the count is an upper bound on leaks for that kind of request. It starts again at 0
+when the engine restarts.
 
 Pulls: a short name already in the store is not downloaded again; one the engine can't run or read answers 409
 (delete it, then pull). Each short name is pinned to the sha256 of its files, so a file changed on Hugging Face is

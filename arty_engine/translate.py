@@ -304,6 +304,11 @@ def without_think_tags(text: str) -> str:
     return text
 
 
+BEFORE_FIRST_CLOSE = "text before the first closing tag"
+TAGGED_BLOCK = "a tagged block in the answer"
+CUT_AFTER_OPEN = "text after an opening tag in a reply cut by the length limit"
+
+
 class LeakSplitter:
     def __init__(self, named_leaker: bool = False):
         self.named_leaker = named_leaker
@@ -314,7 +319,7 @@ class LeakSplitter:
         self.thinking_given = False
         self.runner_reasoned = False
         self.late_tags = 0
-        self.leaks_caught = 0
+        self.leaks: list[tuple[str, int]] = []
         self.cut_without_tag = False
 
     def runner_reasoning(self) -> list[tuple[str, str]]:
@@ -342,7 +347,7 @@ class LeakSplitter:
             return []
         leaked, _, rest = self.held.partition(THINK_CLOSE)
         self.held, self.phase, self.trim_answer_start = "", ANSWER, True
-        self.leaks_caught += 1
+        self._caught(BEFORE_FIRST_CLOSE, leaked)
         return self._thinking(leaked) + self._answer(rest)
 
     def finish(self, finish_reason: str | None) -> list[tuple[str, str]]:
@@ -352,19 +357,27 @@ class LeakSplitter:
         if phase == HOLDING:
             if was_cut and THINK_OPEN in held:
                 return self._cut_after_opening_tag(held)
-            self.cut_without_tag = was_cut and not self.runner_reasoned
+            self.cut_without_tag = was_cut
             return [(CONTENT, held)] if held else []
         if phase == LATE_BLOCK:
             if was_cut:
                 self.late_tags += 1
-                self.leaks_caught += 1
+                self._caught(CUT_AFTER_OPEN, held + tail)
                 return self._thinking(held + tail)
             return self._content(THINK_OPEN + held + tail)
         return self._content(tail)
 
+    @property
+    def leaks_caught(self) -> int:
+        return len(self.leaks)
+
+    def _caught(self, rule: str, moved: str) -> None:
+        if not self.runner_reasoned:
+            self.leaks.append((rule, len(moved)))
+
     def _cut_after_opening_tag(self, held: str) -> list[tuple[str, str]]:
         preamble, _, reasoning = held.partition(THINK_OPEN)
-        self.leaks_caught += 1
+        self._caught(CUT_AFTER_OPEN, reasoning)
         if not preamble.strip():
             return self._thinking(reasoning)
         self.late_tags += 1
@@ -403,7 +416,7 @@ class LeakSplitter:
             return ""
         block, self.held = self.held + text[:end], ""
         self.late_tags += 2
-        self.leaks_caught += 1
+        self._caught(TAGGED_BLOCK, block)
         self.phase = ANSWER
         out += self._thinking(block)
         return text[end + len(THINK_CLOSE):]
