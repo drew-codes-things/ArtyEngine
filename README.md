@@ -338,10 +338,16 @@ logged as a warning. A reply cut by the length limit before any tag can't be tol
 delivered as written and logged as a warning, since it may be reasoning. Once the model's runner has delivered
 reasoning of its own, a model that is held only because its template does not read `enable_thinking` has its answer
 passed on exactly as written; one named in `thinking_leakers` still has tagged blocks taken out of the answer. A name
-in `thinking_leakers` that matches no installed model is logged as a warning at start. Every reply from which
-reasoning was taken out of the answer is logged at the normal level as `leak caught:` with the model's name and the
-number of its replies with a caught leak since the engine started, so the journal shows how often a model leaks in
-real use.
+in `thinking_leakers` that matches no installed model is logged as a warning at start. A reply from which the engine
+moved text to `thinking` while the runner gave no reasoning of its own is logged at the normal level as `leak caught:`
+with the model's name, each rule that moved text (text before the first closing tag, a tagged block in the answer, or
+text after an opening tag in a reply cut by the length limit) with the number of characters it moved, and the number
+of that model's replies with a caught leak since the engine started. It is logged before the reply's last line is
+sent, and also when the reader hangs up or the runner fails after the move. Tagged blocks taken out after the runner's
+own reasoning are not counted (they are logged as late tags). The count is of replies the engine edited, not of proven
+leaks: an answer of a held model that writes the tags itself, with no reasoning from the runner, cannot be told apart
+from a leak and is counted too, so the count is an upper bound on leaks for that kind of request. It starts again at 0
+when the engine restarts.
 
 Pulls: a short name already in the store is not downloaded again; one the engine can't run or read answers 409
 (delete it, then pull). Each short name is pinned to the sha256 of its files, so a file changed on Hugging Face is
@@ -364,14 +370,14 @@ blob no model names, not only the old copy's, so run it without `--remove` first
 files count against `pull_keep_free_mb`, so a second replace of a large model may answer 507. Like any pull that
 writes a manifest, a replace means a migration made before it can no longer be undone. A new source whose files are
 the old copy's is not a replace: only the recorded source changes, nothing is unloaded, and the loaded copy keeps
-answering (the recorded source is not part of what decides whether a loaded model can be reused). A name installed
-only in another store root gets its new copy in the engine's own store and the other root's copy is left as it is, no
-longer used. Every pull that names a source is logged as a warning with the caller's address, the name and the source,
-and every replace with the old and the new source; `/api/show` shows a model's recorded source (`name` and `revision`)
-when it has one. Projector rules, size checks and `pull_keep_free_mb` apply as for any pull, and a source that matches
-a short name's catalogue entry, in any of the spellings above, keeps its sha256 pins. `source` must be a Hugging Face
-name (400 otherwise), only a short name or that same Hugging Face name can take it (400), and an internal model's name
-answers 409.
+answering (the recorded source is not part of what decides whether a loaded model can be reused), and `/api/ps` shows
+the new digest at once. A name installed only in another store root gets its new copy in the engine's own store and
+the other root's copy is left as it is, no longer used. Every pull that names a source is logged as a warning with the
+caller's address, the name and the source, and every replace with the old and the new source; `/api/show` shows a
+model's recorded source (`name` and `revision`) when it has one. Projector rules, size checks and `pull_keep_free_mb`
+apply as for any pull, and a source that matches a short name's catalogue entry, in any of the spellings above, keeps
+its sha256 pins. `source` must be a Hugging Face name (400 otherwise), only a short name or that same Hugging Face
+name can take it (400), and an internal model's name answers 409.
 
 ---
 

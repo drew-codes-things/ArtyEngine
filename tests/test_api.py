@@ -1,4 +1,6 @@
 import json
+import socket
+import time
 import urllib.request
 
 import pytest
@@ -31,6 +33,12 @@ REASONED_CODE_PROMPT = "write a function that strips reasoning blocks"
 REASONED_CODE_REASONING = "The user wants a regex that removes the blocks."
 REASONED_CODE_PIECES = ["return re.sub(r\"<thi", "nk>.*?</th", "ink>\", \"\", text, flags=re.DOTALL)"]
 CUT_MID_TAG_PROMPT = "what is the total, briefly?"
+BROKEN_AFTER_LEAK_PROMPT = "how many rows, then fall over?"
+LONG_AFTER_LEAK_PROMPT = "how many rows, at great length?"
+LONG_ANSWER_PIECE = "Two rows. " * 200
+LONG_ANSWER_PIECES = 4000
+HANG_UP_AFTER_BYTES = 200
+COUNT_WAIT_SECONDS = 15
 CUT_MID_TAG_REPLY = "Okay.\n<think>\n" + UNLISTED_OPENER_REASONING
 
 
@@ -88,6 +96,12 @@ def chat_reply(body):
         return pieces_reply(body, [TAG_ANSWER[index:index + 6] for index in range(0, len(TAG_ANSWER), 6)])
     if any(message.get("content") == REASONED_CODE_PROMPT for message in body.get("messages", [])):
         return reasoned_reply(body, REASONED_CODE_REASONING, REASONED_CODE_PIECES)
+    if any(message.get("content") == BROKEN_AFTER_LEAK_PROMPT for message in body.get("messages", [])):
+        events = [{"choices": [{"delta": {"content": piece}}]} for piece in BLANK_LINES_PIECES]
+        events.append({"error": {"message": "the runner fell over"}})
+        return {"sse": [f"data: {json.dumps(event)}" for event in events] + ["data: [DONE]"]}
+    if any(message.get("content") == LONG_AFTER_LEAK_PROMPT for message in body.get("messages", [])):
+        return pieces_reply(body, BLANK_LINES_PIECES + [LONG_ANSWER_PIECE] * LONG_ANSWER_PIECES)
     if any(message.get("content") == CUT_MID_TAG_PROMPT for message in body.get("messages", [])):
         return pieces_reply(body, [CUT_MID_TAG_REPLY[index:index + 9] for index in range(0, len(CUT_MID_TAG_REPLY), 9)], "length")
     if any(message.get("content") == CUT_PROMPT for message in body.get("messages", [])):
@@ -518,7 +532,7 @@ def test_a_template_only_leaker_s_answer_is_left_alone_after_the_runner_s_reason
 
 @pytest.mark.parametrize("think", [None, False])
 def test_a_named_leaker_s_reply_after_the_runner_s_reasoning_is_the_same_streamed_and_not(tmp_path, think, caplog):
-    caplog.set_level("WARNING")
+    caplog.set_level("INFO")
     running = RunningEngine(tmp_path, REPLIES, default_keep_alive="-1", thinking_leakers=["mimo:9b"])
     try:
         plain = leaker_answers(running, REASONED_CODE_PROMPT, think, False)
@@ -528,6 +542,7 @@ def test_a_named_leaker_s_reply_after_the_runner_s_reasoning_is_the_same_streame
     assert streamed == plain
     assert plain[0] == 'return re.sub(r"", "", text, flags=re.DOTALL)'
     assert "mimo:9b wrote 2 think tag(s)" in caplog.text
+    assert "leak caught" not in caplog.text
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -549,5 +564,34 @@ def test_every_reply_with_a_caught_leak_is_logged_and_counted_at_the_normal_leve
     leaker_answers(engine, BLANK_LINES_PROMPT, False, True)
     caught = [record for record in caplog.records if record.getMessage().startswith("leak caught: mimo:9b")]
     assert [record.levelname for record in caught] == ["INFO"] * 4
+    assert all("moved to thinking: text before the first closing tag, 21 characters" in record.getMessage()
+               for record in caught)
     assert [record.getMessage().split("(")[-1] for record in caught] == [
         f"{count} replies of mimo:9b with a caught leak since the engine started)" for count in range(1, 5)]
+
+
+def test_a_caught_leak_is_counted_when_the_runner_fails_after_it(engine, caplog):
+    caplog.set_level("INFO")
+    lines = streamed_lines(engine, "/api/chat", {"model": "mimo:9b", "think": False,
+                                                 "messages": [{"role": "user", "content": BROKEN_AFTER_LEAK_PROMPT}]})
+    assert "the runner fell over" in lines[-1]["error"]
+    assert engine.engine.replies_with_leaks["mimo:9b"] == 1
+    assert "leak caught: mimo:9b" in caplog.text
+
+
+def leaks_counted_within(engine, model_name: str, seconds: float) -> int:
+    deadline = time.monotonic() + seconds
+    while engine.engine.replies_with_leaks[model_name] == 0 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    return engine.engine.replies_with_leaks[model_name]
+
+
+def test_a_caught_leak_is_counted_when_the_reader_hangs_up(engine):
+    body = json.dumps({"model": "mimo:9b", "think": False, "stream": True,
+                       "messages": [{"role": "user", "content": LONG_AFTER_LEAK_PROMPT}]}).encode()
+    port = engine.http.server_address[1]
+    with socket.create_connection(("127.0.0.1", port), timeout=30) as reader:
+        reader.sendall(f"POST /api/chat HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
+                       f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
+        assert len(reader.recv(HANG_UP_AFTER_BYTES)) > 0
+    assert leaks_counted_within(engine, "mimo:9b", COUNT_WAIT_SECONDS) == 1
