@@ -24,6 +24,12 @@ CUT_PROMPT = "count every star"
 LATE_TAG_PROMPT = "how many rows, twice?"
 CUT_REASONING = "<think>\nOkay, the user wants every star counted, so I start at the top left and go"
 CODE_PIECES = ["Here it is:\n```python\nprint(\"<thi", "nk>a</th", "ink>\")\n```"]
+TAGLESS_CUT_PROMPT = "what is on the invoice?"
+TAG_ANSWER_PROMPT = "what does the think tag do?"
+TAG_ANSWER = "<think> is the tag some models put in front of their reasoning. It is not HTML."
+REASONED_CODE_PROMPT = "write a function that strips reasoning blocks"
+REASONED_CODE_REASONING = "The user wants a regex that removes the blocks."
+REASONED_CODE_PIECES = ["return re.sub(r\"<thi", "nk>.*?</th", "ink>\", \"\", text, flags=re.DOTALL)"]
 
 
 def leaked_reply(body):
@@ -42,6 +48,16 @@ def pieces_reply(body, pieces, finish="stop"):
         return {"sse": [f"data: {json.dumps(event)}" for event in events] + ["data: [DONE]"]}
     return {"json": {"choices": [{"finish_reason": finish, "message": {"role": "assistant", "content": "".join(pieces)}}],
                      "timings": TIMINGS}}
+
+
+def reasoned_reply(body, reasoning, pieces):
+    if body.get("stream"):
+        events = [{"choices": [{"delta": {"reasoning_content": reasoning}}]}]
+        events += [{"choices": [{"delta": {"content": piece}}]} for piece in pieces]
+        events.append({"choices": [{"delta": {}, "finish_reason": "stop"}], "timings": TIMINGS})
+        return {"sse": [f"data: {json.dumps(event)}" for event in events] + ["data: [DONE]"]}
+    return {"json": {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "".join(pieces),
+                                                                       "reasoning_content": reasoning}}], "timings": TIMINGS}}
 
 
 def counted_reply():
@@ -64,6 +80,12 @@ def chat_reply(body):
         return pieces_reply(body, BLANK_LINES_PIECES)
     if any(message.get("content") == LATE_TAG_PROMPT for message in body.get("messages", [])):
         return pieces_reply(body, ["a</think>Two", " rows.</think>"])
+    if any(message.get("content") == TAGLESS_CUT_PROMPT for message in body.get("messages", [])):
+        return pieces_reply(body, [word + " " for word in UNLISTED_OPENER_REASONING.split(" ")], "length")
+    if any(message.get("content") == TAG_ANSWER_PROMPT for message in body.get("messages", [])):
+        return pieces_reply(body, [TAG_ANSWER[index:index + 6] for index in range(0, len(TAG_ANSWER), 6)])
+    if any(message.get("content") == REASONED_CODE_PROMPT for message in body.get("messages", [])):
+        return reasoned_reply(body, REASONED_CODE_REASONING, REASONED_CODE_PIECES)
     if any(message.get("content") == CUT_PROMPT for message in body.get("messages", [])):
         return pieces_reply(body, [CUT_REASONING[index:index + 7] for index in range(0, len(CUT_REASONING), 7)], "length")
     if body.get("tools"):
@@ -460,3 +482,45 @@ def test_a_think_tag_after_a_leaker_s_answer_started_is_logged(engine, caplog):
     content, _, _ = leaker_answers(engine, LATE_TAG_PROMPT, False, True)
     assert content == "Two rows."
     assert "mimo:9b" in caplog.text and "think tag" in caplog.text
+
+
+@pytest.mark.parametrize("stream", [False, True])
+def test_a_tagless_reply_cut_by_the_length_limit_is_delivered_and_logged(engine, stream, caplog):
+    caplog.set_level("WARNING")
+    content, thinking, response = leaker_answers(engine, TAGLESS_CUT_PROMPT, False, stream)
+    expected = "".join(word + " " for word in UNLISTED_OPENER_REASONING.split(" "))
+    assert content == expected and response == expected and thinking == ""
+    assert "mimo:9b stopped at the length limit before any think tag" in caplog.text
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("think", [None, False])
+def test_a_finished_answer_that_opens_with_the_think_tag_arrives_whole(engine, think, stream, caplog):
+    caplog.set_level("WARNING")
+    content, thinking, response = leaker_answers(engine, TAG_ANSWER_PROMPT, think, stream)
+    assert content == TAG_ANSWER and response == TAG_ANSWER and thinking == ""
+    assert "length limit" not in caplog.text
+
+
+@pytest.mark.parametrize("stream", [False, True])
+@pytest.mark.parametrize("think", [None, False])
+def test_a_template_only_leaker_s_answer_is_left_alone_after_the_runner_s_reasoning(engine, think, stream, caplog):
+    caplog.set_level("WARNING")
+    content, thinking, response = leaker_answers(engine, REASONED_CODE_PROMPT, think, stream)
+    assert content == "".join(REASONED_CODE_PIECES) and response == "".join(REASONED_CODE_PIECES)
+    assert thinking == REASONED_CODE_REASONING
+    assert "think tag" not in caplog.text
+
+
+@pytest.mark.parametrize("think", [None, False])
+def test_a_named_leaker_s_reply_after_the_runner_s_reasoning_is_the_same_streamed_and_not(tmp_path, think, caplog):
+    caplog.set_level("WARNING")
+    running = RunningEngine(tmp_path, REPLIES, default_keep_alive="-1", thinking_leakers=["mimo:9b"])
+    try:
+        plain = leaker_answers(running, REASONED_CODE_PROMPT, think, False)
+        streamed = leaker_answers(running, REASONED_CODE_PROMPT, think, True)
+    finally:
+        running.close()
+    assert streamed == plain
+    assert plain[0] == 'return re.sub(r"", "", text, flags=re.DOTALL)'
+    assert "mimo:9b wrote 2 think tag(s)" in caplog.text

@@ -114,10 +114,11 @@ class LaunchPlan:
     template_file: Path | None = None
     cpu_only: bool = False
     may_leak_thinking: bool = False
+    named_thinking_leaker: bool = False
 
     @property
     def key(self) -> tuple:
-        return (self.model.digest, self.ctx, self.speculative.draft, self.speculative.spec_type, self.cpu_only)
+        return (self.model.load_digest, self.ctx, self.speculative.draft, self.speculative.spec_type, self.cpu_only)
 
 
 def warn_about_unknown_leakers(leaker_names: set[str], store: ModelStore) -> None:
@@ -233,6 +234,7 @@ class RunnerPool:
         donor = self.store.template_donor(model)
         plan.template_file = self._launch_template(model, donor)
         plan.may_leak_thinking = may_leak_thinking(model, donor or model, self.leaker_names)
+        plan.named_thinking_leaker = model.name in self.leaker_names
         return plan
 
     def _launch_template(self, model: Model, donor: Model | None) -> Path | None:

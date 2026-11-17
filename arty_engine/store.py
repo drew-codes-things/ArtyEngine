@@ -28,6 +28,7 @@ TEMPLATE_LAYER = f"{MEDIA_PREFIX}template"
 SYSTEM_LAYER = f"{MEDIA_PREFIX}system"
 PARAMS_LAYER = f"{MEDIA_PREFIX}params"
 LICENSE_LAYER = f"{MEDIA_PREFIX}license"
+SOURCE_FIELD = "source"
 EMBEDDING_ARCHITECTURES = {"bert", "nomic-bert", "nomic-bert-moe", "jina-bert-v2", "jina-bert-v3", "modern-bert", "neo-bert"}
 UNSUPPORTED_ARCHITECTURES = {"qwen25vl"}
 MILLION = 1_000_000
@@ -105,6 +106,11 @@ class Model:
     license: str = ""
     stored_template: str = ""
     stored_config: dict = field(default_factory=dict)
+
+    @property
+    def load_digest(self) -> str:
+        without_source = {key: value for key, value in self.manifest.items() if key != SOURCE_FIELD}
+        return hashlib.sha256(json.dumps(without_source, sort_keys=True).encode()).hexdigest()
 
     @property
     def architecture(self) -> str:
@@ -336,6 +342,16 @@ class ModelStore:
         while folder != stop and folder.is_dir() and not any(folder.iterdir()):
             folder.rmdir()
             folder = folder.parent
+
+
+def named_digests(root: Path) -> set[str]:
+    named = set()
+    for path in _manifest_files(root):
+        try:
+            named |= {entry.get("digest") for entry in _entries_of(_read_json(path))}
+        except (OSError, ValueError, RecursionError) as error:
+            log.warning("couldn't read %s while counting the blobs models name: %s", path, error)
+    return named
 
 
 def _entries_of(manifest) -> list[dict]:

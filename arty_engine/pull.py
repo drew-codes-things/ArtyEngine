@@ -4,6 +4,7 @@ import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import threading
 import time
@@ -16,13 +17,14 @@ from pathlib import Path
 
 from .gguf import GgufError
 from .store import (LOCAL_HOST, MODEL_LAYER, PARAMS_LAYER, PROJECTOR_LAYER, SYSTEM_LAYER, TEMPLATE_LAYER, ModelName,
-                    ModelNotFound, ModelStore, blob_path, engine_manifest, is_digest, parse_name, write_manifest)
+                    ModelNotFound, ModelStore, blob_path, engine_manifest, is_digest, named_digests, parse_name,
+                    write_manifest)
 
 log = logging.getLogger("arty-engine.pull")
 HF_HOSTS = ("hf.co", "huggingface.co")
 WEIGHT_LAYERS = (MODEL_LAYER, PROJECTOR_LAYER)
 SETTING_LAYER_WORDS = {TEMPLATE_LAYER: "template", SYSTEM_LAYER: "system prompt", PARAMS_LAYER: "parameters"}
-CLEANUP_COMMAND = "tools/unused_blobs.py --remove --remove-unnamed-blobs"
+CLEANUP_TOOL = Path(__file__).resolve().parents[1] / "tools" / "unused_blobs.py"
 TOKEN_HOSTS = ("huggingface.co",)
 HF_API = "https://huggingface.co/api/models/{repo}?blobs=true"
 HF_FILE = "https://huggingface.co/{repo}/resolve/{revision}/{file}"
@@ -40,6 +42,7 @@ SHORT_NAMES_FILE = Path(__file__).with_name("short_names.json")
 RANGE_NOT_SATISFIABLE = 416
 DOWNLOAD_ATTEMPTS = 2
 BYTES_PER_GIB = 1024 ** 3
+BYTES_PER_MIB = 1024 ** 2
 
 
 @dataclass(frozen=True)
@@ -226,8 +229,11 @@ class Puller:
         dropped = [word for media_type, word in SETTING_LAYER_WORDS.items() if any(layer.get("mediaType") == media_type
                                                                                    for layer in old_layers)]
         not_carried = f"; its {', '.join(dropped)} were not carried over" if dropped else ""
-        progress({"status": f"replaced {target} with {source}{not_carried}; the old copy's files stay in the store until "
-                            f"{CLEANUP_COMMAND} removes them"})
+        kept_bytes = old_copy_bytes(old_layers, named_digests(self.root))
+        progress({"status": f"replaced {target} with {source}{not_carried}; the old copy's files ({readable_size(kept_bytes)}) stay "
+                            f"in the store. To free them, stop the engine, then run "
+                            f"{cleanup_command(self.root)} (it removes every blob no model names, not only these; run it "
+                            f"without --remove first to see the list)"})
         return True
 
     def _plan(self, name: str, source: str | None) -> PullPlan:
@@ -241,7 +247,7 @@ class Puller:
             raise PullError(f"{target.display} is a full name; install a source under a short name (such as qwen2.5vl:7b), "
                             f"or pull {chosen.display} itself", HTTPStatus.BAD_REQUEST)
         short = self.short_names.get(target.display)
-        pins = short if short and parse_name(short.source) == chosen else None
+        pins = short if short and same_source(short.source, chosen) else None
         installed_at = self._installed_root(target)
         if installed_at is None:
             return PullPlan(chosen, target, pins)
@@ -418,6 +424,23 @@ def manifest_layers(manifest) -> list[dict]:
 
 def weight_digests(layers: list[dict]) -> set[str]:
     return {layer.get("digest") for layer in layers if layer.get("mediaType") in WEIGHT_LAYERS}
+
+
+def old_copy_bytes(old_layers: list[dict], still_named: set[str]) -> int:
+    unnamed = {layer.get("digest"): int(layer.get("size") or 0) for layer in old_layers if layer.get("digest") not in still_named}
+    return sum(unnamed.values())
+
+
+def readable_size(size: int) -> str:
+    if size >= BYTES_PER_GIB:
+        return f"{size / BYTES_PER_GIB:.1f} GiB"
+    if size >= BYTES_PER_MIB:
+        return f"{size / BYTES_PER_MIB:.1f} MiB"
+    return f"{size} bytes"
+
+
+def cleanup_command(root: Path) -> str:
+    return f"python3 {shlex.quote(str(CLEANUP_TOOL))} --store {shlex.quote(str(root))} --remove --remove-unnamed-blobs"
 
 
 def source_key(name: ModelName) -> tuple[str, str, str]:

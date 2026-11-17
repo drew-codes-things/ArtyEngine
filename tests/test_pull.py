@@ -1,6 +1,8 @@
 import hashlib
 import json
+import shlex
 import socketserver
+import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -688,3 +690,49 @@ def test_show_names_the_source_a_model_was_pulled_from(engine, fake_hf):
     shown = http_json(f"{engine.url}/api/show", {"model": "tiny:1"})
     assert (shown.get("source") or {}).get("name") == TINY_SOURCE
     assert "source" not in http_json(f"{engine.url}/api/show", {"model": "qwen3:14b"})
+
+
+MIRROR_SOURCE = "hf.co/Mirror/Tiny-GGUF:Q8_0"
+
+
+def test_a_pull_that_only_changes_the_recorded_source_keeps_the_loaded_runner(engine, fake_hf):
+    http_json(f"{engine.url}/api/pull", {"model": "tiny:1", "source": TINY_SOURCE, "stream": False})
+    http_json(f"{engine.url}/api/generate", {"model": "tiny:1"})
+    http_json(f"{engine.url}/api/generate", {"model": "tiny:1"})
+    assert len(engine.launcher.launched) == 1
+    http_json(f"{engine.url}/api/pull", {"model": "tiny:1", "source": MIRROR_SOURCE, "stream": False})
+    http_json(f"{engine.url}/api/generate", {"model": "tiny:1"})
+    assert len(engine.launcher.launched) == 1
+    assert [model["name"] for model in http_json(f"{engine.url}/api/ps")["models"]] == ["tiny:1"]
+
+
+@pytest.mark.parametrize("spelling", ["hf.co/someone/tiny-gguf:Q8_0", "huggingface.co/Someone/Tiny-GGUF:Q8_0",
+                                      "hf.co/Someone/Tiny-GGUF:q8_0"])
+def test_the_catalogue_source_in_another_spelling_keeps_its_pins(tmp_path, fake_hf, spelling):
+    puller = pull.Puller(tmp_path / "own", 0, short_names={"tiny:1": pull.ShortName(TINY_SOURCE, "1" * 64)})
+    with pytest.raises(pull.PullError, match="changed"):
+        puller.pull("tiny:1", lambda update: None, source=spelling)
+    assert not (tmp_path / "own" / "catalog").exists()
+    assert all(path.startswith("/api/") for path in fake_hf["paths"])
+
+
+def digests_named_in(root):
+    manifests = [json.loads(path.read_text()) for path in (root / "catalog").rglob("*.json")]
+    return {entry["digest"] for manifest in manifests for entry in [*manifest["layers"], manifest.get("config") or {}] if entry}
+
+
+def test_the_cleanup_command_a_replace_prints_works_as_written(tmp_path, fake_hf):
+    root = tmp_path / "store"
+    build_store(root)
+    old_layers = ModelStore([root]).get("qwen3:14b").manifest["layers"]
+    updates = []
+    pull.Puller(root, 0, short_names={}).pull("qwen3:14b", updates.append, source=TINY_SOURCE)
+    freed = [layer for layer in old_layers if layer["digest"] not in digests_named_in(root)]
+    replaced = next(update["status"] for update in updates if update["status"].startswith("replaced"))
+    assert "stop the engine" in replaced and freed
+    assert f"({sum(layer['size'] for layer in freed)} bytes)" in replaced
+    command = shlex.split(replaced.split(" then run ", 1)[1].split(" (it removes", 1)[0])
+    finished = subprocess.run(command, capture_output=True, text=True, timeout=60)
+    assert finished.returncode == 0, finished.stderr
+    assert not any((root / "blobs" / layer["digest"].replace(":", "-")).exists() for layer in freed)
+    assert ModelStore([root]).get("qwen3:14b").model_path.read_bytes() == fake_hf["data"]

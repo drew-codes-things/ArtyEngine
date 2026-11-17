@@ -491,15 +491,16 @@ def make_handler(engine: Engine):
 
             def run(runner: Runner, load_seconds: float):
                 url = f"{runner.base_url}/v1/chat/completions"
+                splitter = (translate.LeakSplitter(named_leaker=runner.plan.named_thinking_leaker)
+                            if runner.plan.may_leak_thinking else None)
                 if not stream:
                     completion = post_json(url, body)
                     self._send_json(200, shape(translate.chat_reply(model.name, completion, load_seconds, started,
-                                                                    keep_thinking=keep_thinking,
-                                                                    may_leak=runner.plan.may_leak_thinking)))
+                                                                    keep_thinking=keep_thinking, splitter=splitter)))
+                    report_leak_signs(model.name, splitter)
                     return
-                translator = translate.StreamTranslator(model.name, load_seconds, started,
-                                                        hold_content=runner.plan.may_leak_thinking,
-                                                        keep_thinking=keep_thinking)
+                translator = translate.StreamTranslator(model.name, load_seconds, started, keep_thinking=keep_thinking,
+                                                        splitter=splitter)
                 events = stream_events(url, body)
                 first = next(events, None)
                 self._start_stream()
@@ -512,9 +513,7 @@ def make_handler(engine: Engine):
                 for chunk in translator.finish_chunks():
                     self._stream_line(shape(chunk))
                 self._end_stream()
-                if translator.late_tags:
-                    log.warning("%s wrote %d think tag(s) after its answer had started streaming; they were dropped from "
-                                "the stream, check that no reasoning reached the answer", model.name, translator.late_tags)
+                report_leak_signs(model.name, splitter)
 
             engine.with_runner(model, options, keep_alive, run)
 
@@ -594,6 +593,17 @@ def make_handler(engine: Engine):
                 engine.pool.unload(parse_name(name).display)
 
     return Handler
+
+
+def report_leak_signs(model_name: str, splitter: translate.LeakSplitter | None) -> None:
+    if splitter is None:
+        return
+    if splitter.late_tags:
+        log.warning("%s wrote %d think tag(s) after its answer had started; they were taken out of the answer, check that "
+                    "no reasoning reached it", model_name, splitter.late_tags)
+    if splitter.cut_without_tag:
+        log.warning("%s stopped at the length limit before any think tag; if it was writing its reasoning into the answer, "
+                    "that reasoning was delivered as the answer", model_name)
 
 
 def recorded_source(model) -> dict:

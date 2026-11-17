@@ -177,7 +177,7 @@ def test_the_switch_moves_arty_over_before_it_fails_on_the_controller(tmp_path):
 def test_a_settings_tool_failure_says_the_engine_started_and_arty_was_not_moved(tmp_path):
     finished = run_engine_switch(tmp_path, 0, tool_state=1)
     assert finished.returncode != 0
-    assert "Arty was not moved" in finished.stderr
+    assert "this run did not move Arty" in finished.stderr
     assert "brain-through-engine.conf" not in calls(tmp_path)
 
 
@@ -196,13 +196,13 @@ def test_a_refused_move_with_the_controller_down_never_says_arty_moved(tmp_path)
     finished = run_engine_switch(tmp_path, 3, ct_refuses="Caddyfile")
     assert finished.returncode != 0
     assert "Arty now uses the engine" not in finished.stderr
-    assert "Arty was not moved" in last_line(finished) and "trainer-controller" in last_line(finished)
+    assert "the move to it did not finish" in last_line(finished) and "trainer-controller" in last_line(finished)
 
 
 def test_an_engine_that_does_not_answer_ends_with_where_arty_stands(tmp_path):
     finished = run_engine_switch(tmp_path, 0, ct_refuses="api/version")
     assert finished.returncode != 0
-    assert "did not start" in last_line(finished) and "Arty was not moved" in last_line(finished)
+    assert "did not start" in last_line(finished) and "this run did not move Arty" in last_line(finished)
     assert "brain-through-engine.conf" not in calls(tmp_path)
 
 
@@ -210,3 +210,25 @@ def test_a_main_model_that_does_not_load_after_the_move_is_named_last(tmp_path):
     finished = run_engine_switch(tmp_path, 0, ct_refuses="keep_alive")
     assert finished.returncode != 0
     assert "Arty now uses the engine" in last_line(finished) and "qwen3:14b" in last_line(finished)
+
+
+def test_a_config_that_cannot_be_written_says_nothing_was_started_or_moved(tmp_path):
+    finished = run_engine_switch(tmp_path, 0, ct_refuses="write_config.py")
+    assert finished.returncode != 0
+    assert "config could not be written" in last_line(finished) and "started nothing and moved nothing" in last_line(finished)
+    assert "journalctl -u arty-engine" not in finished.stderr
+    assert "enable --now arty-engine" not in calls(tmp_path)
+
+
+def test_a_restart_that_fails_after_the_route_moved_says_the_move_did_not_finish(tmp_path):
+    finished = run_engine_switch(tmp_path, 0, ct_refuses="restart?tool-hub?brain")
+    assert finished.returncode != 0
+    assert "the move to it did not finish" in last_line(finished)
+    assert "not moved" not in finished.stderr and "did not move Arty" not in finished.stderr
+    assert "where things point now:" in finished.stdout and "systemctl show brain" in calls(tmp_path)
+
+
+def test_an_engine_that_does_not_start_shows_where_arty_points(tmp_path):
+    finished = run_engine_switch(tmp_path, 0, ct_refuses="api/version")
+    assert "still uses its old backend" not in finished.stderr
+    assert "where things point now:" in finished.stdout and "systemctl show brain" in calls(tmp_path)

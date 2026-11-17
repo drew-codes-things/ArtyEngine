@@ -107,20 +107,38 @@ stop_before_moving() {
 finish_switch() {
   release_gpu_lock
   case "$switch_stage" in
-    starting) report_engine_not_started ;;
+    configuring) report_config_not_written ;;
+    starting) show_status_after_failure; report_engine_not_started ;;
     started) report_not_moved ;;
+    moving) show_status_after_failure; report_move_unfinished ;;
     moved) report_moved ;;
   esac
 }
 
+show_status_after_failure() {
+  echo "where things point now:"
+  show_status || echo "(the status could not be read)"
+}
+
+report_config_not_written() {
+  echo "the engine's config could not be written (see the lines above), so this run started nothing and moved nothing." \
+    "Fix that and run $0 engine again" >&2
+}
+
 report_engine_not_started() {
-  echo "the engine did not start, so Arty was not moved and still uses its old backend; see journalctl -u arty-engine" \
-    "in CT $CT, fix that and run $0 engine again" >&2
+  echo "the engine did not start (it did not answer on 11438), so this run did not move Arty; the status above shows" \
+    "where it points. See journalctl -u arty-engine in CT $CT, fix that and run $0 engine again" >&2
 }
 
 report_not_moved() {
-  echo "the engine is started, but Arty was not moved to it: ${not_moved_reason:-see the lines above}.$(controller_clause_before_move)" \
+  echo "the engine is started, but this run did not move Arty to it: ${not_moved_reason:-see the lines above}.$(controller_clause_before_move)" \
     "Fix that and run $0 engine again" >&2
+}
+
+report_move_unfinished() {
+  echo "the engine is started, but the move to it did not finish: the lines above name the step that failed, and the" \
+    "status above shows which parts already point at the engine.$(controller_clause_before_move) Fix that and run $0" \
+    "engine again" >&2
 }
 
 controller_clause_before_move() {
@@ -150,7 +168,6 @@ install_engine_config() {
 }
 
 start_engine() {
-  install_engine_config
   in_ct 'set -e
 install -m 644 /srv/ai/arty-engine/src/deploy/arty-engine.service /etc/systemd/system/arty-engine.service
 systemctl daemon-reload
@@ -213,10 +230,13 @@ case "$1" in
       exit 1
     fi
     take_gpu_lock
+    switch_stage=configuring
+    install_engine_config
     switch_stage=starting
     start_engine
     switch_stage=started
     point_controller_at engine || controller_running=no
+    switch_stage=moving
     move_ct_to_engine
     switch_stage=moved
     load_main_model || main_model_loaded=no
