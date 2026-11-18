@@ -3,6 +3,7 @@ import os
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import BinaryIO
 
 GGUF_MAGIC = b"GGUF"
 LARGE_ARRAY_LENGTH = 64
@@ -11,6 +12,11 @@ MOST_KEYS = 65536
 MOST_KEY_BYTES = 64 * 1024
 MOST_STRING_BYTES = 64 * 1024 * 1024
 MOST_HEADER_TEXT_BYTES = 128 * 1024 * 1024
+MOST_HEADER_VALUES = 1_000_000
+MOST_ARRAY_DEPTH = 8
+LARGEST_WHOLE_NUMBER = 2 ** 63
+INLINE_VISION_PREFIXES = ("v.", "mm.")
+TENSOR_TYPE_AND_OFFSET_BYTES = 4 + 8
 
 UINT8, INT8, UINT16, INT16, UINT32, INT32, FLOAT32, BOOL, STRING, ARRAY, UINT64, INT64, FLOAT64 = range(13)
 SCALAR_FORMATS = {
@@ -32,8 +38,8 @@ class SkippedArray:
 class GgufInfo:
     version: int
     metadata: dict = field(default_factory=dict)
-    tensor_names: list = field(default_factory=list)
     parameter_count: int = 0
+    has_inline_vision: bool = False
 
     @property
     def architecture(self) -> str:
@@ -50,21 +56,19 @@ class GgufInfo:
         template = self.metadata.get("tokenizer.chat_template", "")
         return template if isinstance(template, str) else ""
 
-    @property
-    def has_inline_vision(self) -> bool:
-        return any(name.startswith(("v.", "mm.")) for name in self.tensor_names)
-
 
 def whole_number(value) -> int:
     if isinstance(value, int) and not isinstance(value, bool):
         return value
-    if isinstance(value, float) and math.isfinite(value):
+    if isinstance(value, float) and -LARGEST_WHOLE_NUMBER <= value < LARGEST_WHOLE_NUMBER:
         return int(value)
     return 0
 
 
 def json_safe(value):
     if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, SkippedArray):
         return None
     if isinstance(value, list):
         return [json_safe(item) for item in value]
@@ -76,6 +80,7 @@ class _Reader:
         self.handle = handle
         self.size = os.fstat(handle.fileno()).st_size
         self.text_bytes = 0
+        self.values = 0
 
     def within_file(self, count: int) -> int:
         if count > self.size - self.handle.tell():
@@ -101,23 +106,32 @@ class _Reader:
             raise GgufError(f"the GGUF header holds more than {MOST_HEADER_TEXT_BYTES} bytes of text")
         return self.exact(length).decode("utf-8", errors="replace")
 
+    def count_values(self, count: int) -> None:
+        self.values += count
+        if self.values > MOST_HEADER_VALUES:
+            raise GgufError(f"the GGUF header holds more than {MOST_HEADER_VALUES} values and tensors; "
+                            f"the engine reads at most {MOST_HEADER_VALUES}")
+
     def skip_string(self) -> None:
         self.handle.seek(self.within_file(self.scalar(UINT64)), 1)
 
-    def value(self, kind: int):
+    def value(self, kind: int, depth: int = 0):
+        self.count_values(1)
         if kind == STRING:
             return self.string()
         if kind == ARRAY:
-            return self.array()
+            return self.array(depth + 1)
         if kind in SCALAR_FORMATS:
             return self.scalar(kind)
         raise GgufError(f"unknown GGUF value type {kind}")
 
-    def array(self):
+    def array(self, depth: int):
+        if depth > MOST_ARRAY_DEPTH:
+            raise GgufError(f"arrays in the GGUF header are nested more than {MOST_ARRAY_DEPTH} deep")
         element_kind = self.scalar(UINT32)
         length = self.scalar(UINT64)
         if length <= LARGE_ARRAY_LENGTH:
-            return [self.value(element_kind) for _ in range(length)]
+            return [self.value(element_kind, depth) for _ in range(length)]
         if element_kind == STRING:
             for _ in range(length):
                 self.skip_string()
@@ -125,36 +139,47 @@ class _Reader:
             self.handle.seek(self.within_file(struct.calcsize(SCALAR_FORMATS[element_kind]) * length), 1)
         else:
             for _ in range(length):
-                self.value(element_kind)
+                self.value(element_kind, depth)
         return SkippedArray(length)
 
 
-def read_gguf(path: Path) -> GgufInfo:
-    with open(path, "rb") as handle:
-        reader = _Reader(handle)
-        if reader.exact(4) != GGUF_MAGIC:
-            raise GgufError(f"{path} is not a GGUF file")
-        version = reader.scalar(UINT32)
-        tensor_count = reader.scalar(UINT64)
-        kv_count = reader.scalar(UINT64)
-        if kv_count > MOST_KEYS:
-            raise GgufError(f"the GGUF header has {kv_count} keys; the engine reads at most {MOST_KEYS}")
-        info = GgufInfo(version=version)
-        for _ in range(kv_count):
-            key = reader.string("key", MOST_KEY_BYTES)
-            info.metadata[key] = reader.value(reader.scalar(UINT32))
-        for _ in range(tensor_count):
-            info.tensor_names.append(reader.string("tensor name", MOST_KEY_BYTES))
-            dimensions = reader.scalar(UINT32)
-            if dimensions > MOST_TENSOR_DIMENSIONS:
-                raise GgufError(f"a tensor in the GGUF header has {dimensions} dimensions; "
-                                f"the engine reads at most {MOST_TENSOR_DIMENSIONS}")
-            elements = 1
-            for _ in range(dimensions):
-                elements *= reader.scalar(UINT64)
-            info.parameter_count += elements
-            handle.seek(4 + 8, 1)
-        return info
+def read_gguf(path: Path, opened: BinaryIO | None = None) -> GgufInfo:
+    if opened is None:
+        with open(path, "rb") as handle:
+            return read_gguf(path, handle)
+    try:
+        return _read_header(path, opened)
+    except RecursionError as error:
+        raise GgufError("arrays in the GGUF header are nested too deep") from error
+
+
+def _read_header(path: Path, handle: BinaryIO) -> GgufInfo:
+    reader = _Reader(handle)
+    if reader.exact(4) != GGUF_MAGIC:
+        raise GgufError(f"{path} is not a GGUF file")
+    version = reader.scalar(UINT32)
+    tensor_count = reader.scalar(UINT64)
+    kv_count = reader.scalar(UINT64)
+    if kv_count > MOST_KEYS:
+        raise GgufError(f"the GGUF header has {kv_count} keys; the engine reads at most {MOST_KEYS}")
+    reader.count_values(tensor_count)
+    info = GgufInfo(version=version)
+    for _ in range(kv_count):
+        key = reader.string("key", MOST_KEY_BYTES)
+        info.metadata[key] = reader.value(reader.scalar(UINT32))
+    for _ in range(tensor_count):
+        name = reader.string("tensor name", MOST_KEY_BYTES)
+        info.has_inline_vision = info.has_inline_vision or name.startswith(INLINE_VISION_PREFIXES)
+        dimensions = reader.scalar(UINT32)
+        if dimensions > MOST_TENSOR_DIMENSIONS:
+            raise GgufError(f"a tensor in the GGUF header has {dimensions} dimensions; "
+                            f"the engine reads at most {MOST_TENSOR_DIMENSIONS}")
+        elements = 1
+        for _ in range(dimensions):
+            elements *= reader.scalar(UINT64)
+        info.parameter_count += elements
+        handle.seek(TENSOR_TYPE_AND_OFFSET_BYTES, 1)
+    return info
 
 
 def plain_metadata(info: GgufInfo) -> dict:
