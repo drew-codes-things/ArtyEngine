@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="docs/arty-engine-banner.png" alt="ArtyEngine: Arty's own model server, with a terminal showing a model list and a chat request answered by qwen3:14b over its HTTP API" width="100%">
+
 # ArtyEngine
 
 **Arty's own model engine. It serves models from its own store, keeps them inside a VRAM budget, pulls new ones
