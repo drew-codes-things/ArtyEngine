@@ -1,7 +1,10 @@
+import os
 import struct
 from pathlib import Path
 
 STRING, ARRAY, UINT32, FLOAT32, BOOL = 8, 9, 4, 6, 7
+FIRST_KEY_LENGTH_OFFSET = 24
+LATER_CHANGE_TIME_NS = 2_000_000_000
 
 
 def _string(text: str) -> bytes:
@@ -33,4 +36,13 @@ def write_gguf(path: Path, metadata: dict, tensors: dict[str, tuple[int, ...]]) 
         parts += [_string(name), struct.pack("<I", len(shape)), b"".join(struct.pack("<Q", size) for size in shape),
                   struct.pack("<IQ", 0, 0)]
     path.write_bytes(b"".join(parts))
+    return path
+
+
+def break_first_key_length(path: Path, length: int) -> Path:
+    before = path.stat()
+    data = bytearray(path.read_bytes())
+    data[FIRST_KEY_LENGTH_OFFSET:FIRST_KEY_LENGTH_OFFSET + 8] = struct.pack("<Q", length)
+    path.write_bytes(bytes(data))
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns + LATER_CHANGE_TIME_NS))
     return path

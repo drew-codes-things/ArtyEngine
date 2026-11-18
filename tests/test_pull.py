@@ -15,7 +15,7 @@ from arty_engine import pull
 from arty_engine.store import CONFIG_MEDIA_TYPE, MANIFEST_MEDIA_TYPE, MODEL_LAYER, ModelStore, parse_name, write_manifest
 from engine_harness import RunningEngine, error_of, http_json
 from fake_store import GO_TEMPLATE, QWEN3, add_model, build_store
-from gguf_writer import write_gguf
+from gguf_writer import break_first_key_length, write_gguf
 
 
 class FakeClock:
@@ -448,6 +448,15 @@ def test_an_installed_model_whose_manifest_is_unreadable_is_refused(tmp_path, fa
     assert refused.value.status == 409 and "can't be read" in str(refused.value)
 
 
+def test_an_installed_model_whose_file_has_a_length_past_its_end_is_refused(tmp_path, fake_hf):
+    puller = tiny_puller(tmp_path, store=ModelStore([tmp_path / "own"]))
+    puller.pull("tiny:1", lambda update: None)
+    break_first_key_length(ModelStore([tmp_path / "own"]).get("tiny:1").model_path, 2 ** 40)
+    with pytest.raises(pull.PullError, match="delete it first") as refused:
+        puller.pull("tiny:1", lambda update: None)
+    assert refused.value.status == 409 and "larger than the rest of the file" in str(refused.value)
+
+
 def test_a_pinned_short_name_refuses_a_file_that_changed_on_the_hub(tmp_path, fake_hf):
     puller = pull.Puller(tmp_path / "own", 0, short_names={"tiny:1": pull.ShortName("hf.co/Someone/Tiny-GGUF:Q8_0", "1" * 64)})
     with pytest.raises(pull.PullError, match="changed") as refused:
@@ -802,13 +811,27 @@ def test_a_pull_of_a_file_the_engine_cannot_read_still_ends_in_success(engine, f
         assert (status, lines[-1]) == (200, {"status": "success"})
         assert not any("error" in line for line in lines)
     assert "/api/pull failed" not in caplog.text
+    assert "could not be read to update the loaded copy" not in caplog.text
 
 
-def test_a_loaded_model_whose_file_was_damaged_still_pulls_to_success(engine, fake_hf, caplog):
+def put_a_folder_in_place_of(path) -> None:
+    path.unlink()
+    path.mkdir()
+
+
+LOADED_FILE_DAMAGE = {
+    "not a model file": lambda path: path.write_bytes(b"damaged on disk"),
+    "a length past the end of the file": lambda path: break_first_key_length(path, 2 ** 40),
+    "a folder in its place": put_a_folder_in_place_of,
+}
+
+
+@pytest.mark.parametrize("damage", sorted(LOADED_FILE_DAMAGE))
+def test_a_loaded_model_whose_file_was_damaged_still_pulls_to_success(engine, fake_hf, caplog, damage):
     name = "hf.co/Someone/Tiny-GGUF:Q8_0"
     http_json(f"{engine.url}/api/pull", {"model": name, "stream": False})
     http_json(f"{engine.url}/api/generate", {"model": name})
-    engine.engine.store.get(name).model_path.write_bytes(b"damaged on disk")
+    LOADED_FILE_DAMAGE[damage](engine.engine.store.get(name).model_path)
     caplog.set_level("WARNING")
     status, lines = pull_answer_of(engine, {"model": name, "stream": False})
     assert (status, lines[-1]) == (200, {"status": "success"})

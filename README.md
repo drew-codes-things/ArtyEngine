@@ -349,9 +349,9 @@ not counted (they are logged as late tags). The count is of replies the engine e
 of a held model that writes the tags itself, with no reasoning from the runner, cannot be told apart from a leak and
 is counted too, so among the leaks the engine can see, the count is an upper bound. A tag with no reasoning in front
 of it moves nothing and is not counted. Two kinds of leak are outside the count: a reply cut by the length limit
-before any tag, which has its own warning, and a stream that ends with no finish reason, which is delivered as it
-stands with no line; to judge a model, read `leak caught` together with the tagless-cut warnings. The count starts
-again at 0 when the engine restarts.
+before any tag, which has its own warning, and a stream that ends with no finish reason and no tag, which is
+delivered as it stands with no line; to judge a model, read `leak caught` together with the tagless-cut warnings. The
+count starts again at 0 when the engine restarts.
 
 Pulls: a short name already in the store is not downloaded again; one the engine can't run or read answers 409
 (delete it, then pull). Each short name is pinned to the sha256 of its files, so a file changed on Hugging Face is
