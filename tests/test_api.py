@@ -1,5 +1,6 @@
 import json
 import socket
+import sys
 import time
 import urllib.request
 
@@ -689,15 +690,16 @@ def test_a_tensor_with_too_many_dimensions_leaves_its_model_out_and_both_lists_a
         running.close()
 
 
-@pytest.mark.parametrize("file_type", [[15], list(range(65)), "Q4_K_M"], ids=["array of one", "skipped array", "text"])
-def test_a_file_type_that_is_not_a_number_is_listed_loaded_and_shown(tmp_path, file_type):
+@pytest.mark.parametrize("file_type, shown", [([15], ""), (list(range(65)), ""), ("Q4_K_M", "Q4_K_M"), (True, "")],
+                         ids=["array of one", "skipped array", "text", "true"])
+def test_a_file_type_that_is_not_a_number_is_listed_loaded_and_shown(tmp_path, file_type, shown):
     running = engine_with_odd_model(tmp_path, {"general.file_type": file_type})
     try:
         assert chat_once(running, "odd:1")["done"] is True
         listed = {model["name"]: model for model in strict_json(f"{running.url}/api/tags")["models"]}
-        assert "qwen3:14b" in listed and isinstance(listed["odd:1"]["details"]["quantization_level"], str)
+        assert "qwen3:14b" in listed and listed["odd:1"]["details"]["quantization_level"] == shown
         assert "odd:1" in listed_names(running, "ps")
-        assert isinstance(strict_json(f"{running.url}/api/show", {"model": "odd:1"})["details"]["quantization_level"], str)
+        assert strict_json(f"{running.url}/api/show", {"model": "odd:1"})["details"]["quantization_level"] == shown
     finally:
         running.close()
 
@@ -744,5 +746,25 @@ def test_a_float_json_cannot_hold_is_shown_as_null(tmp_path):
     try:
         info = strict_json(f"{running.url}/api/show", {"model": "odd:1"})["model_info"]
         assert (info["general.note"], info["general.scale"], info["general.weights"]) == (None, None, [0.5, None])
+    finally:
+        running.close()
+
+
+def test_a_count_near_the_largest_float_never_breaks_the_chat(tmp_path):
+    from gguf_writer import Float64
+    running = engine_with_odd_model(tmp_path, {"qwen3.block_count": Float64(sys.float_info.max),
+                                               "qwen3.attention.head_count_kv": Float64(1e308)})
+    try:
+        assert chat_once(running, "odd:1")["done"] is True
+        assert "odd:1" in listed_names(running, "ps")
+    finally:
+        running.close()
+
+
+def test_a_long_array_inside_a_short_array_is_shown_as_null(tmp_path):
+    running = engine_with_odd_model(tmp_path, {"general.nested": [list(range(65))]})
+    try:
+        assert strict_json(f"{running.url}/api/show", {"model": "odd:1"})["model_info"]["general.nested"] == [None]
+        assert chat_once(running, "odd:1")["done"] is True
     finally:
         running.close()

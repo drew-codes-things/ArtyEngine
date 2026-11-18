@@ -322,9 +322,13 @@ A model the engine can't read or describe is left out of `/api/tags`, and a load
 `/api/ps`, with a warning that names it, so one bad file never takes the lists away from the other models; the chat
 and show of a model it can't read answer `couldn't read <name>: ...`. A model
 file's header is read within limits far above any real model: 65,536 keys, 64 KiB for a key or a tensor name, 64 MiB
-for one text value and 128 MiB of text in all, and 8 dimensions for a tensor. A file the reader refuses is not read
-again until it changes. A header count of the wrong type (such as a context length written as text) counts as unknown,
-and a number JSON can't hold (not a number, infinity) is shown as `null` in `model_info`.
+for one text value and 128 MiB of text in all (keys, tensor names, text values and the text in short arrays; the long
+token and merge lists are stepped over and not counted, so a large vocabulary reads), 8 dimensions for a tensor, arrays
+nested at most 8 deep, and a million values and tensors in all. Tensor names are read but not kept. A file the reader
+refuses is not read again until it is replaced or its size or change time changes. A header count of the wrong type
+(such as a context length written as text) or a float too large for a 64-bit whole number counts as unknown, and a
+number JSON can't hold (not a number, infinity) and a long list inside a short one are shown as `null` in
+`model_info`.
 
 Thinking that leaks into the answer: some models (seen with `mimo-v2.6:9b`) write their reasoning and a closing
 `</think>` into the reply even with `think` false. Whether a model can leak is decided once when it loads: a thinking

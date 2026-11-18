@@ -2,9 +2,13 @@ import os
 import struct
 from pathlib import Path
 
-STRING, ARRAY, UINT32, FLOAT32, BOOL = 8, 9, 4, 6, 7
+STRING, ARRAY, UINT32, FLOAT32, BOOL, FLOAT64 = 8, 9, 4, 6, 7, 12
 FIRST_KEY_LENGTH_OFFSET = 24
 LATER_CHANGE_TIME_NS = 2_000_000_000
+
+
+class Float64(float):
+    pass
 
 
 def _string(text: str) -> bytes:
@@ -15,6 +19,8 @@ def _string(text: str) -> bytes:
 def _value(value) -> tuple[int, bytes]:
     if isinstance(value, bool):
         return BOOL, struct.pack("<?", value)
+    if isinstance(value, Float64):
+        return FLOAT64, struct.pack("<d", value)
     if isinstance(value, int):
         return UINT32, struct.pack("<I", value)
     if isinstance(value, float):

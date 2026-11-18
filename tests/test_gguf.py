@@ -1,10 +1,13 @@
 import json
 import os
 import struct
+import sys
 import time
+import tracemalloc
 
+from arty_engine import gguf
 from arty_engine.gguf import ARRAY, STRING, UINT32, UINT64, GgufError, SkippedArray, plain_metadata, read_gguf
-from gguf_writer import break_first_key_length, write_gguf
+from gguf_writer import Float64, break_first_key_length, write_gguf
 import pytest
 
 
@@ -18,7 +21,6 @@ def test_reads_metadata_tensors_and_parameter_count(tmp_path):
     assert info.arch_value("context_length") == 40960
     assert info.chat_template == "{{ tools }} <think>"
     assert info.metadata["tokenizer.vocab.tokens"] == SkippedArray(100)
-    assert info.tensor_names == ["token_embd.weight", "blk.0.attn_q.weight"]
     assert info.parameter_count == 600
     assert not info.has_inline_vision
 
@@ -214,3 +216,133 @@ def test_a_tensor_name_longer_than_64_kib_is_a_gguf_error(tmp_path):
     path = write_gguf(tmp_path / "model.gguf", {"general.architecture": "qwen3"}, {"w" * (KEY_CAP + 1): (2, 2)})
     with pytest.raises(GgufError, match="tensor name"):
         read_gguf(path)
+
+
+UINT8 = 0
+MOST_VALUES = 1_000_000
+MOST_DEPTH = 8
+NESTED_KEYS_PAST_THE_VALUE_BUDGET = 250
+MIB = 1024 * 1024
+
+
+def nested_array_bytes(depth: int) -> bytes:
+    return struct.pack("<IQ", ARRAY, 1) * (depth - 1) + struct.pack("<IQ", UINT8, 0)
+
+
+def one_nested_key(depth: int) -> bytes:
+    return START_OF_ONE_SHORT_KEY + struct.pack("<I", ARRAY) + nested_array_bytes(depth)
+
+
+def nested_list(depth: int) -> list:
+    value = [1]
+    for _ in range(depth - 1):
+        value = [value]
+    return value
+
+
+def test_short_arrays_inside_short_arrays_past_a_million_values_are_a_gguf_error(tmp_path):
+    cube = [[7] * 64] * 64
+    path = write_gguf(tmp_path / "model.gguf", {f"k{index}": cube for index in range(NESTED_KEYS_PAST_THE_VALUE_BUDGET)}, {})
+    assert path.stat().st_size < 5 * MIB
+    with pytest.raises(GgufError, match="values"):
+        read_gguf(path)
+
+
+def test_a_tensor_count_past_the_value_budget_is_refused_before_any_tensor_is_read(tmp_path):
+    path = tmp_path / "model.gguf"
+    path.write_bytes(b"GGUF" + struct.pack("<IQQ", 3, 2 ** 64 - 1, 0) + bytes(64))
+    with pytest.raises(GgufError, match="values"):
+        read_gguf(path)
+
+
+def test_values_and_tensors_exactly_at_the_budget_read_and_one_more_is_refused(tmp_path, monkeypatch):
+    monkeypatch.setattr(gguf, "MOST_HEADER_VALUES", 10, raising=False)
+    at_the_budget = write_gguf(tmp_path / "at.gguf", {"k": [1] * 8}, {"blk.0.w": (2, 2)})
+    assert read_gguf(at_the_budget).metadata == {"k": [1] * 8}
+    one_past = write_gguf(tmp_path / "past.gguf", {"k": [1] * 8}, {"blk.0.w": (2, 2), "blk.1.w": (2, 2)})
+    with pytest.raises(GgufError, match="values"):
+        read_gguf(one_past)
+
+
+def test_tensor_names_are_not_kept_after_the_read(tmp_path):
+    names = {f"blk.{index}.{'w' * 60}": () for index in range(20000)}
+    path = write_gguf(tmp_path / "model.gguf", {"general.architecture": "qwen3"}, names)
+    tracemalloc.start()
+    try:
+        info = read_gguf(path)
+        held, _ = tracemalloc.get_traced_memory()
+    finally:
+        tracemalloc.stop()
+    assert info.parameter_count == 20000 and not info.has_inline_vision
+    assert held < MIB
+
+
+def test_arrays_nested_eight_deep_read(tmp_path):
+    path = write_gguf(tmp_path / "model.gguf", {"k": nested_list(MOST_DEPTH)}, {})
+    assert read_gguf(path).metadata["k"] == nested_list(MOST_DEPTH)
+
+
+def test_arrays_nested_nine_deep_are_a_gguf_error(tmp_path):
+    path = write_gguf(tmp_path / "model.gguf", {"k": nested_list(MOST_DEPTH + 1)}, {})
+    with pytest.raises(GgufError, match="nested"):
+        read_gguf(path)
+
+
+def test_arrays_nested_thousands_deep_are_a_gguf_error(tmp_path):
+    path = tmp_path / "model.gguf"
+    path.write_bytes(one_nested_key(3000))
+    with pytest.raises(GgufError, match="nested"):
+        read_gguf(path)
+
+
+def test_running_out_of_recursion_while_reading_is_a_gguf_error(tmp_path, monkeypatch):
+    monkeypatch.setattr(gguf, "MOST_ARRAY_DEPTH", 10 ** 6, raising=False)
+    path = tmp_path / "model.gguf"
+    path.write_bytes(one_nested_key(sys.getrecursionlimit() + 100))
+    with pytest.raises(GgufError, match="nested too deep"):
+        read_gguf(path)
+
+
+@pytest.mark.parametrize("value", [sys.float_info.max, -sys.float_info.max, 1e300, 2.0 ** 63, -(2.0 ** 63) - 2048])
+def test_a_float_count_outside_64_bits_reads_as_zero(tmp_path, value):
+    path = write_gguf(tmp_path / "model.gguf", {"general.architecture": "qwen3", "qwen3.block_count": Float64(value)}, {})
+    assert read_gguf(path).arch_number("block_count") == 0
+
+
+def test_a_float_count_inside_64_bits_reads_as_a_whole_number(tmp_path):
+    path = write_gguf(tmp_path / "model.gguf", {"general.architecture": "qwen3", "qwen3.block_count": Float64(2.0 ** 62),
+                                                "qwen3.head_count": Float64(-(2.0 ** 63))}, {})
+    info = read_gguf(path)
+    assert (info.arch_number("block_count"), info.arch_number("head_count")) == (2 ** 62, -(2 ** 63))
+
+
+def test_a_skipped_array_inside_a_short_array_is_null_in_the_plain_metadata(tmp_path):
+    path = write_gguf(tmp_path / "model.gguf", {"general.architecture": "qwen3", "a": [list(range(65))],
+                                                "b": [[1, 2], list(range(70))]}, {})
+    plain = plain_metadata(read_gguf(path))
+    assert json.loads(json.dumps(plain, allow_nan=False)) == {"general.architecture": "qwen3", "a": [None], "b": [[1, 2], None]}
+
+
+TENSOR_NAMES_IN_128_MIB = 2048
+
+
+def write_tensors_with_64_kib_names(path, metadata_key: bytes = b""):
+    with open(path, "wb") as handle:
+        handle.write(b"GGUF" + struct.pack("<IQQ", 3, TENSOR_NAMES_IN_128_MIB, 1 if metadata_key else 0))
+        if metadata_key:
+            handle.write(struct.pack("<Q", len(metadata_key)) + metadata_key + struct.pack("<IB", UINT8, 1))
+        for _ in range(TENSOR_NAMES_IN_128_MIB):
+            handle.write(struct.pack("<Q", KEY_CAP))
+            handle.seek(KEY_CAP, 1)
+            handle.write(struct.pack("<I", 0) + bytes(12))
+    return path
+
+
+def test_exactly_128_mib_of_tensor_names_reads(tmp_path):
+    info = read_gguf(write_tensors_with_64_kib_names(tmp_path / "model.gguf"))
+    assert info.parameter_count == TENSOR_NAMES_IN_128_MIB and info.metadata == {}
+
+
+def test_a_one_byte_key_on_top_of_128_mib_of_tensor_names_is_a_gguf_error(tmp_path):
+    with pytest.raises(GgufError, match="text"):
+        read_gguf(write_tensors_with_64_kib_names(tmp_path / "model.gguf", b"k"))
