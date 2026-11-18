@@ -1,3 +1,4 @@
+import math
 import os
 import struct
 from dataclasses import dataclass, field
@@ -5,6 +6,11 @@ from pathlib import Path
 
 GGUF_MAGIC = b"GGUF"
 LARGE_ARRAY_LENGTH = 64
+MOST_TENSOR_DIMENSIONS = 8
+MOST_KEYS = 65536
+MOST_KEY_BYTES = 64 * 1024
+MOST_STRING_BYTES = 64 * 1024 * 1024
+MOST_HEADER_TEXT_BYTES = 128 * 1024 * 1024
 
 UINT8, INT8, UINT16, INT16, UINT32, INT32, FLOAT32, BOOL, STRING, ARRAY, UINT64, INT64, FLOAT64 = range(13)
 SCALAR_FORMATS = {
@@ -36,6 +42,9 @@ class GgufInfo:
     def arch_value(self, suffix: str, default=None):
         return self.metadata.get(f"{self.architecture}.{suffix}", default)
 
+    def arch_number(self, suffix: str) -> int:
+        return whole_number(self.arch_value(suffix))
+
     @property
     def chat_template(self) -> str:
         template = self.metadata.get("tokenizer.chat_template", "")
@@ -46,10 +55,27 @@ class GgufInfo:
         return any(name.startswith(("v.", "mm.")) for name in self.tensor_names)
 
 
+def whole_number(value) -> int:
+    if isinstance(value, int) and not isinstance(value, bool):
+        return value
+    if isinstance(value, float) and math.isfinite(value):
+        return int(value)
+    return 0
+
+
+def json_safe(value):
+    if isinstance(value, float) and not math.isfinite(value):
+        return None
+    if isinstance(value, list):
+        return [json_safe(item) for item in value]
+    return value
+
+
 class _Reader:
     def __init__(self, handle):
         self.handle = handle
         self.size = os.fstat(handle.fileno()).st_size
+        self.text_bytes = 0
 
     def within_file(self, count: int) -> int:
         if count > self.size - self.handle.tell():
@@ -57,7 +83,7 @@ class _Reader:
         return count
 
     def exact(self, count: int) -> bytes:
-        data = self.handle.read(self.within_file(count))
+        data = self.handle.read(count)
         if len(data) != count:
             raise GgufError("file ended inside the GGUF header")
         return data
@@ -66,8 +92,13 @@ class _Reader:
         fmt = SCALAR_FORMATS[kind]
         return struct.unpack(fmt, self.exact(struct.calcsize(fmt)))[0]
 
-    def string(self) -> str:
-        length = self.scalar(UINT64)
+    def string(self, what: str = "string", most_bytes: int = MOST_STRING_BYTES) -> str:
+        length = self.within_file(self.scalar(UINT64))
+        if length > most_bytes:
+            raise GgufError(f"a {what} in the GGUF header is {length} bytes long; the engine reads at most {most_bytes}")
+        self.text_bytes += length
+        if self.text_bytes > MOST_HEADER_TEXT_BYTES:
+            raise GgufError(f"the GGUF header holds more than {MOST_HEADER_TEXT_BYTES} bytes of text")
         return self.exact(length).decode("utf-8", errors="replace")
 
     def skip_string(self) -> None:
@@ -106,14 +137,20 @@ def read_gguf(path: Path) -> GgufInfo:
         version = reader.scalar(UINT32)
         tensor_count = reader.scalar(UINT64)
         kv_count = reader.scalar(UINT64)
+        if kv_count > MOST_KEYS:
+            raise GgufError(f"the GGUF header has {kv_count} keys; the engine reads at most {MOST_KEYS}")
         info = GgufInfo(version=version)
         for _ in range(kv_count):
-            key = reader.string()
+            key = reader.string("key", MOST_KEY_BYTES)
             info.metadata[key] = reader.value(reader.scalar(UINT32))
         for _ in range(tensor_count):
-            info.tensor_names.append(reader.string())
+            info.tensor_names.append(reader.string("tensor name", MOST_KEY_BYTES))
+            dimensions = reader.scalar(UINT32)
+            if dimensions > MOST_TENSOR_DIMENSIONS:
+                raise GgufError(f"a tensor in the GGUF header has {dimensions} dimensions; "
+                                f"the engine reads at most {MOST_TENSOR_DIMENSIONS}")
             elements = 1
-            for _ in range(reader.scalar(UINT32)):
+            for _ in range(dimensions):
                 elements *= reader.scalar(UINT64)
             info.parameter_count += elements
             handle.seek(4 + 8, 1)
@@ -121,4 +158,4 @@ def read_gguf(path: Path) -> GgufInfo:
 
 
 def plain_metadata(info: GgufInfo) -> dict:
-    return {key: value for key, value in info.metadata.items() if not isinstance(value, SkippedArray)}
+    return {key: json_safe(value) for key, value in info.metadata.items() if not isinstance(value, SkippedArray)}

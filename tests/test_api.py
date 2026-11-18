@@ -655,3 +655,94 @@ def test_a_stream_is_counted_before_its_last_line_is_sent(engine, monkeypatch):
     streamed_lines(engine, "/api/chat", {"model": "mimo:9b", "think": False,
                                          "messages": [{"role": "user", "content": BLANK_LINES_PROMPT}]})
     assert seen == [1]
+
+
+def strict_json(url, body=None):
+    data = json.dumps(body).encode() if body is not None else None
+    request = urllib.request.Request(url, data=data, method="POST" if data is not None else "GET")
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return json.loads(response.read(), parse_constant=lambda name: pytest.fail(f"{name} is not strict JSON"))
+
+
+def engine_with_odd_model(tmp_path, metadata: dict, tensors: dict | None = None) -> RunningEngine:
+    from fake_store import QWEN3, add_model
+    add_model(tmp_path / "own", "odd", "1", {**QWEN3, **metadata}, tensors or {"blk.0.w": (3, 5)})
+    return RunningEngine(tmp_path, REPLIES, default_keep_alive="-1")
+
+
+def chat_once(running: RunningEngine, name: str) -> dict:
+    return http_json(f"{running.url}/api/chat", {"model": name, "stream": False, "messages": [{"role": "user", "content": "hi"}]})
+
+
+def listed_names(running: RunningEngine, listing: str) -> set:
+    return {model["name"] for model in strict_json(f"{running.url}/api/{listing}")["models"]}
+
+
+def test_a_tensor_with_too_many_dimensions_leaves_its_model_out_and_both_lists_answer(tmp_path, caplog):
+    running = engine_with_odd_model(tmp_path, {}, {"blk.0.w": (2 ** 64 - 1,) * 17})
+    try:
+        chat_once(running, "qwen3:14b")
+        assert "qwen3:14b" in listed_names(running, "tags") and "odd:1" not in listed_names(running, "tags")
+        assert listed_names(running, "ps") == {"qwen3:14b"}
+        assert "left odd:1 out of the model list" in caplog.text and "17 dimensions" in caplog.text
+    finally:
+        running.close()
+
+
+@pytest.mark.parametrize("file_type", [[15], list(range(65)), "Q4_K_M"], ids=["array of one", "skipped array", "text"])
+def test_a_file_type_that_is_not_a_number_is_listed_loaded_and_shown(tmp_path, file_type):
+    running = engine_with_odd_model(tmp_path, {"general.file_type": file_type})
+    try:
+        assert chat_once(running, "odd:1")["done"] is True
+        listed = {model["name"]: model for model in strict_json(f"{running.url}/api/tags")["models"]}
+        assert "qwen3:14b" in listed and isinstance(listed["odd:1"]["details"]["quantization_level"], str)
+        assert "odd:1" in listed_names(running, "ps")
+        assert isinstance(strict_json(f"{running.url}/api/show", {"model": "odd:1"})["details"]["quantization_level"], str)
+    finally:
+        running.close()
+
+
+def test_a_model_whose_entry_cannot_be_built_is_left_out_of_both_lists_and_the_rest_answer(tmp_path, monkeypatch, caplog):
+    from arty_engine.store import Model
+    real_details = Model.details.fget
+
+    def details_that_fail_for_odd(model):
+        if model.name == "odd:1":
+            raise ArithmeticError("a value the engine did not expect")
+        return real_details(model)
+
+    running = engine_with_odd_model(tmp_path, {})
+    try:
+        chat_once(running, "odd:1")
+        chat_once(running, "qwen3:14b")
+        monkeypatch.setattr(Model, "details", property(details_that_fail_for_odd))
+        assert "qwen3:14b" in listed_names(running, "tags") and "odd:1" not in listed_names(running, "tags")
+        assert listed_names(running, "ps") == {"qwen3:14b"}
+        assert "left odd:1 out of the model list: a value the engine did not expect" in caplog.text
+        assert "left odd:1 out of the loaded model list: a value the engine did not expect" in caplog.text
+    finally:
+        running.close()
+
+
+@pytest.mark.parametrize("metadata", [{"qwen3.context_length": "many"}, {"qwen3.context_length": [4096]},
+                                      {"qwen3.context_length": float("inf")}, {"qwen3.block_count": "forty"},
+                                      {"qwen3.block_count": float("nan")}, {"qwen3.embedding_length": "wide"}],
+                         ids=["context text", "context array", "context infinity", "blocks text", "blocks nan", "width text"])
+def test_a_count_of_the_wrong_type_never_breaks_the_chat_or_the_show(tmp_path, metadata):
+    running = engine_with_odd_model(tmp_path, metadata)
+    try:
+        assert chat_once(running, "odd:1")["done"] is True
+        assert strict_json(f"{running.url}/api/show", {"model": "odd:1"})["details"]["family"] == "qwen3"
+        assert "odd:1" in listed_names(running, "ps")
+    finally:
+        running.close()
+
+
+def test_a_float_json_cannot_hold_is_shown_as_null(tmp_path):
+    running = engine_with_odd_model(tmp_path, {"general.note": float("nan"), "general.scale": float("-inf"),
+                                               "general.weights": [0.5, float("inf")]})
+    try:
+        info = strict_json(f"{running.url}/api/show", {"model": "odd:1"})["model_info"]
+        assert (info["general.note"], info["general.scale"], info["general.weights"]) == (None, None, [0.5, None])
+    finally:
+        running.close()

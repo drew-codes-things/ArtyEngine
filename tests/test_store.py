@@ -1,11 +1,16 @@
 import hashlib
 import json
+import os
+import threading
+import time
 
 import pytest
 
 from arty_engine.store import (TEMPLATE_LAYER, ModelNotFound, ModelStore, blob_path, engine_manifest, parse_name,
                                write_manifest)
+from arty_engine.gguf import GgufError
 from fake_store import QWEN3, QWEN3_TEMPLATE, add_model, build_store
+from gguf_writer import LATER_CHANGE_TIME_NS, break_first_key_length, write_gguf
 
 
 @pytest.fixture
@@ -214,3 +219,75 @@ def test_a_manifest_that_is_not_json_is_skipped_deleted_and_never_blocks_another
     store.remove_owned("broken:1")
     assert not path.exists() and "broken:1" not in ModelStore([root]).names()
     assert store.get("qwen3:14b").name == "qwen3:14b"
+
+
+READ_WAIT_SECONDS = 0.3
+READERS_AT_ONCE = 4
+
+
+def counted_reads(monkeypatch, wait: float = 0.0) -> list:
+    from arty_engine import store as store_module
+    real_read = store_module.read_gguf
+    reads = []
+
+    def counting_read(path):
+        reads.append(str(path))
+        time.sleep(wait)
+        return real_read(path)
+
+    monkeypatch.setattr(store_module, "read_gguf", counting_read)
+    return reads
+
+
+def broken_model_file(root):
+    add_model(root, "broken", "1", QWEN3, {"blk.0.w": (4, 4)})
+    path = ModelStore([root]).get("broken:1").model_path
+    return break_first_key_length(path, 2 ** 40)
+
+
+def test_a_failed_read_is_kept_so_every_listing_does_not_read_the_file_again(tmp_path, monkeypatch, caplog):
+    root = build_store(tmp_path / "own")
+    path = broken_model_file(root)
+    store = ModelStore([root])
+    reads = counted_reads(monkeypatch)
+    for _ in range(3):
+        assert "broken:1" not in {model.name for model in store.models()}
+    assert reads.count(str(path)) == 1
+    assert caplog.text.count("left broken:1 out of the model list") == 3
+    assert caplog.text.count("larger than the rest of the file") == 3
+
+
+def test_a_failed_read_is_read_again_once_the_file_changes(tmp_path, monkeypatch):
+    root = build_store(tmp_path / "own")
+    path = broken_model_file(root)
+    store = ModelStore([root])
+    with pytest.raises(GgufError):
+        store.get("broken:1")
+    write_gguf(path, QWEN3, {"blk.0.w": (4, 4)})
+    os.utime(path, ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns + 2 * LATER_CHANGE_TIME_NS))
+    assert store.get("broken:1").gguf.architecture == "qwen3"
+
+
+@pytest.mark.parametrize("name", ["qwen3:14b", "broken:1"])
+def test_requests_at_once_read_one_model_file_once(tmp_path, monkeypatch, name):
+    root = build_store(tmp_path / "own")
+    paths = {"qwen3:14b": str(ModelStore([root]).get("qwen3:14b").model_path), "broken:1": str(broken_model_file(root))}
+    store = ModelStore([root])
+    reads = counted_reads(monkeypatch, READ_WAIT_SECONDS)
+    start = threading.Barrier(READERS_AT_ONCE)
+    outcomes = []
+
+    def read_once():
+        start.wait()
+        try:
+            outcomes.append(store.get(name).name)
+        except GgufError as error:
+            outcomes.append(type(error).__name__)
+
+    readers = [threading.Thread(target=read_once) for _ in range(READERS_AT_ONCE)]
+    for reader in readers:
+        reader.start()
+    for reader in readers:
+        reader.join()
+    assert reads.count(paths[name]) == 1
+    assert len(outcomes) == READERS_AT_ONCE and len(set(outcomes)) == 1

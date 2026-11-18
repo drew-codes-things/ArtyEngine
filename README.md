@@ -318,6 +318,14 @@ cards, the engine reads the one with the most memory.
 
 Every answer carries `Server: arty-engine/<version>`.
 
+A model the engine can't read or describe is left out of `/api/tags`, and a loaded one it can't describe out of
+`/api/ps`, with a warning that names it, so one bad file never takes the lists away from the other models; the chat
+and show of a model it can't read answer `couldn't read <name>: ...`. A model
+file's header is read within limits far above any real model: 65,536 keys, 64 KiB for a key or a tensor name, 64 MiB
+for one text value and 128 MiB of text in all, and 8 dimensions for a tensor. A file the reader refuses is not read
+again until it changes. A header count of the wrong type (such as a context length written as text) counts as unknown,
+and a number JSON can't hold (not a number, infinity) is shown as `null` in `model_info`.
+
 Thinking that leaks into the answer: some models (seen with `mimo-v2.6:9b`) write their reasoning and a closing
 `</think>` into the reply even with `think` false. Whether a model can leak is decided once when it loads: a thinking
 model can when it is named in `thinking_leakers` or its chat template does not read `enable_thinking`. `mimo-v2.6:9b`

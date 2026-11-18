@@ -16,6 +16,7 @@ from pathlib import Path
 from . import gpu
 from .backend import Backend, resolve_backend
 from .config import Config, SpeculativeSettings
+from .gguf import whole_number
 from .store import Model, ModelStore, parse_name
 from .translate import THINKING_SWITCH
 
@@ -88,20 +89,22 @@ def free_port() -> int:
         return probe.getsockname()[1]
 
 
+def largest_count(value) -> int:
+    if isinstance(value, list):
+        return max((whole_number(item) for item in value), default=0)
+    return whole_number(value)
+
+
 def kv_cache_mb(model: Model, ctx: int, cache_type: str) -> int:
     info = model.gguf
-    layers = int(info.arch_value("block_count", 0) or 0)
-    heads = info.arch_value("attention.head_count", 0) or 0
-    kv_heads = info.arch_value("attention.head_count_kv", heads) or heads
-    if isinstance(kv_heads, list):
-        kv_heads = max(kv_heads) if kv_heads else 0
-    if isinstance(heads, list):
-        heads = max(heads) if heads else 0
-    embedding = int(info.arch_value("embedding_length", 0) or 0)
+    layers = info.arch_number("block_count")
+    heads = largest_count(info.arch_value("attention.head_count"))
+    kv_heads = largest_count(info.arch_value("attention.head_count_kv")) or heads
+    embedding = info.arch_number("embedding_length")
     head_dim = embedding // heads if heads else 0
-    key_length = int(info.arch_value("attention.key_length", head_dim) or head_dim)
-    value_length = int(info.arch_value("attention.value_length", head_dim) or head_dim)
-    elements = layers * int(kv_heads) * (key_length + value_length) * ctx
+    key_length = info.arch_number("attention.key_length") or head_dim
+    value_length = info.arch_number("attention.value_length") or head_dim
+    elements = layers * kv_heads * (key_length + value_length) * ctx
     return int(elements * KV_BYTES_PER_ELEMENT.get(cache_type, 2.0) / gpu.MIB)
 
 
