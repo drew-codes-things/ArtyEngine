@@ -811,11 +811,18 @@ def test_a_pull_of_a_file_the_engine_cannot_read_still_ends_in_success(engine, f
         assert (status, lines[-1]) == (200, {"status": "success"})
         assert not any("error" in line for line in lines)
     assert "/api/pull failed" not in caplog.text
+    assert "could not be read to update the loaded copy" not in caplog.text
+
+
+def put_a_folder_in_place_of(path) -> None:
+    path.unlink()
+    path.mkdir()
 
 
 LOADED_FILE_DAMAGE = {
     "not a model file": lambda path: path.write_bytes(b"damaged on disk"),
     "a length past the end of the file": lambda path: break_first_key_length(path, 2 ** 40),
+    "a folder in its place": put_a_folder_in_place_of,
 }
 
 

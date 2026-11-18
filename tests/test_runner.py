@@ -92,6 +92,17 @@ def test_both_models_stay_when_they_fit(tmp_path):
     pool.shutdown()
 
 
+def test_the_pool_holds_a_model_only_while_its_runner_is_running(tmp_path):
+    pool, store, launcher = make_pool(tmp_path)
+    assert not pool.holds("qwen3:14b")
+    runner, _ = pool.acquire(store.get("qwen3:14b"), None)
+    pool.release(runner, FOREVER)
+    assert pool.holds("qwen3:14b") and not pool.holds("mimo:9b")
+    launcher.launched[0].returncode = 1
+    assert not pool.holds("qwen3:14b")
+    pool.shutdown()
+
+
 def test_a_crashing_runner_reports_its_log(tmp_path):
     pool, store, _ = make_pool(tmp_path, launcher=FakeLauncher(fail=True))
     with pytest.raises(LoadError, match="exited with 1"):
