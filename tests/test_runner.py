@@ -9,7 +9,7 @@ from arty_engine.gpu import GpuMemory
 from arty_engine.runner import FOREVER, LoadError, RunnerPool, build_arguments, compact_tool_definitions, kv_cache_mb
 from arty_engine.store import ModelStore
 from fake_runner import FakeLauncher
-from fake_store import build_store
+from fake_store import add_model, build_store
 
 
 def make_pool(tmp_path, launcher=None, budget=11500, free_mb=12000, **settings):
@@ -195,6 +195,21 @@ def test_ngram_speculation_needs_no_draft_model(tmp_path):
 def test_kv_cache_estimate_for_qwen3_14b_at_12k(tmp_path):
     _, store, _ = make_pool(tmp_path)
     assert kv_cache_mb(store.get("qwen3:14b"), 12288, "q8_0") == 1020
+
+
+KV_CONTEXT = 32768
+
+
+@pytest.mark.parametrize("counts, megabytes", [
+    ({"attention.head_count": [8, 32, 16]}, 1024),
+    ({"attention.head_count": 32, "attention.head_count_kv": [2, 8, 4]}, 256),
+    ({"attention.head_count": 32, "attention.head_count_kv": 8, "attention.key_length": 64}, 192),
+], ids=["kv heads fall back to the largest head count", "the largest of a list of kv heads", "value length falls back to the head width"])
+def test_kv_cache_estimate_from_lists_and_missing_counts(tmp_path, counts, megabytes):
+    metadata = {"general.architecture": "qwen3", "qwen3.block_count": 2, "qwen3.embedding_length": 4096,
+                **{f"qwen3.{name}": value for name, value in counts.items()}}
+    add_model(tmp_path / "own", "kv", "1", metadata, {"blk.0.w": (2, 2)})
+    assert kv_cache_mb(ModelStore([tmp_path / "own"]).get("kv:1"), KV_CONTEXT, "f16") == megabytes
 
 
 def test_num_gpu_zero_runs_on_the_cpu_outside_the_budget(tmp_path):
