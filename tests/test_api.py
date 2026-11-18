@@ -378,6 +378,25 @@ def test_a_damaged_manifest_never_breaks_the_model_list_or_delete(tmp_path):
         running.close()
 
 
+def test_a_model_file_with_a_broken_length_never_breaks_the_model_list_or_another_model(tmp_path):
+    from arty_engine.store import ModelStore
+    from fake_store import QWEN3, add_model
+    from gguf_writer import break_first_key_length
+    add_model(tmp_path / "own", "broken", "1", QWEN3, {"blk.0.w": (3, 5)})
+    break_first_key_length(ModelStore([tmp_path / "own"]).get("broken:1").model_path, 2 ** 40)
+    running = RunningEngine(tmp_path, REPLIES)
+    try:
+        names = [model["name"] for model in http_json(f"{running.url}/api/tags")["models"]]
+        assert "qwen3:14b" in names and "broken:1" not in names
+        borrowed = http_json(f"{running.url}/api/chat", {"model": "untemplated", "stream": False,
+                                                          "messages": [{"role": "user", "content": "hi"}]})
+        assert borrowed["done"] is True
+        status, body = error_of(lambda: http_json(f"{running.url}/api/chat", {"model": "broken:1", "stream": False, "messages": []}))
+        assert status == 500 and body["error"].startswith("couldn't read broken:1") and "larger than the rest of the file" in body["error"]
+    finally:
+        running.close()
+
+
 @pytest.mark.parametrize("text", ["", "{", "\u0000\u0001binary", "[" * 200000])
 def test_a_manifest_that_is_not_json_is_a_clear_error_never_an_engine_error(tmp_path, text):
     from fake_store import QWEN3, add_model

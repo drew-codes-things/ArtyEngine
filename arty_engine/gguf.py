@@ -1,3 +1,4 @@
+import os
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -48,9 +49,15 @@ class GgufInfo:
 class _Reader:
     def __init__(self, handle):
         self.handle = handle
+        self.size = os.fstat(handle.fileno()).st_size
+
+    def within_file(self, count: int) -> int:
+        if count > self.size - self.handle.tell():
+            raise GgufError("a length in the GGUF header is larger than the rest of the file")
+        return count
 
     def exact(self, count: int) -> bytes:
-        data = self.handle.read(count)
+        data = self.handle.read(self.within_file(count))
         if len(data) != count:
             raise GgufError("file ended inside the GGUF header")
         return data
@@ -64,7 +71,7 @@ class _Reader:
         return self.exact(length).decode("utf-8", errors="replace")
 
     def skip_string(self) -> None:
-        self.handle.seek(self.scalar(UINT64), 1)
+        self.handle.seek(self.within_file(self.scalar(UINT64)), 1)
 
     def value(self, kind: int):
         if kind == STRING:
@@ -84,7 +91,7 @@ class _Reader:
             for _ in range(length):
                 self.skip_string()
         elif element_kind in SCALAR_FORMATS:
-            self.handle.seek(struct.calcsize(SCALAR_FORMATS[element_kind]) * length, 1)
+            self.handle.seek(self.within_file(struct.calcsize(SCALAR_FORMATS[element_kind]) * length), 1)
         else:
             for _ in range(length):
                 self.value(element_kind)

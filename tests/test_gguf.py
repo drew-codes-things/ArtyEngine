@@ -1,5 +1,7 @@
-from arty_engine.gguf import GgufError, SkippedArray, read_gguf
-from gguf_writer import write_gguf
+import struct
+
+from arty_engine.gguf import ARRAY, STRING, UINT32, GgufError, SkippedArray, read_gguf
+from gguf_writer import break_first_key_length, write_gguf
 import pytest
 
 
@@ -35,3 +37,28 @@ def test_rejects_truncated_headers(tmp_path):
     path.write_bytes(path.read_bytes()[:30])
     with pytest.raises(GgufError):
         read_gguf(path)
+
+
+GGUF_START = b"GGUF" + struct.pack("<IQQ", 3, 0, 1)
+KEY = struct.pack("<Q", 4) + b"name"
+BROKEN_LENGTHS = {
+    "key longer than memory": GGUF_START + struct.pack("<Q", 2 ** 40) + b"name",
+    "key longer than a file can be": GGUF_START + struct.pack("<Q", 2 ** 63) + b"name",
+    "string value longer than memory": GGUF_START + KEY + struct.pack("<IQ", STRING, 2 ** 40) + b"text",
+    "skipped string longer than a file can be": GGUF_START + KEY + struct.pack("<IIQQ", ARRAY, STRING, 65, 2 ** 63) + b"text",
+    "skipped numbers longer than a file can be": GGUF_START + KEY + struct.pack("<IIQ", ARRAY, UINT32, 2 ** 62) + bytes(8),
+}
+
+
+@pytest.mark.parametrize("case", sorted(BROKEN_LENGTHS))
+def test_a_length_past_the_end_of_the_file_is_a_gguf_error(tmp_path, case):
+    path = tmp_path / "model.gguf"
+    path.write_bytes(BROKEN_LENGTHS[case])
+    with pytest.raises(GgufError, match="larger than the rest of the file"):
+        read_gguf(path)
+
+
+def test_a_model_file_whose_first_key_length_was_broken_is_a_gguf_error(tmp_path):
+    path = write_gguf(tmp_path / "model.gguf", {"general.architecture": "qwen3"}, {"blk.0.w": (4, 4)})
+    with pytest.raises(GgufError, match="larger than the rest of the file"):
+        read_gguf(break_first_key_length(path, 2 ** 40))
