@@ -1,6 +1,8 @@
 import hashlib
 import json
 import os
+import shutil
+import struct
 import threading
 import time
 
@@ -230,10 +232,10 @@ def counted_reads(monkeypatch, wait: float = 0.0) -> list:
     real_read = store_module.read_gguf
     reads = []
 
-    def counting_read(path):
+    def counting_read(path, *rest):
         reads.append(str(path))
         time.sleep(wait)
-        return real_read(path)
+        return real_read(path, *rest)
 
     monkeypatch.setattr(store_module, "read_gguf", counting_read)
     return reads
@@ -291,3 +293,180 @@ def test_requests_at_once_read_one_model_file_once(tmp_path, monkeypatch, name):
         reader.join()
     assert reads.count(paths[name]) == 1
     assert len(outcomes) == READERS_AT_ONCE and len(set(outcomes)) == 1
+
+
+DEEP_ARRAY_LEVELS = 3000
+LISTINGS_AT_ONCE = 3
+SLOW_READ_SECONDS = 2.0
+UINT8, ARRAY = 0, 9
+
+
+def deeply_nested_model_file(root):
+    add_model(root, "deep", "1", QWEN3, {"blk.0.w": (4, 4)})
+    path = ModelStore([root]).get("deep:1").model_path
+    path.write_bytes(b"GGUF" + struct.pack("<IQQ", 3, 0, 1) + struct.pack("<Q", 1) + b"k" + struct.pack("<I", ARRAY)
+                     + struct.pack("<IQ", ARRAY, 1) * (DEEP_ARRAY_LEVELS - 1) + struct.pack("<IQ", UINT8, 0))
+    return path
+
+
+def kept_refusals(store) -> list:
+    found = []
+    for entry in store._gguf_cache.values():
+        found += [item for item in (entry if isinstance(entry, tuple) else (entry,)) if isinstance(item, GgufError)]
+    return found
+
+
+def test_listings_at_once_read_a_file_nested_too_deep_once(tmp_path, monkeypatch, caplog):
+    root = build_store(tmp_path / "own")
+    path = deeply_nested_model_file(root)
+    store = ModelStore([root])
+    reads = counted_reads(monkeypatch, READ_WAIT_SECONDS)
+    start = threading.Barrier(LISTINGS_AT_ONCE)
+    listed = []
+
+    def list_once():
+        start.wait()
+        listed.append({model.name for model in store.models()})
+
+    listings = [threading.Thread(target=list_once) for _ in range(LISTINGS_AT_ONCE)]
+    for listing in listings:
+        listing.start()
+    for listing in listings:
+        listing.join()
+    assert len(listed) == LISTINGS_AT_ONCE and all("deep:1" not in names and "qwen3:14b" in names for names in listed)
+    assert reads.count(str(path)) == 1
+    assert "left deep:1 out of the model list: arrays in the GGUF header are nested" in caplog.text
+
+
+def test_a_kept_refusal_holds_no_traceback(tmp_path):
+    root = build_store(tmp_path / "own")
+    broken_model_file(root)
+    store = ModelStore([root])
+    for _ in range(2):
+        with pytest.raises(GgufError):
+            store.get("broken:1")
+    refusals = kept_refusals(store)
+    assert len(refusals) == 1
+    assert refusals[0].__traceback__ is None and refusals[0].__context__ is None and refusals[0].__cause__ is None
+
+
+def test_an_os_error_while_reading_is_not_kept(tmp_path, monkeypatch):
+    from arty_engine import store as store_module
+    root = build_store(tmp_path / "own")
+    store = ModelStore([root])
+    real_read = store_module.read_gguf
+    failures = [OSError("the disk could not be read")]
+
+    def read_that_fails_once(path, *rest):
+        if failures:
+            raise failures.pop()
+        return real_read(path, *rest)
+
+    monkeypatch.setattr(store_module, "read_gguf", read_that_fails_once)
+    with pytest.raises(OSError, match="could not be read"):
+        store.get("qwen3:14b")
+    assert store.get("qwen3:14b").gguf.architecture == "qwen3"
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root reads a file without read permission")
+def test_a_file_without_read_permission_is_read_again_once_permission_is_back(tmp_path):
+    root = build_store(tmp_path / "own")
+    path = ModelStore([root]).get("qwen3:14b").model_path
+    store = ModelStore([root])
+    before = path.stat()
+    path.chmod(0)
+    try:
+        for _ in range(2):
+            with pytest.raises(PermissionError):
+                store.get("qwen3:14b")
+    finally:
+        path.chmod(0o644)
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert store.get("qwen3:14b").gguf.architecture == "qwen3"
+
+
+def test_a_file_replaced_just_before_the_read_is_kept_under_its_own_stamp(tmp_path, monkeypatch):
+    from arty_engine import gguf as gguf_module, store as store_module
+    root = build_store(tmp_path / "own")
+    path = ModelStore([root]).get("qwen3:14b").model_path
+    good = tmp_path / "good.gguf"
+    shutil.copy2(path, good)
+    broken = tmp_path / "broken.gguf"
+    shutil.copy2(path, broken)
+    break_first_key_length(broken, 2 ** 40)
+    store = ModelStore([root])
+    real_open = open
+    swaps = [broken]
+
+    def open_after_a_swap(file, *rest, **named):
+        if str(file) == str(path) and swaps:
+            os.replace(swaps.pop(), path)
+        return real_open(file, *rest, **named)
+
+    monkeypatch.setattr(gguf_module, "open", open_after_a_swap, raising=False)
+    monkeypatch.setattr(store_module, "open", open_after_a_swap, raising=False)
+    with pytest.raises(GgufError):
+        store.get("qwen3:14b")
+    os.replace(good, path)
+    assert store.get("qwen3:14b").gguf.architecture == "qwen3"
+
+
+def test_a_file_renamed_into_place_with_the_old_size_and_change_time_is_read_again(tmp_path):
+    root = build_store(tmp_path / "own")
+    path = ModelStore([root]).get("qwen3:14b").model_path
+    store = ModelStore([root])
+    before = path.stat()
+    assert store.get("qwen3:14b").gguf.architecture == "qwen3"
+    copy = tmp_path / "copy.gguf"
+    shutil.copy2(path, copy)
+    break_first_key_length(copy, 2 ** 40)
+    os.utime(copy, ns=(before.st_atime_ns, before.st_mtime_ns))
+    os.replace(copy, path)
+    assert (path.stat().st_size, path.stat().st_mtime_ns) == (before.st_size, before.st_mtime_ns)
+    with pytest.raises(GgufError):
+        store.get("qwen3:14b")
+
+
+def test_one_entry_is_kept_per_model_file_however_often_it_changes(tmp_path):
+    root = build_store(tmp_path / "own")
+    path = broken_model_file(root)
+    store = ModelStore([root])
+    for change in range(5):
+        os.utime(path, ns=(path.stat().st_atime_ns, path.stat().st_mtime_ns + (change + 1) * LATER_CHANGE_TIME_NS))
+        with pytest.raises(GgufError):
+            store.get("broken:1")
+    assert len(store._gguf_cache) == 1
+
+
+def test_a_slow_read_of_one_file_does_not_hold_up_another(tmp_path, monkeypatch):
+    from arty_engine import store as store_module
+    root = build_store(tmp_path / "own")
+    slow_path = str(broken_model_file(root))
+    store = ModelStore([root])
+    real_read = store_module.read_gguf
+    slow_read_started = threading.Event()
+
+    def read_slowly_for_one_file(path, *rest):
+        if str(path) == slow_path:
+            slow_read_started.set()
+            time.sleep(SLOW_READ_SECONDS)
+        return real_read(path, *rest)
+
+    monkeypatch.setattr(store_module, "read_gguf", read_slowly_for_one_file)
+
+    outcomes = []
+
+    def read_the_slow_file():
+        try:
+            store.get("broken:1")
+        except GgufError as error:
+            outcomes.append(type(error).__name__)
+
+    slow = threading.Thread(target=read_the_slow_file)
+    slow.start()
+    assert slow_read_started.wait(SLOW_READ_SECONDS)
+    started = time.monotonic()
+    assert store.get("qwen3:14b").gguf.architecture == "qwen3"
+    took = time.monotonic() - started
+    slow.join()
+    assert outcomes == ["GgufError"] and took < SLOW_READ_SECONDS / 2

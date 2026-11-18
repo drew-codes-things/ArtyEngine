@@ -7,6 +7,7 @@ import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import BinaryIO
 
 from .gguf import GgufError, GgufInfo, plain_metadata, read_gguf
 
@@ -192,11 +193,16 @@ def parameter_size(count: int) -> str:
     return f"{count / BILLION:.1f}B"
 
 
-def read_or_refusal(path: Path) -> GgufInfo | GgufError:
+def read_or_refusal(path: Path, handle: BinaryIO) -> GgufInfo | GgufError:
     try:
-        return read_gguf(path)
+        return read_gguf(path, handle)
     except GgufError as error:
-        return error
+        return GgufError(str(error))
+
+
+def file_stamp(handle: BinaryIO) -> tuple:
+    found = os.fstat(handle.fileno())
+    return found.st_dev, found.st_ino, found.st_size, found.st_mtime_ns, found.st_ctime_ns
 
 
 def _read_json(path: Path) -> dict:
@@ -221,7 +227,7 @@ def blob_path(root: Path, digest: str) -> Path:
 class ModelStore:
     def __init__(self, roots: list[Path]):
         self.roots = [Path(root) for root in roots]
-        self._gguf_cache: dict[tuple, GgufInfo | GgufError] = {}
+        self._gguf_cache: dict[str, tuple[tuple, GgufInfo | GgufError]] = {}
         self._read_locks: dict[str, threading.Lock] = {}
         self._read_locks_guard = threading.Lock()
 
@@ -230,12 +236,13 @@ class ModelStore:
             return self._read_locks.setdefault(str(path), threading.Lock())
 
     def _gguf(self, path: Path) -> GgufInfo:
-        stat = path.stat()
-        key = (str(path), stat.st_size, stat.st_mtime_ns)
-        with self._read_lock(path):
-            if key not in self._gguf_cache:
-                self._gguf_cache[key] = read_or_refusal(path)
-        found = self._gguf_cache[key]
+        with self._read_lock(path), open(path, "rb") as handle:
+            stamp = file_stamp(handle)
+            kept = self._gguf_cache.get(str(path))
+            if kept is None or kept[0] != stamp:
+                kept = (stamp, read_or_refusal(path, handle))
+                self._gguf_cache[str(path)] = kept
+        found = kept[1]
         if isinstance(found, GgufError):
             raise GgufError(str(found))
         return found
