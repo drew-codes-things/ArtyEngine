@@ -206,6 +206,24 @@ def ps_entry(runner: Runner) -> dict:
             "context_length": runner.plan.ctx, "speculative": runner.plan.speculative.draft or runner.plan.speculative.spec_type or ""}
 
 
+def built_one_by_one(items: list, name_of, build, listing: str) -> list[dict]:
+    entries = []
+    for item in items:
+        try:
+            entries.append(build(item))
+        except Exception as error:
+            log.warning("left %s out of the %s: %s", name_of(item), listing, error)
+    return entries
+
+
+def model_list_entries(models: list) -> list[dict]:
+    return built_one_by_one(models, lambda model: model.name, lambda model: model.describe(), "model list")
+
+
+def loaded_list_entries(runners: list) -> list[dict]:
+    return built_one_by_one(runners, lambda runner: runner.plan.model.name, ps_entry, "loaded model list")
+
+
 def hostname_of(authority: str) -> str:
     try:
         return (urlsplit(f"//{authority}").hostname or "").lower()
@@ -364,10 +382,10 @@ def make_handler(engine: Engine):
             self._send_json(200, {"version": VERSION})
 
         def tags(self):
-            self._send_json(200, {"models": [model.describe() for model in engine.listed_models()]})
+            self._send_json(200, {"models": model_list_entries(engine.listed_models())})
 
         def ps(self):
-            self._send_json(200, {"models": [ps_entry(runner) for runner in engine.pool.loaded()]})
+            self._send_json(200, {"models": loaded_list_entries(engine.pool.loaded())})
 
         def show(self):
             request = self._body()
