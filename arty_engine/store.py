@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import threading
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -148,7 +149,7 @@ class Model:
 
     @property
     def context_length(self) -> int:
-        return int(self.gguf.arch_value("context_length", 0) or 0)
+        return self.gguf.arch_number("context_length")
 
     @property
     def details(self) -> dict:
@@ -161,7 +162,7 @@ class Model:
             "family": self.architecture,
             "families": [self.architecture],
             "parameter_size": self.stored_config.get("model_type") or parameter_size(self.gguf.parameter_count),
-            "quantization_level": FILE_TYPE_NAMES.get(file_type, str(file_type) if file_type is not None else ""),
+            "quantization_level": quantization_name(file_type),
         }
 
     def describe(self) -> dict:
@@ -175,12 +176,27 @@ def iso_time(moment: datetime) -> str:
     return moment.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def quantization_name(file_type) -> str:
+    if isinstance(file_type, str):
+        return file_type
+    if isinstance(file_type, int) and not isinstance(file_type, bool):
+        return FILE_TYPE_NAMES.get(file_type, str(file_type))
+    return ""
+
+
 def parameter_size(count: int) -> str:
     if count < BILLION:
         return f"{count / MILLION:.0f}M"
     if count < TEN_BILLION:
         return f"{count / BILLION:.2f}B"
     return f"{count / BILLION:.1f}B"
+
+
+def read_or_refusal(path: Path) -> GgufInfo | GgufError:
+    try:
+        return read_gguf(path)
+    except GgufError as error:
+        return error
 
 
 def _read_json(path: Path) -> dict:
@@ -205,14 +221,24 @@ def blob_path(root: Path, digest: str) -> Path:
 class ModelStore:
     def __init__(self, roots: list[Path]):
         self.roots = [Path(root) for root in roots]
-        self._gguf_cache: dict[tuple, GgufInfo] = {}
+        self._gguf_cache: dict[tuple, GgufInfo | GgufError] = {}
+        self._read_locks: dict[str, threading.Lock] = {}
+        self._read_locks_guard = threading.Lock()
+
+    def _read_lock(self, path: Path) -> threading.Lock:
+        with self._read_locks_guard:
+            return self._read_locks.setdefault(str(path), threading.Lock())
 
     def _gguf(self, path: Path) -> GgufInfo:
         stat = path.stat()
         key = (str(path), stat.st_size, stat.st_mtime_ns)
-        if key not in self._gguf_cache:
-            self._gguf_cache[key] = read_gguf(path)
-        return self._gguf_cache[key]
+        with self._read_lock(path):
+            if key not in self._gguf_cache:
+                self._gguf_cache[key] = read_or_refusal(path)
+        found = self._gguf_cache[key]
+        if isinstance(found, GgufError):
+            raise GgufError(str(found))
+        return found
 
     def _locate(self, name: ModelName) -> tuple[Path, Path] | None:
         for root in self.roots:
