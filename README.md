@@ -50,6 +50,8 @@ request to, through the engine's HTTP API (`/api/chat`, `/api/generate`, `/api/e
 **Who it is for.** People who run Arty, and noncommercial self-hosters who want a model server for one GPU that is
 Python standard library only (see [License](#license)).
 
+**Version.** 0.1.0, as `GET /api/version` reports it. There are no tagged releases yet.
+
 - **Its own model store.** Every model has one manifest in the store's `catalog` folder, naming its weights and
   extras (projector, template, parameters, system prompt, license) by sha256; the files themselves sit once each in
   `blobs`. Models keep short names such as `qwen3:14b`, and pulled ones are named after their Hugging Face repository.
