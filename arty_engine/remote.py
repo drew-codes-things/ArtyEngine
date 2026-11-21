@@ -84,8 +84,15 @@ def short_names(upstream_ids: list[str]) -> dict[str, str]:
             names[upstream] = slug_of(upstream)
             continue
         model = slug_of(match.group(2))
-        names[upstream] = model if counts[model] == 1 else f"{model}-{match.group(1)[:SHORT_CONNECTION_ID]}"
+        names[upstream] = model if counts[model] == 1 else suffixed_name(upstream)
     return names
+
+
+def suffixed_name(upstream: str) -> str:
+    match = CONNECTION_ID.match(upstream)
+    if not match:
+        return slug_of(upstream)
+    return f"{slug_of(match.group(2))}-{match.group(1)[:SHORT_CONNECTION_ID]}"
 
 
 def check_remote_models(remotes) -> None:
@@ -235,6 +242,8 @@ class Remote:
         self.list_failure: RemoteError | None = None
         self.listed_at = 0.0
         self.has_listed = False
+        self.names_lock = threading.Lock()
+        self.given_names: dict[str, str] = {}
 
     @property
     def label(self) -> str:
@@ -369,13 +378,21 @@ class Remote:
                 raise self.list_failure
             return [(upstream, online and available) for upstream, available in self.listed.values()]
 
+    def stable_names(self, upstreams: list[str]) -> dict[str, str]:
+        with self.names_lock:
+            taken = set(self.given_names.values())
+            for upstream, name in short_names([upstream for upstream in upstreams if upstream not in self.given_names]).items():
+                self.given_names[upstream] = suffixed_name(upstream) if name in taken else name
+                taken.add(self.given_names[upstream])
+            return {upstream: self.given_names[upstream] for upstream in upstreams}
+
     def is_stale(self) -> bool:
         return not self.listed_at or time.monotonic() - self.listed_at >= LIST_CACHE_SECONDS
 
     def models(self) -> list[RemoteModel]:
         by_slug: dict[str, RemoteModel] = {}
         entries = self.entries()
-        names = short_names([upstream for upstream, _ in entries])
+        names = self.stable_names([upstream for upstream, _ in entries])
         for upstream, available in entries:
             slug = names[upstream]
             if slug in by_slug:

@@ -471,3 +471,25 @@ def test_a_remote_model_relayed_under_any_prefix_shape_is_never_listed_again():
     answer = {"data": [{"id": upstream} for upstream in relayed] + [{"id": "0123456789ab/remote-control-7b"}]}
     listed = remote_module.listed_models(answer)
     assert [upstream for upstream, _available in listed.values()] == ["0123456789ab/remote-control-7b"]
+
+
+def test_a_short_name_stays_with_its_connection_when_another_connection_lists_the_same_model(tmp_path):
+    server = FakeOpenAiServer(models=["0123456789ab/Qwen-Big", "abcdef012345/Other"])
+    remote = remote_module.Remote("starfire", {"url": server.url, "key_file": key_file(tmp_path)})
+    try:
+        first = {model.name: model.upstream for model in remote.models()}
+        server.models = ["abcdef012345/Qwen-Big", "abcdef012345/Other"]
+        remote.check()
+        while_gone = {model.name: model.upstream for model in remote.models()}
+        server.models = ["0123456789ab/Qwen-Big", "abcdef012345/Qwen-Big"]
+        remote.check()
+        both = {model.name: model.upstream for model in remote.models()}
+        found = remote.model("0123456789ab-qwen-big").upstream
+    finally:
+        server.close()
+    assert first["remote/starfire/qwen-big"] == "0123456789ab/Qwen-Big"
+    assert "remote/starfire/qwen-big" not in while_gone
+    assert while_gone["remote/starfire/qwen-big-abcdef"] == "abcdef012345/Qwen-Big"
+    assert both == {"remote/starfire/qwen-big": "0123456789ab/Qwen-Big",
+                    "remote/starfire/qwen-big-abcdef": "abcdef012345/Qwen-Big"}
+    assert found == "0123456789ab/Qwen-Big"
