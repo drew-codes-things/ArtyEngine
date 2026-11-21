@@ -60,6 +60,7 @@ Python standard library only (see [License](#license)).
   separately and never copied into this repository.
 - **VRAM budget swapping.** Before a model loads, the engine estimates what it needs (weights, KV cache, overhead)
   and unloads the least recently used idle models until it fits `vram_budget_mb` and the card's free memory.
+  A model loaded on the CPU (`num_gpu: 0`) needs none of it, so it never unloads or waits for another model.
   `keep_alive` says how long a model stays loaded.
 - **Hugging Face pulls.** `hf.co/<owner>/<repo>:<quant>` picks the matching GGUF (and a vision projector when the
   repository has one, F16 first), checks its sha256, resumes partial downloads and keeps to a bandwidth cap. Short names such

@@ -262,6 +262,47 @@ def test_making_room_on_the_card_never_evicts_a_model_running_on_the_cpu(tmp_pat
     pool.shutdown()
 
 
+def chat_model_over_the_budget(tmp_path):
+    pool, store, launcher = make_pool(tmp_path)
+    chat_model = store.get("qwen3:14b")
+    pool.config.vram_budget_mb = pool.estimate_mb(pool.plan(chat_model, 1024)) - 1
+    return pool, store, launcher, chat_model
+
+
+def test_a_cpu_only_load_never_unloads_an_idle_model_on_the_card(tmp_path):
+    pool, store, launcher, chat_model = chat_model_over_the_budget(tmp_path)
+    chat, _ = pool.acquire(chat_model, 1024)
+    pool.release(chat, FOREVER)
+    embedder, _ = pool.acquire(store.get("nomic-embed-text"), None, cpu_only=True)
+    pool.release(embedder, FOREVER)
+    assert [process.returncode for process in launcher.launched] == [None, None]
+    assert sorted(runner.name for runner in pool.loaded()) == ["nomic-embed-text:latest", "qwen3:14b"]
+    pool.shutdown()
+
+
+def test_a_cpu_only_load_does_not_wait_for_a_busy_model_on_the_card(tmp_path, monkeypatch):
+    monkeypatch.setattr("arty_engine.runner.WAIT_FOR_IDLE_SECONDS", 0.5)
+    pool, store, launcher, chat_model = chat_model_over_the_budget(tmp_path)
+    busy_chat, _ = pool.acquire(chat_model, 1024)
+    embedder, _ = pool.acquire(store.get("nomic-embed-text"), None, cpu_only=True)
+    pool.release(embedder, FOREVER)
+    pool.release(busy_chat, FOREVER)
+    assert [process.returncode for process in launcher.launched] == [None, None]
+    assert sorted(runner.name for runner in pool.loaded()) == ["nomic-embed-text:latest", "qwen3:14b"]
+    pool.shutdown()
+
+
+def test_an_embedder_loaded_on_the_card_still_unloads_an_idle_chat_model_over_the_budget(tmp_path):
+    pool, store, launcher, chat_model = chat_model_over_the_budget(tmp_path)
+    chat, _ = pool.acquire(chat_model, 1024)
+    pool.release(chat, FOREVER)
+    embedder, _ = pool.acquire(store.get("nomic-embed-text"), None)
+    pool.release(embedder, FOREVER)
+    assert [process.returncode for process in launcher.launched] == [-15, None]
+    assert [runner.name for runner in pool.loaded()] == ["nomic-embed-text:latest"]
+    pool.shutdown()
+
+
 def test_a_model_still_answering_is_not_killed_to_load_it_with_another_context(tmp_path, monkeypatch):
     monkeypatch.setattr("arty_engine.runner.WAIT_FOR_IDLE_SECONDS", 0.5)
     pool, store, launcher = make_pool(tmp_path)
