@@ -202,8 +202,8 @@ def upstream_detail(error: urllib.error.HTTPError) -> tuple[str, str]:
 
 
 def names_a_remote_model(upstream: str) -> bool:
-    match = CONNECTION_ID.match(upstream)
-    return is_remote_name(match.group(2) if match else upstream)
+    leading_parts = upstream.split("/")[:-1]
+    return REMOTE_PREFIX.strip("/") in (part.strip().lower() for part in leading_parts)
 
 
 def listed_models(answer: dict) -> dict[str, tuple[str, bool]]:

@@ -463,3 +463,11 @@ def test_a_model_the_server_got_from_this_engine_s_remotes_is_never_listed_again
     listed = remote_module.listed_models(answer)
     assert sorted(upstream for upstream, _available in listed.values()) == [
         "0123456789ab/qwen3:14b", "fedcba987654/friend-big"]
+
+
+def test_a_remote_model_relayed_under_any_prefix_shape_is_never_listed_again():
+    relayed = ["0123456789ab/fedcba987654/remote/starfire/x", "gw/remote/starfire/x", "0123456789AB/remote/starfire/x",
+               "Remote/starfire/x", " remote/starfire/x", "/remote/starfire/x", "0123456789ab/ remote/starfire/x"]
+    answer = {"data": [{"id": upstream} for upstream in relayed] + [{"id": "0123456789ab/remote-control-7b"}]}
+    listed = remote_module.listed_models(answer)
+    assert [upstream for upstream, _available in listed.values()] == ["0123456789ab/remote-control-7b"]
