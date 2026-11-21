@@ -26,6 +26,10 @@ LONGEST_TIMEOUT_SECONDS = 3600
 LIST_TIMEOUT_SECONDS = 10
 LIST_CACHE_SECONDS = 60
 LIST_FAILURE_CACHE_SECONDS = 15
+CHECK_INTERVAL_SECONDS = 60
+CHECK_TIMEOUT_SECONDS = 5
+SERVICE_UNAVAILABLE = 503
+MODEL_UNAVAILABLE = "model_unavailable"
 STANDARD_SAMPLING = ("temperature", "top_p", "presence_penalty", "frequency_penalty", "seed", "stop", "max_tokens")
 OPENAI_CHAT_FIELDS = ("messages", "stream", "stream_options", "tools", "response_format", *STANDARD_SAMPLING)
 LOCAL_RUNNER_ONLY = ("chat_template_kwargs", "reasoning_effort")
@@ -136,6 +140,7 @@ class RemoteModel:
     runnable: bool = True
     unrunnable_reason: str = ""
     is_embedding: bool = False
+    available: bool = True
 
     @property
     def details(self) -> dict:
@@ -144,12 +149,13 @@ class RemoteModel:
 
     def describe(self) -> dict:
         return {"name": self.name, "model": self.name, "modified_at": now_iso(), "size": 0, "digest": "",
-                "details": self.details, "capabilities": self.capabilities, "remote": True}
+                "details": self.details, "capabilities": self.capabilities, "remote": True,
+                "available": self.available}
 
     def show(self) -> dict:
         return {"license": "", "modelfile": "", "parameters": "", "template": "", "system": "", "details": self.details,
                 "model_info": {}, "capabilities": self.capabilities, "modified_at": now_iso(), "runnable": True,
-                "remote": {"name": self.remote, "model": self.upstream}}
+                "available": self.available, "remote": {"name": self.remote, "model": self.upstream}}
 
 
 def now_iso() -> str:
@@ -167,15 +173,28 @@ def server_sent_events(lines):
         yield json.loads(data)
 
 
-def upstream_detail(error: urllib.error.HTTPError) -> str:
+def upstream_detail(error: urllib.error.HTTPError) -> tuple[str, str]:
     try:
         payload = json.loads(error.read() or b"{}")
     except (ValueError, OSError):
-        return ""
+        return "", ""
     detail = payload.get("error") if isinstance(payload, dict) else payload
+    code = ""
     if isinstance(detail, dict):
+        code = str(detail.get("code") or "")
         detail = detail.get("message") or detail
-    return str(detail or "")[:MESSAGE_LIMIT]
+    return str(detail or "")[:MESSAGE_LIMIT], code
+
+
+def listed_models(answer: dict) -> dict[str, tuple[str, bool]]:
+    data = answer.get("data")
+    items = [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
+    found = {}
+    for item in items:
+        upstream = item.get("id")
+        if isinstance(upstream, str) and slug_of(upstream) and slug_of(upstream) not in found:
+            found[slug_of(upstream)] = (upstream, item.get("available") is not False)
+    return found
 
 
 class Remote:
@@ -190,9 +209,10 @@ class Remote:
         tls = ssl.create_default_context(cafile=settings["ca_file"]) if settings.get("ca_file") else None
         self.opener = opener or keyed_opener(tls)
         self.list_lock = threading.Lock()
-        self.listed: dict[str, str] = {}
+        self.listed: dict[str, tuple[str, bool]] = {}
         self.list_failure: RemoteError | None = None
         self.listed_at = 0.0
+        self.has_listed = False
 
     @property
     def label(self) -> str:
@@ -246,7 +266,7 @@ class Remote:
         try:
             return self.opener(request, timeout=timeout)
         except urllib.error.HTTPError as error:
-            raise self.refusal(error.code, upstream_detail(error), error.headers, key) from None
+            raise self.refusal(error.code, *upstream_detail(error), error.headers, key) from None
         except (TimeoutError, socket.timeout):
             raise RemoteError(GATEWAY_TIMEOUT, f"{self.label} did not answer within {timeout:g} s") from None
         except (urllib.error.URLError, OSError) as error:
@@ -255,9 +275,12 @@ class Remote:
                 raise RemoteError(GATEWAY_TIMEOUT, f"{self.label} did not answer within {timeout:g} s") from None
             raise RemoteError(GATEWAY_FAILED, self.hidden(f"{self.label} isn't reachable at {self.url}: {reason}", key)) from None
 
-    def refusal(self, status: int, detail: str, headers, key: str) -> RemoteError:
+    def refusal(self, status: int, detail: str, code: str, headers, key: str) -> RemoteError:
         detail = self.hidden(detail, key)
         said = f": {detail}" if detail else ""
+        if status == SERVICE_UNAVAILABLE and code == MODEL_UNAVAILABLE:
+            return RemoteError(SERVICE_UNAVAILABLE, f"{self.label} says this model is offline right now (HTTP 503), "
+                                                    f"try again later{said}")
         if status == 401:
             return RemoteError(GATEWAY_FAILED, f"{self.label} refused the key (HTTP 401): check {self.key_source}{said}")
         if status == 403:
@@ -295,36 +318,51 @@ class Remote:
         except OSError as error:
             raise RemoteError(GATEWAY_FAILED, f"{self.label} broke off its answer: {error}") from None
 
-    def upstream_ids(self) -> list[str]:
-        if self.models_set:
-            return self.models_set
+    def check(self, timeout: float = CHECK_TIMEOUT_SECONDS) -> None:
         with self.list_lock:
-            age = time.monotonic() - self.listed_at
-            if self.listed_at and self.list_failure is None and age < LIST_CACHE_SECONDS:
-                return list(self.listed.values())
-            if self.listed_at and self.list_failure is not None and age < LIST_FAILURE_CACHE_SECONDS:
+            self.refresh(timeout)
+
+    def refresh(self, timeout: float) -> None:
+        was_offline = self.list_failure is not None
+        try:
+            answer = self.json_from("/models", None, timeout)
+        except RemoteError as error:
+            self.list_failure, self.listed_at = error, time.monotonic()
+            if not was_offline:
+                log.warning("%s is offline: %s", self.label, error.message)
+            return
+        self.listed, self.list_failure, self.listed_at, self.has_listed = listed_models(answer), None, time.monotonic(), True
+        if was_offline:
+            log.info("%s is back online", self.label)
+
+    def entries(self) -> list[tuple[str, bool]]:
+        with self.list_lock:
+            if not self.models_set and self.is_stale():
+                self.refresh(LIST_TIMEOUT_SECONDS)
+            online = self.list_failure is None
+            if self.models_set:
+                return [(upstream, online and self.listed.get(slug_of(upstream), (upstream, True))[1])
+                        for upstream in self.models_set]
+            if not self.has_listed:
                 raise self.list_failure
-            try:
-                answer = self.json_from("/models", None, LIST_TIMEOUT_SECONDS)
-            except RemoteError as error:
-                self.list_failure, self.listed_at = error, time.monotonic()
-                raise
-            data = answer.get("data")
-            ids = [item.get("id") for item in data if isinstance(item, dict)] if isinstance(data, list) else []
-            self.listed = {slug_of(name): name for name in ids if isinstance(name, str) and slug_of(name)}
-            self.list_failure, self.listed_at = None, time.monotonic()
-            return list(self.listed.values())
+            return [(upstream, online and available) for upstream, available in self.listed.values()]
+
+    def is_stale(self) -> bool:
+        age = time.monotonic() - self.listed_at
+        if not self.listed_at:
+            return True
+        return age >= (LIST_FAILURE_CACHE_SECONDS if self.list_failure is not None else LIST_CACHE_SECONDS)
 
     def models(self) -> list[RemoteModel]:
         by_slug: dict[str, RemoteModel] = {}
-        for upstream in self.upstream_ids():
+        for upstream, available in self.entries():
             slug = slug_of(upstream)
             if slug in by_slug:
                 log.warning("%s lists %s and %s under the same name %s; using the first", self.label,
                             by_slug[slug].upstream, upstream, slug)
                 continue
             by_slug[slug] = RemoteModel(name=f"{REMOTE_PREFIX}{self.name}/{slug}", remote=self.name, upstream=upstream,
-                                        capabilities=list(self.capabilities))
+                                        capabilities=list(self.capabilities), available=available)
         return list(by_slug.values())
 
     def model(self, slug: str) -> RemoteModel:
@@ -373,6 +411,7 @@ class RemoteChat:
 class Remotes:
     def __init__(self, settings: dict, opener=None):
         self.by_name = {name: Remote(name, values, opener) for name, values in settings.items()}
+        self.stopping = threading.Event()
         for remote in self.by_name.values():
             if remote.url.startswith("http://") and (remote.key_file or remote.key_env):
                 log.warning("%s is reached over plain http, so its key crosses the network unencrypted", remote.label)
@@ -395,3 +434,23 @@ class Remotes:
 
     def chat(self, model: RemoteModel) -> RemoteChat:
         return RemoteChat(self.by_name[model.remote], model)
+
+    def check_all(self) -> None:
+        for remote in self.by_name.values():
+            remote.check()
+
+    def start_checks(self, interval_seconds: float = CHECK_INTERVAL_SECONDS) -> None:
+        if not self.by_name:
+            return
+        self.stopping.clear()
+        threading.Thread(target=self.keep_checking, args=(interval_seconds,), name="remote-checks", daemon=True).start()
+
+    def keep_checking(self, interval_seconds: float) -> None:
+        while not self.stopping.wait(interval_seconds):
+            try:
+                self.check_all()
+            except Exception:
+                log.exception("checking the remote servers failed; trying again in %g s", interval_seconds)
+
+    def stop_checks(self) -> None:
+        self.stopping.set()

@@ -92,8 +92,14 @@ variable only. The engine reads it for each request, so a new key needs no resta
 sent; `num_ctx` and the runtime's own options are dropped, since the server decides those. Refusals become readable
 errors: a refused key (401) and refused access (403) answer 502 saying so, a rate limit answers 429 with the wait the
 server asked for, a model the server doesn't have answers 404, no answer within `timeout_seconds` answers 504, and a
-key the server echoes back is replaced by `[key hidden]`. A server that can't be reached is left out of `/api/tags`
-with a warning. Embeddings, `raw` prompts and `_debug_render_only` answer 400 or 501 for remote models, and names
+key the server echoes back is replaced by `[key hidden]`.
+
+Every remote model in `/api/tags` and `/api/show` carries `available`. The engine checks each server's `<url>/models`
+every 60 s (5 s timeout) and logs once when a server goes offline and once when it is back. While a server can't be
+reached its last-known models stay listed with `available: false` (a server never reached since the engine started
+is left out with a warning), and a server that marks a model `"available": false` in its own list (starfire does for
+a connection that is down) makes that model unavailable too. A chat to a model the server answers with 503
+`model_unavailable` gets 503 "this model is offline right now". Embeddings, `raw` prompts and `_debug_render_only` answer 400 or 501 for remote models, and names
 starting `remote/` are never pulled or deleted.
 
 `tools/write_config.py --remote-models <file>` puts a JSON file of these settings into the installed config;

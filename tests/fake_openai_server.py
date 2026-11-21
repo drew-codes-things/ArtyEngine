@@ -11,12 +11,14 @@ SLOW_MODEL = "slow"
 BROKEN_MODEL = "broken"
 ECHO_KEY_MODEL = "echo-key"
 REDIRECT_MODEL = "moved"
+OFFLINE_MODEL = "offline"
 SLOW_SECONDS = 3
 
 
 class FakeOpenAiServer:
     def __init__(self, models=None):
         self.models = list(models if models is not None else LISTED_MODELS)
+        self.offline: set[str] = set()
         self.requests: list[dict] = []
         self.listings = 0
         server = self
@@ -51,7 +53,8 @@ class FakeOpenAiServer:
                 if self.path != "/v1/models":
                     self._send(404, {"error": {"message": "no route"}})
                     return
-                self._send(200, {"object": "list", "data": [{"id": name, "object": "model"} for name in server.models]})
+                self._send(200, {"object": "list", "data": [{"id": name, "object": "model", "available": name not in server.offline}
+                                                            for name in server.models]})
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
@@ -70,6 +73,9 @@ class FakeOpenAiServer:
                     self._send(500, {"error": {"message": "upstream crashed"}})
                 elif model == ECHO_KEY_MODEL:
                     self._send(400, {"error": {"message": f"bad request from {self.headers.get('Authorization')}"}})
+                elif model == OFFLINE_MODEL or model in server.offline:
+                    self._send(503, {"error": {"message": f"{model} is unavailable: its connection is not answering",
+                                               "type": "server_error", "code": "model_unavailable"}})
                 elif model == REDIRECT_MODEL:
                     self._send(302, {}, headers={"Location": f"{server.url}/elsewhere/chat/completions"})
                 elif model == SLOW_MODEL:

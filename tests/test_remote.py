@@ -10,9 +10,8 @@ import pytest
 
 from arty_engine.config import Config, load_config
 from engine_harness import RunningEngine, error_of, http_json, stream_chat
-from fake_openai_server import (BROKEN_MODEL, ECHO_KEY_MODEL, FORBIDDEN_MODEL, GOOD_KEY, LIMITED_MODEL, REDIRECT_MODEL,
-                                SLOW_MODEL,
-                                FakeOpenAiServer)
+from fake_openai_server import (BROKEN_MODEL, ECHO_KEY_MODEL, FORBIDDEN_MODEL, GOOD_KEY, LIMITED_MODEL, OFFLINE_MODEL,
+                                REDIRECT_MODEL, SLOW_MODEL, FakeOpenAiServer)
 
 REPO = Path(__file__).resolve().parents[1]
 QWEN = "remote/friend/qwen3-14b-q4_k_m"
@@ -329,3 +328,84 @@ def test_write_config_refuses_remote_models_with_a_key_in_them(tmp_path):
                               capture_output=True, text=True, timeout=60)
     assert finished.returncode == 1 and "never put the key in the config" in finished.stderr
     assert not target.exists() and "sf_inline" not in finished.stderr
+
+
+def tags_by_name(engine) -> dict:
+    return {model["name"]: model for model in http_json(f"{engine.url}/api/tags")["models"]}
+
+
+def test_remote_entries_say_whether_they_are_available(engine, upstream):
+    upstream.offline.add("Qwen3-14B-Q4_K_M")
+    listed = tags_by_name(engine)
+    assert listed[QWEN]["available"] is False and listed[BIG]["available"] is True
+    assert http_json(f"{engine.url}/api/show", {"model": QWEN})["available"] is False
+
+
+def test_an_unreachable_server_keeps_its_last_known_models_as_unavailable(tmp_path):
+    server = FakeOpenAiServer()
+    running = make_engine(tmp_path, remote_settings(server, tmp_path))
+    try:
+        assert tags_by_name(running)[QWEN]["available"] is True
+        server.close()
+        running.engine.remotes.check_all()
+        listed = tags_by_name(running)
+    finally:
+        running.close()
+    assert listed[QWEN]["available"] is False and listed[BIG]["available"] is False
+    assert listed[QWEN]["remote"] is True
+
+
+def test_a_server_that_comes_back_is_available_again(engine, upstream):
+    upstream.offline.add("Qwen3-14B-Q4_K_M")
+    engine.engine.remotes.check_all()
+    assert tags_by_name(engine)[QWEN]["available"] is False
+    upstream.offline.clear()
+    engine.engine.remotes.check_all()
+    assert tags_by_name(engine)[QWEN]["available"] is True
+
+
+def test_listed_models_of_an_unreachable_server_are_unavailable(tmp_path):
+    server = FakeOpenAiServer()
+    running = make_engine(tmp_path, remote_settings(server, tmp_path, models=["Only-This"]))
+    server.close()
+    try:
+        running.engine.remotes.check_all()
+        listed = tags_by_name(running)
+    finally:
+        running.close()
+    assert listed["remote/friend/only-this"]["available"] is False
+
+
+def test_the_servers_are_checked_on_a_timer(tmp_path, upstream):
+    running = make_engine(tmp_path, remote_settings(upstream, tmp_path, models=["Only-This"]))
+    try:
+        running.engine.remotes.start_checks(interval_seconds=0.1)
+        deadline = time.monotonic() + 5
+        while upstream.listings < 2 and time.monotonic() < deadline:
+            time.sleep(0.05)
+    finally:
+        running.engine.remotes.stop_checks()
+        running.close()
+    assert upstream.listings >= 2
+
+
+def test_an_offline_model_is_a_clear_503(tmp_path, upstream):
+    running = make_engine(tmp_path, remote_settings(upstream, tmp_path, models=[OFFLINE_MODEL]))
+    try:
+        status, payload = error_of(lambda: chat(running, f"remote/friend/{OFFLINE_MODEL}"))
+    finally:
+        running.close()
+    assert status == 503 and "is offline right now" in payload["error"]
+
+
+def test_a_check_failure_is_logged_once_not_every_minute(tmp_path, caplog):
+    server = FakeOpenAiServer()
+    running = make_engine(tmp_path, remote_settings(server, tmp_path, models=["Only-This"]))
+    server.close()
+    caplog.set_level(logging.INFO)
+    try:
+        for _ in range(3):
+            running.engine.remotes.check_all()
+    finally:
+        running.close()
+    assert caplog.text.count("is offline") == 1

@@ -719,6 +719,7 @@ def serve(config: Config) -> None:
     backend = resolve_backend(config)
     engine = Engine(config, backend=backend)
     engine.pool.start_reaper()
+    engine.remotes.start_checks()
     host, port = config.listen.rsplit(":", 1)
     server = ThreadingHTTPServer((host, int(port)), make_handler(engine))
     server.daemon_threads = True
