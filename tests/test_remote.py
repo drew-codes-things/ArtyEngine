@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from arty_engine import remote as remote_module
 from arty_engine.config import Config, load_config
 from engine_harness import RunningEngine, error_of, http_json, stream_chat
 from fake_openai_server import (BROKEN_MODEL, ECHO_KEY_MODEL, FORBIDDEN_MODEL, GOOD_KEY, LIMITED_MODEL, OFFLINE_MODEL,
@@ -409,3 +410,13 @@ def test_a_check_failure_is_logged_once_not_every_minute(tmp_path, caplog):
     finally:
         running.close()
     assert caplog.text.count("is offline") == 1
+
+
+def test_while_a_server_is_offline_the_model_list_waits_for_the_timer_not_for_it(engine, upstream, monkeypatch):
+    remote = engine.engine.remotes.by_name["friend"]
+    tags_by_name(engine)
+    monkeypatch.setattr(remote, "list_failure", remote_module.RemoteError(502, "down"))
+    monkeypatch.setattr(remote, "listed_at", time.monotonic() - 3600)
+    before = upstream.listings
+    listed = tags_by_name(engine)
+    assert upstream.listings == before and listed[QWEN]["available"] is False

@@ -25,7 +25,6 @@ DEFAULT_TIMEOUT_SECONDS = 300
 LONGEST_TIMEOUT_SECONDS = 3600
 LIST_TIMEOUT_SECONDS = 10
 LIST_CACHE_SECONDS = 60
-LIST_FAILURE_CACHE_SECONDS = 15
 CHECK_INTERVAL_SECONDS = 60
 CHECK_TIMEOUT_SECONDS = 5
 SERVICE_UNAVAILABLE = 503
@@ -337,7 +336,7 @@ class Remote:
 
     def entries(self) -> list[tuple[str, bool]]:
         with self.list_lock:
-            if not self.models_set and self.is_stale():
+            if not self.models_set and self.list_failure is None and self.is_stale():
                 self.refresh(LIST_TIMEOUT_SECONDS)
             online = self.list_failure is None
             if self.models_set:
@@ -348,10 +347,7 @@ class Remote:
             return [(upstream, online and available) for upstream, available in self.listed.values()]
 
     def is_stale(self) -> bool:
-        age = time.monotonic() - self.listed_at
-        if not self.listed_at:
-            return True
-        return age >= (LIST_FAILURE_CACHE_SECONDS if self.list_failure is not None else LIST_CACHE_SECONDS)
+        return not self.listed_at or time.monotonic() - self.listed_at >= LIST_CACHE_SECONDS
 
     def models(self) -> list[RemoteModel]:
         by_slug: dict[str, RemoteModel] = {}
