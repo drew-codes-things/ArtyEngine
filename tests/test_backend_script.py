@@ -241,3 +241,16 @@ def test_a_unit_file_that_cannot_be_installed_says_nothing_was_started_or_moved(
     assert "started nothing and moved nothing" in last_line(finished)
     assert "did not start" not in finished.stderr and "journalctl -u arty-engine" not in finished.stderr
     assert "enable --now arty-engine" not in calls(tmp_path)
+
+
+def test_the_sites_remote_models_file_reaches_the_engine_config(tmp_path):
+    site = "ARTY_CT=201\nARTY_CONTROLLER_URL=none\nARTY_ENGINE_REMOTE_MODELS=/srv/ai/arty-engine/remote-models.json\n"
+    finished = run_backend(tmp_path, site, "engine-config")
+    assert finished.returncode == 0, finished.stderr
+    assert "--remote-models '/srv/ai/arty-engine/remote-models.json'" in calls(tmp_path)
+
+
+def test_without_remote_models_the_engine_config_names_none(tmp_path):
+    finished = run_backend(tmp_path, "ARTY_CT=201\nARTY_CONTROLLER_URL=none\n", "engine-config")
+    assert finished.returncode == 0, finished.stderr
+    assert "--remote-models" not in calls(tmp_path)

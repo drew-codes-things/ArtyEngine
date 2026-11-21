@@ -12,9 +12,10 @@ import uuid
 from collections import Counter
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from . import gpu, translate
+from . import gpu, remote, translate
 from .backend import Backend, resolve_backend
 from .config import Config, load_config
 from .gguf import GgufError
@@ -83,6 +84,7 @@ class Engine:
         self.leak_lock = threading.Lock()
         self.replies_with_leaks: Counter[str] = Counter()
         self.internal_names = {parse_name(name).display for name in config.internal_models}
+        self.remotes = remote.Remotes(config.remote_models)
 
     def report_leak_signs(self, model_name: str, splitter: translate.LeakSplitter | None) -> None:
         if splitter is None:
@@ -112,6 +114,8 @@ class Engine:
     def model(self, name) -> object:
         if not isinstance(name, str) or not name:
             raise ApiError(400, "model is required")
+        if remote.is_remote_name(name):
+            return self.remotes.model(name)
         try:
             model = self.store.get(name)
         except ModelNotFound as error:
@@ -182,18 +186,26 @@ def stream_events(url: str, body: dict):
     except (urllib.error.URLError, OSError) as error:
         raise ApiError(500, f"the model runner stopped answering: {error}") from error
     with response:
-        for raw_line in response:
-            line = raw_line.decode("utf-8", errors="replace").strip()
-            if not line.startswith("data:"):
-                continue
-            data = line[len("data:"):].strip()
-            if data == "[DONE]":
-                return
-            event = json.loads(data)
+        for event in remote.server_sent_events(response):
             if event.get("error"):
                 detail = event["error"]
                 raise ApiError(500, str(detail.get("message") if isinstance(detail, dict) else detail))
             yield event
+
+
+@dataclass(frozen=True)
+class RunnerChat:
+    base_url: str
+
+    @property
+    def url(self) -> str:
+        return f"{self.base_url}/v1/chat/completions"
+
+    def post(self, body: dict) -> dict:
+        return post_json(self.url, body)
+
+    def stream(self, body: dict):
+        return stream_events(self.url, body)
 
 
 def ps_entry(runner: Runner) -> dict:
@@ -332,6 +344,9 @@ def make_handler(engine: Engine):
                 self._fail(error.status, error.message)
             except translate.RequestError as error:
                 self._fail(400, str(error))
+            except remote.RemoteError as error:
+                log.warning("%s %s: %s", self.command, path, error.message)
+                self._fail(error.status, error.message)
             except (BrokenPipeError, ConnectionResetError):
                 log.info("client went away during %s %s", self.command, path)
             except Exception as error:
@@ -382,7 +397,7 @@ def make_handler(engine: Engine):
             self._send_json(200, {"version": VERSION})
 
         def tags(self):
-            self._send_json(200, {"models": model_list_entries(engine.listed_models())})
+            self._send_json(200, {"models": model_list_entries(engine.listed_models()) + model_list_entries(engine.remotes.models())})
 
         def ps(self):
             self._send_json(200, {"models": loaded_list_entries(engine.pool.loaded())})
@@ -390,6 +405,9 @@ def make_handler(engine: Engine):
         def show(self):
             request = self._body()
             model = engine.model(request.get("model") or request.get("name"))
+            if remote.is_remote(model):
+                self._send_json(200, model.show())
+                return
             params = "\n".join(f"{key:<30} {json.dumps(value) if not isinstance(value, str) else value}"
                                for key, value in model.params.items())
             self._send_json(200, {"license": model.license, "modelfile": f"FROM {model.model_path}\n", "parameters": params,
@@ -403,6 +421,8 @@ def make_handler(engine: Engine):
             name = request.get("model") or request.get("name")
             if not isinstance(name, str) or not name:
                 raise ApiError(400, "model is required")
+            if remote.is_remote_name(name):
+                raise ApiError(405, f"{name} comes from a remote server in remote_models; take it out of the config instead")
             try:
                 display = parse_name(name).display
             except ModelNotFound as error:
@@ -435,6 +455,11 @@ def make_handler(engine: Engine):
             if request.get("messages") or request.get("prompt"):
                 return False
             reply = {"response": ""} if generate else {"message": {"role": "assistant", "content": ""}}
+            if remote.is_remote(model):
+                done_reason = "unload" if keep_alive == 0 else "load"
+                self._send_json(200, {"model": model.name, "created_at": translate.now_iso(), **reply, "done_reason": done_reason,
+                                      "done": True})
+                return True
             if keep_alive == 0:
                 engine.pool.unload(model.name)
                 self._send_json(200, {"model": model.name, "created_at": translate.now_iso(), **reply, "done_reason": "unload", "done": True})
@@ -458,6 +483,7 @@ def make_handler(engine: Engine):
 
         def _render_only(self, request: dict, model, keep_alive):
             self._check_chat_model(model)
+            refuse_remote(model, "a remote server's prompt template isn't known, so it can't be rendered")
             body = translate.render_body(request, model)
             options = translate.merged_options(model.params, request.get("options"))
             rendered = engine.with_runner(model, options, keep_alive,
@@ -497,6 +523,7 @@ def make_handler(engine: Engine):
 
         def _run_raw(self, request: dict, model, keep_alive):
             self._check_chat_model(model)
+            refuse_remote(model, "raw prompts need the model's own template, which a remote server doesn't share")
             if request.get("images") or request.get("format"):
                 raise ApiError(501, "raw prompts with images or a format aren't supported by the engine yet")
             stream = request.get("stream", True) is not False
@@ -532,13 +559,10 @@ def make_handler(engine: Engine):
             shape = translate.generate_reply_from_chat if generate else (lambda reply: reply)
             keep_thinking = request.get("think") is not False
 
-            def run(runner: Runner, load_seconds: float):
-                url = f"{runner.base_url}/v1/chat/completions"
-                splitter = (translate.LeakSplitter(named_leaker=runner.plan.named_thinking_leaker)
-                            if runner.plan.may_leak_thinking else None)
+            def answer(upstream, load_seconds: float, splitter):
                 if not stream:
                     try:
-                        reply = translate.chat_reply(model.name, post_json(url, body), load_seconds, started,
+                        reply = translate.chat_reply(model.name, upstream.post(body), load_seconds, started,
                                                      keep_thinking=keep_thinking, splitter=splitter)
                     finally:
                         engine.report_leak_signs(model.name, splitter)
@@ -547,12 +571,21 @@ def make_handler(engine: Engine):
                 translator = translate.StreamTranslator(model.name, load_seconds, started, keep_thinking=keep_thinking,
                                                         splitter=splitter)
                 try:
-                    last_chunks = self._stream_all_but_the_last(translator, stream_events(url, body), shape)
+                    last_chunks = self._stream_all_but_the_last(translator, upstream.stream(body), shape)
                 finally:
                     engine.report_leak_signs(model.name, splitter)
                 for chunk in last_chunks:
                     self._stream_line(shape(chunk))
                 self._end_stream()
+
+            if remote.is_remote(model):
+                answer(engine.remotes.chat(model), 0.0, None)
+                return
+
+            def run(runner: Runner, load_seconds: float):
+                splitter = (translate.LeakSplitter(named_leaker=runner.plan.named_thinking_leaker)
+                            if runner.plan.may_leak_thinking else None)
+                answer(RunnerChat(runner.base_url), load_seconds, splitter)
 
             engine.with_runner(model, options, keep_alive, run)
 
@@ -606,6 +639,9 @@ def make_handler(engine: Engine):
             name = request.get("model") or request.get("name")
             if not isinstance(name, str) or not name:
                 raise ApiError(400, "model is required")
+            if remote.is_remote_name(name):
+                raise ApiError(400, f"{name} is a remote model: names starting with {remote.REMOTE_PREFIX} come from remote_models "
+                                    "and are never pulled")
             source = request.get("source")
             if source is not None and (not isinstance(source, str) or not source):
                 raise ApiError(400, f"source must be a Hugging Face name such as {HF_NAME_FORM}")
@@ -649,6 +685,11 @@ def make_handler(engine: Engine):
     return Handler
 
 
+def refuse_remote(model, reason: str) -> None:
+    if remote.is_remote(model):
+        raise ApiError(501, f"{model.name}: {reason}")
+
+
 def report_late_signs(model_name: str, splitter: translate.LeakSplitter) -> None:
     if splitter.late_tags:
         log.warning("%s wrote %d think tag(s) after its answer had started; they were taken out of the answer, check that "
@@ -678,6 +719,7 @@ def serve(config: Config) -> None:
     backend = resolve_backend(config)
     engine = Engine(config, backend=backend)
     engine.pool.start_reaper()
+    engine.remotes.start_checks()
     host, port = config.listen.rsplit(":", 1)
     server = ThreadingHTTPServer((host, int(port)), make_handler(engine))
     server.daemon_threads = True

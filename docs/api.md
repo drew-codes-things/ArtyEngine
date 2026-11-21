@@ -4,7 +4,7 @@
 |---|---|
 | `GET /`, `HEAD /` | Answers that the engine is running |
 | `GET /api/version` | The engine's own version |
-| `GET /api/tags` | Every model in the store and in `model_roots`, minus `internal_models` |
+| `GET /api/tags` | Every model in the store and in `model_roots`, minus `internal_models`, then the `remote/` models of `remote_models` |
 | `GET /api/ps` | Loaded models, their context and VRAM |
 | `POST /api/show` | Details, parameters, template, capabilities, model info, and `runnable` |
 | `POST /api/chat` | Streamed or not; tools; `think` (true, false, unset, a level); `format` (`"json"`, a schema); images; `keep_alive`; sampling; `num_ctx`; `num_gpu: 0`; `_debug_render_only` |

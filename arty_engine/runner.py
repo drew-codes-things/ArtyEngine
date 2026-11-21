@@ -364,6 +364,8 @@ class RunnerPool:
         self._stop(runner)
 
     def _make_room(self, needed_mb: int, for_name: str) -> None:
+        if needed_mb == 0:
+            return
         deadline = time.monotonic() + WAIT_FOR_IDLE_SECONDS
         while True:
             with self.state:

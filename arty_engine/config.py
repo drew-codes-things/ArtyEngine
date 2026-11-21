@@ -3,6 +3,8 @@ import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
+from .remote import check_remote_models
+
 CONFIG_ENV = "ARTY_ENGINE_CONFIG"
 AUTO_BACKEND = "auto"
 RUNTIME_BACKENDS = ("cuda", "rocm", "vulkan", "cpu")
@@ -67,9 +69,11 @@ class Config:
     allowed_origins: list = field(default_factory=list)
     gpu_backend: str = AUTO_BACKEND
     runtimes: dict = field(default_factory=dict)
+    remote_models: dict = field(default_factory=dict)
 
     def __post_init__(self):
         check_gpu_settings(self.gpu_backend, self.runtimes)
+        check_remote_models(self.remote_models)
         if not isinstance(self.thinking_leakers, list) or not all(isinstance(name, str) for name in self.thinking_leakers):
             raise ValueError("thinking_leakers must be a list of model names")
 
