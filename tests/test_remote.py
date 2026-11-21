@@ -452,3 +452,14 @@ def test_the_full_connection_id_name_also_works(starfire_like):
     running, server = starfire_like
     chat(running, "remote/starfire/0123456789ab-friend-model")
     assert server.requests[-1]["body"]["model"] == "0123456789ab/Friend-Model"
+
+
+def test_a_model_the_server_got_from_this_engine_s_remotes_is_never_listed_again():
+    answer = {"data": [
+        {"id": "0123456789ab/remote/starfire/qwen3-14b"},
+        {"id": "0123456789ab/qwen3:14b"},
+        {"id": "remote/starfire/friend-big"},
+        {"id": "fedcba987654/friend-big"}]}
+    listed = remote_module.listed_models(answer)
+    assert sorted(upstream for upstream, _available in listed.values()) == [
+        "0123456789ab/qwen3:14b", "fedcba987654/friend-big"]

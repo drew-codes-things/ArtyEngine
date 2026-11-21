@@ -201,13 +201,20 @@ def upstream_detail(error: urllib.error.HTTPError) -> tuple[str, str]:
     return str(detail or "")[:MESSAGE_LIMIT], code
 
 
+def names_a_remote_model(upstream: str) -> bool:
+    match = CONNECTION_ID.match(upstream)
+    return is_remote_name(match.group(2) if match else upstream)
+
+
 def listed_models(answer: dict) -> dict[str, tuple[str, bool]]:
     data = answer.get("data")
     items = [item for item in data if isinstance(item, dict)] if isinstance(data, list) else []
     found = {}
     for item in items:
         upstream = item.get("id")
-        if isinstance(upstream, str) and slug_of(upstream) and slug_of(upstream) not in found:
+        if not isinstance(upstream, str) or names_a_remote_model(upstream):
+            continue
+        if slug_of(upstream) and slug_of(upstream) not in found:
             found[slug_of(upstream)] = (upstream, item.get("available") is not False)
     return found
 
