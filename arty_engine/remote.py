@@ -8,6 +8,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from urllib.parse import urlsplit
@@ -17,6 +18,8 @@ log = logging.getLogger("arty-engine")
 REMOTE_PREFIX = "remote/"
 REMOTE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 SLUG_UNSAFE = re.compile(r"[^a-z0-9._-]+")
+CONNECTION_ID = re.compile(r"^([0-9a-f]{12})/(.+)$")
+SHORT_CONNECTION_ID = 6
 OPTIONAL_CAPABILITIES = ("tools", "vision", "thinking")
 DEFAULT_CAPABILITIES = ("tools",)
 REMOTE_SETTINGS = ("url", "key_env", "key_file", "ca_file", "models", "capabilities", "timeout_seconds")
@@ -70,6 +73,19 @@ def is_remote(model) -> bool:
 
 def slug_of(upstream_id: str) -> str:
     return SLUG_UNSAFE.sub("-", upstream_id.lower()).strip("-.")
+
+
+def short_names(upstream_ids: list[str]) -> dict[str, str]:
+    found = {upstream: CONNECTION_ID.match(upstream) for upstream in upstream_ids}
+    counts = Counter(slug_of(match.group(2)) for match in found.values() if match)
+    names = {}
+    for upstream, match in found.items():
+        if not match:
+            names[upstream] = slug_of(upstream)
+            continue
+        model = slug_of(match.group(2))
+        names[upstream] = model if counts[model] == 1 else f"{model}-{match.group(1)[:SHORT_CONNECTION_ID]}"
+    return names
 
 
 def check_remote_models(remotes) -> None:
@@ -351,8 +367,10 @@ class Remote:
 
     def models(self) -> list[RemoteModel]:
         by_slug: dict[str, RemoteModel] = {}
-        for upstream, available in self.entries():
-            slug = slug_of(upstream)
+        entries = self.entries()
+        names = short_names([upstream for upstream, _ in entries])
+        for upstream, available in entries:
+            slug = names[upstream]
             if slug in by_slug:
                 log.warning("%s lists %s and %s under the same name %s; using the first", self.label,
                             by_slug[slug].upstream, upstream, slug)
@@ -363,7 +381,7 @@ class Remote:
 
     def model(self, slug: str) -> RemoteModel:
         for model in self.models():
-            if model.name == f"{REMOTE_PREFIX}{self.name}/{slug}":
+            if slug in (model.name.removeprefix(f"{REMOTE_PREFIX}{self.name}/"), slug_of(model.upstream)):
                 return model
         raise RemoteError(NOT_FOUND, f"model '{REMOTE_PREFIX}{self.name}/{slug}' not found: {self.label} doesn't list it")
 

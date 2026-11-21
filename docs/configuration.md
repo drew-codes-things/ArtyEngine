@@ -94,6 +94,11 @@ errors: a refused key (401) and refused access (403) answer 502 saying so, a rat
 server asked for, a model the server doesn't have answers 404, no answer within `timeout_seconds` answers 504, and a
 key the server echoes back is replaced by `[key hidden]`.
 
+A server whose ids are `<12 hex connection id>/<model>` (starfire's app keys) gets short names: the connection id is
+left out when only one connection offers that model (`remote/starfire/qwen3-14b-q4_k_m`), and two connections offering
+the same model get the first 6 hex of their id added (`remote/starfire/same-0123ab`). The full form
+(`remote/starfire/<id>-<model>`) is always accepted too, for a name that never changes when a connection is added.
+
 Every remote model in `/api/tags` and `/api/show` carries `available`. The engine checks each server's `<url>/models`
 every 60 s (5 s timeout) and logs once when a server goes offline and once when it is back. While a server can't be
 reached its last-known models stay listed with `available: false` (a server never reached since the engine started

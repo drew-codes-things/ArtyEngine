@@ -420,3 +420,35 @@ def test_while_a_server_is_offline_the_model_list_waits_for_the_timer_not_for_it
     before = upstream.listings
     listed = tags_by_name(engine)
     assert upstream.listings == before and listed[QWEN]["available"] is False
+
+
+CONNECTION_IDS = ["0123456789ab/Friend-Model", "abcdef012345/Other:Q8", "0123456789ab/Same", "abcdef012345/Same"]
+
+
+@pytest.fixture
+def starfire_like(tmp_path):
+    server = FakeOpenAiServer(models=CONNECTION_IDS)
+    running = make_engine(tmp_path, {"starfire": {"url": server.url, "key_file": key_file(tmp_path)}})
+    yield running, server
+    running.close()
+    server.close()
+
+
+def test_connection_ids_are_left_out_of_names_when_the_model_is_unique(starfire_like):
+    running, _ = starfire_like
+    names = sorted(name for name in tags_by_name(running) if name.startswith("remote/"))
+    assert names == ["remote/starfire/friend-model", "remote/starfire/other-q8",
+                     "remote/starfire/same-012345", "remote/starfire/same-abcdef"]
+
+
+def test_a_short_name_chats_with_the_full_connection_id(starfire_like):
+    running, server = starfire_like
+    chat(running, "remote/starfire/friend-model")
+    chat(running, "remote/starfire/same-abcdef")
+    assert [sent["body"]["model"] for sent in server.requests] == ["0123456789ab/Friend-Model", "abcdef012345/Same"]
+
+
+def test_the_full_connection_id_name_also_works(starfire_like):
+    running, server = starfire_like
+    chat(running, "remote/starfire/0123456789ab-friend-model")
+    assert server.requests[-1]["body"]["model"] == "0123456789ab/Friend-Model"
