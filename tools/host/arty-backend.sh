@@ -15,6 +15,7 @@ CONTROLLER_OLDER_SETTINGS=${ARTY_CONTROLLER_OLDER_SETTINGS:-}
 ALLOWED_HOSTS=${ARTY_ENGINE_ALLOWED_HOSTS:-}
 ALLOWED_ORIGINS=${ARTY_ENGINE_ALLOWED_ORIGINS:-}
 MODEL_ROOTS=${ARTY_ENGINE_MODEL_ROOTS:-}
+REMOTE_MODELS=${ARTY_ENGINE_REMOTE_MODELS:-}
 CONTROLLER_TOOL=$HERE/controller_backend.py
 NO_CONTROLLER=none
 CONTROLLER_SETTLE_SECONDS=${ARTY_CONTROLLER_SETTLE_SECONDS:-5}
@@ -68,6 +69,7 @@ show_settings() {
   echo "engine allowed hosts: ${ALLOWED_HOSTS:-(none)}"
   echo "engine allowed origins: ${ALLOWED_ORIGINS:-(none)}"
   echo "engine model roots besides its own store: ${MODEL_ROOTS:-(none)}"
+  echo "engine remote models file: ${REMOTE_MODELS:-(none)}"
 }
 
 in_ct() {
@@ -170,7 +172,7 @@ repeated_option() {
 }
 
 install_engine_config() {
-  in_ct "python3 /srv/ai/arty-engine/src/tools/write_config.py /srv/ai/arty-engine/src/deploy/engine.json /srv/ai/arty-engine/engine.json --trainer-url '$(trainer_url)'$(repeated_option --allowed-host "$ALLOWED_HOSTS")$(repeated_option --allowed-origin "$ALLOWED_ORIGINS")$(repeated_option --model-root "$MODEL_ROOTS")"
+  in_ct "python3 /srv/ai/arty-engine/src/tools/write_config.py /srv/ai/arty-engine/src/deploy/engine.json /srv/ai/arty-engine/engine.json --trainer-url '$(trainer_url)'$(repeated_option --allowed-host "$ALLOWED_HOSTS")$(repeated_option --allowed-origin "$ALLOWED_ORIGINS")$(repeated_option --model-root "$MODEL_ROOTS")$(repeated_option --remote-models "$REMOTE_MODELS")"
 }
 
 install_engine_unit() {

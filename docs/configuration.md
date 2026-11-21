@@ -33,6 +33,7 @@
 | `allowed_origins` | `[]` | Host names of web pages besides localhost whose requests (with an `Origin` header) are served |
 | `gpu_backend` | `auto` | `cuda`, `rocm`, `vulkan` or `cpu`; `auto` picks one at start ([how](#choosing-a-gpu-backend)) |
 | `runtimes` | `{}` | Per backend: `{"runner_binary": "<path>", "library_path": ["<folder>"]}`; a backend not listed uses `runner_binary` and `library_path` above |
+| `remote_models` | `{}` | Outside OpenAI-compatible servers whose models the engine lists and forwards to ([below](#remote-models-outside-openai-compatible-servers)); never holds a key |
 
 ## The shipped config
 
@@ -52,6 +53,52 @@ otherwise `cpu`. The engine logs its choice, the reason and the card's free memo
 devices hidden: `CUDA_VISIBLE_DEVICES` empty for `cuda`, `ROCR_VISIBLE_DEVICES` empty for `rocm` (an empty
 `HIP_VISIBLE_DEVICES` hides nothing), nothing more for `vulkan`. With `cpu` every request runs that way, with both
 variables empty.
+
+## Remote models (outside OpenAI-compatible servers)
+
+`remote_models` names servers that speak the OpenAI chat API (`GET <url>/models`, `POST <url>/chat/completions`), such
+as another person's model server shared through an app key. Their models appear in `/api/tags` as
+`remote/<server>/<model>` (the server's model name in lower case, other characters turned into `-`), and `/api/chat`
+and `/api/generate` with that name are forwarded there with `Authorization: Bearer <key>`, streamed or not, with tools,
+images (when `vision` is listed) and thinking (when `thinking` is listed). They use no card memory: nothing is loaded,
+budgeted or unloaded for them, the trainer controller is not told, and they never show in `/api/ps`. An empty prompt
+answers `load` or `unload` straight away.
+
+```json
+"remote_models": {
+  "friend": {
+    "url": "https://models.example.com/v1",
+    "key_file": "/srv/ai/arty-engine/secrets/friend.key",
+    "capabilities": ["tools"],
+    "timeout_seconds": 300
+  }
+}
+```
+
+| Setting | What it does |
+|---|---|
+| `url` | The server's OpenAI-compatible address, usually ending in `/v1`; `http://` or `https://`, with no user or password in it |
+| `key_file` | A file holding only the key. It must be readable by its owner alone (`chmod 600`), or requests are refused with a message saying so |
+| `key_env` | Or the name of an environment variable holding the key (one of the two, or neither for a server without keys) |
+| `ca_file` | A PEM certificate to trust for a server with its own certificate |
+| `models` | The server's model names to list; when left out the engine asks `<url>/models` (at most once a minute, again 15 s after a failure) |
+| `capabilities` | Any of `tools`, `vision`, `thinking`; default `["tools"]`. `thinking` also sends the thinking switch the way the engine's own runtime takes it (`chat_template_kwargs`) |
+| `timeout_seconds` | How long to wait for the server to start answering, and between streamed pieces; default 300 |
+
+A `key` (or `api_key`, `token`, `secret`) in the config stops the engine at start: the key lives in its file or
+variable only. The engine reads it for each request, so a new key needs no restart, and never writes it to its log,
+`/api/tags` or `/api/show` (which names the server and the model, not the address). Only the standard sampling options
+(`temperature`, `top_p`, `presence_penalty`, `frequency_penalty`, `seed`, `stop`, `num_predict` as `max_tokens`) are
+sent; `num_ctx` and the runtime's own options are dropped, since the server decides those. Refusals become readable
+errors: a refused key (401) and refused access (403) answer 502 saying so, a rate limit answers 429 with the wait the
+server asked for, a model the server doesn't have answers 404, no answer within `timeout_seconds` answers 504, and a
+key the server echoes back is replaced by `[key hidden]`. A server that can't be reached is left out of `/api/tags`
+with a warning. Embeddings, `raw` prompts and `_debug_render_only` answer 400 or 501 for remote models, and names
+starting `remote/` are never pulled or deleted.
+
+`tools/write_config.py --remote-models <file>` puts a JSON file of these settings into the installed config;
+`tools/host/arty-backend.sh engine-config` passes `ARTY_ENGINE_REMOTE_MODELS` from `site.env` (a path inside the
+container) that way.
 
 ## Other notes
 

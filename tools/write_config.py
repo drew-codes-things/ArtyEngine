@@ -11,8 +11,11 @@ from arty_engine.config import load_config
 INSTALLED_FILE_MODE = 0o644
 
 
-def site_config(source: Path, trainer_url: str, hosts: list[str], origins: list[str], roots: list[str]) -> str:
+def site_config(source: Path, trainer_url: str, hosts: list[str], origins: list[str], roots: list[str],
+                remote_models: Path | None = None) -> str:
     values = json.loads(source.read_text())
+    if remote_models:
+        values["remote_models"] = json.loads(remote_models.read_text())
     values["trainer_url"] = trainer_url
     if hosts:
         values["allowed_hosts"] = hosts
@@ -35,6 +38,10 @@ def install(text: str, target: Path) -> None:
     os.replace(partial, target)
 
 
+def remote_names(target: Path) -> list[str]:
+    return sorted(json.loads(target.read_text()).get("remote_models") or {})
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Install the engine config with this site's trainer controller")
     parser.add_argument("source", type=Path, help="the config to start from, such as deploy/engine.json")
@@ -43,15 +50,18 @@ def main() -> int:
     parser.add_argument("--allowed-host", action="append", default=[], help="a Host name to serve besides localhost (repeat for more)")
     parser.add_argument("--allowed-origin", action="append", default=[], help="a web page host to serve besides localhost (repeat for more)")
     parser.add_argument("--model-root", action="append", default=[], help="another engine model store to read in place (repeat for more)")
+    parser.add_argument("--remote-models", type=Path, default=None,
+                        help="a JSON file of outside OpenAI-compatible servers (remote_models), with no keys in it")
     arguments = parser.parse_args()
     try:
         install(site_config(arguments.source, arguments.trainer_url, arguments.allowed_host, arguments.allowed_origin,
-                            arguments.model_root), arguments.target)
+                            arguments.model_root, arguments.remote_models), arguments.target)
     except (OSError, ValueError) as error:
         print(f"{arguments.target} not changed: {error}", file=sys.stderr)
         return 1
     print(f"{arguments.target}: trainer_url = {arguments.trainer_url or '(none)'}, "
-          f"allowed_hosts = {arguments.allowed_host}, allowed_origins = {arguments.allowed_origin}, model_roots = {arguments.model_root}")
+          f"allowed_hosts = {arguments.allowed_host}, allowed_origins = {arguments.allowed_origin}, model_roots = {arguments.model_root}, "
+          f"remote_models = {remote_names(arguments.target)}")
     return 0
 
 
