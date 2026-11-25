@@ -493,3 +493,22 @@ def test_a_short_name_stays_with_its_connection_when_another_connection_lists_th
     assert both == {"remote/starfire/qwen-big": "0123456789ab/Qwen-Big",
                     "remote/starfire/qwen-big-abcdef": "abcdef012345/Qwen-Big"}
     assert found == "0123456789ab/Qwen-Big"
+
+
+FINISH_CHUNK = b'data: {"choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}]}\n'
+USAGE_CHUNK = b'data: {"choices": [], "usage": {"total_tokens": 3}}\n'
+
+
+@pytest.mark.parametrize("lines, received", [
+    ([FINISH_CHUNK, b"\n", USAGE_CHUNK, b"\n"], 2),
+    ([FINISH_CHUNK, b"\n", USAGE_CHUNK, b"\n", b"data: [DONE]"], 2),
+    ([b'data: {"content": "h", "stop": false}\n', b"\n", b'data: {"content": "", "stop": true}'], 2),
+])
+def test_a_complete_stream_counts_as_ended(lines, received):
+    events = remote_module.EventStream(lines)
+    assert len(list(events)) == received and events.ended and events.received == received
+
+
+def test_a_stream_cut_inside_an_event_is_not_ended():
+    events = remote_module.EventStream([b'data: {"content": "h", "stop": false}\n', b"\n", b'data: {"content": "', ])
+    assert len(list(events)) == 1 and not events.ended

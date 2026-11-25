@@ -204,8 +204,7 @@ class EventStream:
 
     def __iter__(self):
         for raw_line in self.lines:
-            if not raw_line.endswith(LINE_END):
-                return
+            complete = raw_line.endswith(LINE_END)
             line = raw_line.decode("utf-8", errors="replace").strip()
             if not line.startswith("data:"):
                 continue
@@ -213,9 +212,14 @@ class EventStream:
             if data == END_OF_EVENTS:
                 self.ended = True
                 return
-            event = json.loads(data)
+            try:
+                event = json.loads(data)
+            except ValueError:
+                if complete:
+                    raise
+                return
             self.received += 1
-            self.ended = is_last_event(event)
+            self.ended = self.ended or is_last_event(event)
             yield event
 
 
