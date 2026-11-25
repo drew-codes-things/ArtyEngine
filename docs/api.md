@@ -38,6 +38,12 @@ that, the engine adds an `event: error` with a `{"type": "error", "error": {...}
 sending anything the request is asked again on a fresh runner. [parity.md](parity.md) lists what the engine covers of
 the common local-model protocols.
 
+The engine reads each line of a passed-through stream whole, up to 8 MB a line; a longer line is passed on but not
+read. An error event is held back until its newline so it can be rewritten whole, and its `error` member has to start
+in the first 64 KB of the line. Two by-design edges follow from the 8 MB limit: a stream cut right after a complete
+line over 8 MB gets no `event: error`, because that line may have been the end; and a real end over 8 MB that is
+followed by anything else, such as a keepalive, or that arrives without its newline, gets a false `event: error`.
+
 Every answer carries `Server: arty-engine/<version>`.
 
 ## Models the engine cannot read
