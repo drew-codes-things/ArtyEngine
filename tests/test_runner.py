@@ -1,6 +1,7 @@
 import logging
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -14,6 +15,8 @@ from arty_engine.runner import FOREVER, LoadError, RunnerPool, build_arguments, 
 from arty_engine.store import ModelStore
 from fake_runner import KEY_FILE_MODES, FakeLauncher
 from fake_store import add_model, build_store
+
+LOAD_WAIT_SECONDS = 10
 
 
 def make_pool(tmp_path, launcher=None, budget=11500, free_mb=12000, **settings):
@@ -487,6 +490,32 @@ def test_each_runner_gets_its_own_key_from_a_private_file_that_is_gone_after_the
     pool.release(first, FOREVER)
     pool.release(second, FOREVER)
     pool.shutdown()
+
+
+def test_stopping_the_engine_mid_load_stops_the_loading_runner_and_removes_its_key(tmp_path):
+    launcher = FakeLauncher(loading_when=lambda arguments: True)
+    pool, store, _ = make_pool(tmp_path, launcher=launcher)
+    failures = []
+    model = store.get("qwen3:14b")
+    loading = threading.Thread(target=lambda: failures.append(pytest.raises(LoadError, pool.acquire, model, None)))
+    loading.start()
+    deadline = time.monotonic() + LOAD_WAIT_SECONDS
+    while not launcher.launched and time.monotonic() < deadline:
+        time.sleep(0.05)
+    key_file = Path(launcher.launched[0].arguments[launcher.launched[0].arguments.index("--api-key-file") + 1])
+    assert key_file.exists()
+    pool.shutdown()
+    assert launcher.launched[0].poll() is not None and not key_file.exists()
+    loading.join(LOAD_WAIT_SECONDS)
+    assert not loading.is_alive() and failures
+
+
+def test_key_files_left_by_an_earlier_engine_are_removed_at_start(tmp_path):
+    keys = tmp_path / "state" / "keys"
+    keys.mkdir(parents=True)
+    (keys / "qwen3_14b.0011aabb.key").write_text("old secret\n")
+    make_pool(tmp_path)
+    assert list(keys.iterdir()) == []
 
 
 def test_model_settings_find_a_model_by_any_spelling_of_its_name(tmp_path, caplog):

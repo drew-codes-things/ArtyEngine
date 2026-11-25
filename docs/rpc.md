@@ -33,26 +33,33 @@ A request with `num_gpu: 0` never uses workers.
 
 ### Health checks
 
-Before every load that would use workers, each worker gets a TCP connect (2 seconds). Only a refused or unreachable
-worker counts as down: it is logged, and the load goes on locally (`rpc_when_down: "local"`) or fails with 503 naming
-the worker (`"fail"`), at once, never after the 600 second load timeout. A connect that times out counts as unknown,
-not down, because a bare runtime worker serves one client at a time with a backlog of one: while a model runner holds
-its connection, further connects wait and time out though the worker is fine. During a load the workers are checked
-again every 5 seconds; a worker that is refused or unreachable stops the load, which then falls back the same way.
+Before every load that would use workers, each worker no loaded model holds gets a TCP connect (2 seconds). A worker
+that refuses, can't be reached or doesn't answer in time counts as down (an idle worker answers at once, so silence
+means it is out of reach or serving another client): it is logged, and the load goes on locally
+(`rpc_when_down: "local"`) or fails with 503 naming the worker (`"fail"`), at once, never after the 600 second load
+timeout. During a load the workers are checked again every 5 seconds. There a connect that times out counts as unknown,
+not down, because a bare runtime worker serves one client at a time with a backlog of one: while the loading runner
+holds its connection, further connects wait and time out though the worker is fine. A worker that is refused or
+unreachable stops the load, and if the runner exits while loading and a worker's last check was not a clear answer,
+the load falls back the same way.
+
+A worker serves one model at a time. When a model needs a worker another loaded model holds, the holder is unloaded
+first if it is idle, as it would be to make room on the GPU. If the holder is answering a request, the new model loads
+on this machine when it fits (`rpc_when_down: "local"`), and otherwise the request is answered with 503 at once.
 
 While one of the engine's own loaded models uses a worker, that worker is never probed: its health is that model
 runner's process. If the worker goes away, the runner fails its next request and exits; the engine drops it at once,
-even with requests still running, and the next request loads the model again (locally or with the worker, whichever
-answers). Workers no loaded model uses are probed every 15 seconds for `/api/workers`.
+even with requests still running, loads the model again (locally or with the worker, whichever answers) and asks once
+more, so the request that found the dead runner still gets its answer. Workers no loaded model uses are probed every
+15 seconds for `/api/workers`.
 
 All the named workers must answer: the layout settings below name devices by position, so a load with fewer workers
 than planned would put layers in the wrong place.
 
 `GET /api/workers` lists each worker with `label`, `address`, `memory_mb`, `up` (`true`, `false`, or `null` when the
-last check timed out), `in_use` (a loaded model holds it), `checked_at`, `latency_ms`, `error` and `models` (the loaded
-models using it). `GET /api/status` has the same list next to the loaded models, the runtime release, the backend and
-the card. `/api/ps` shows `rpc_workers` for each model, and `/metrics` has
-`arty_engine_rpc_worker_up`.
+last check timed out), `in_use` (a loaded model holds it), `checked_at`, `latency_ms`, `error` and `models` (the
+loaded models using it). `GET /api/status` has the same list next to the loaded models, the runtime release, the
+backend and the card. `/api/ps` shows `rpc_workers` for each model, and `/metrics` has `arty_engine_rpc_worker_up`.
 
 ## Placing a model's layers
 

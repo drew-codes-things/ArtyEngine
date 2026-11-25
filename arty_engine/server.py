@@ -23,7 +23,7 @@ from .compat import CompatRoutes, RelayError, openai_error
 from .config import Config, load_config
 from .gguf import GgufError
 from .pull import HF_NAME_FORM, Puller, PullError
-from .runner import LoadError, Runner, RunnerPool, WorkersDown, parse_keep_alive
+from .runner import LoadError, Runner, RunnerGone, RunnerPool, WorkersDown, parse_keep_alive
 from .scrub import scrub
 from .store import ModelNotFound, ModelStore, NotOwned, iso_time, parse_name, roots_in_older_layout
 
@@ -37,6 +37,7 @@ MAX_BODY_BYTES = 256 * 1024 * 1024
 FAR_FUTURE = "2318-08-18T00:00:00Z"
 BLOBS_PREFIX = "/api/blobs/"
 NOT_IMPLEMENTED = 501
+ATTEMPTS_WHEN_A_RUNNER_DIES = 2
 LOCAL_HOSTNAMES = ("localhost", "127.0.0.1", "::1")
 
 
@@ -45,6 +46,10 @@ class ApiError(Exception):
         super().__init__(message)
         self.status = status
         self.message = message
+
+
+class RunnerUnreachable(ApiError, RunnerGone):
+    pass
 
 
 class TrainerClient:
@@ -143,6 +148,17 @@ class Engine:
         except ValueError as error:
             raise ApiError(400, str(error)) from error
 
+    def _runner_for(self, model, options: dict, cpu_only: bool, load_options: dict, prefer_loaded: bool):
+        borrowed = self.pool.borrow(model.name) if prefer_loaded else None
+        if borrowed:
+            return borrowed, 0.0
+        try:
+            return self.pool.acquire(model, options.get("num_ctx"), cpu_only, load_options)
+        except WorkersDown as error:
+            raise ApiError(503, str(error)) from error
+        except LoadError as error:
+            raise ApiError(500, str(error)) from error
+
     def with_runner(self, model, options: dict, keep_alive, work, prefer_loaded: bool = False):
         cpu_only = options.get("num_gpu") == 0
         load_options = translate.load_settings(options)
@@ -150,18 +166,16 @@ class Engine:
         if not cpu_only:
             self.trainer.busy(request_id)
         try:
-            borrowed = self.pool.borrow(model.name) if prefer_loaded else None
-            try:
-                runner, load_seconds = (borrowed, 0.0) if borrowed else self.pool.acquire(model, options.get("num_ctx"), cpu_only,
-                                                                                          load_options)
-            except WorkersDown as error:
-                raise ApiError(503, str(error)) from error
-            except LoadError as error:
-                raise ApiError(500, str(error)) from error
-            try:
-                return work(runner, load_seconds)
-            finally:
-                self.pool.release(runner, keep_alive)
+            for attempt in range(1, ATTEMPTS_WHEN_A_RUNNER_DIES + 1):
+                runner, load_seconds = self._runner_for(model, options, cpu_only, load_options, prefer_loaded)
+                try:
+                    return work(runner, load_seconds)
+                except RunnerGone:
+                    if attempt == ATTEMPTS_WHEN_A_RUNNER_DIES or not self.pool.drop_if_dead(runner):
+                        raise
+                    log.warning("asking %s again on a freshly loaded runner", model.name)
+                finally:
+                    self.pool.release(runner, keep_alive)
         finally:
             if not cpu_only:
                 self.trainer.done(request_id)
@@ -176,7 +190,7 @@ def post_json(url: str, body: dict, timeout: int = UPSTREAM_TIMEOUT_SECONDS, hea
     except urllib.error.HTTPError as error:
         raise ApiError(runner_status(error.code), scrub(upstream_message(error))) from error
     except (urllib.error.URLError, OSError) as error:
-        raise ApiError(500, f"the model runner stopped answering: {error}") from error
+        raise RunnerUnreachable(500, f"the model runner stopped answering: {error}") from error
 
 
 def runner_status(code: int) -> int:
@@ -202,7 +216,7 @@ def stream_events(url: str, body: dict, headers: dict | None = None):
     except urllib.error.HTTPError as error:
         raise ApiError(runner_status(error.code), scrub(upstream_message(error))) from error
     except (urllib.error.URLError, OSError) as error:
-        raise ApiError(500, f"the model runner stopped answering: {error}") from error
+        raise RunnerUnreachable(500, f"the model runner stopped answering: {error}") from error
     with response:
         for event in remote.server_sent_events(response):
             if event.get("error"):

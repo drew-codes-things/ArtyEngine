@@ -42,6 +42,8 @@ KEY_BYTES = 32
 PRIVATE_FILE_MODE = 0o600
 PRIVATE_FOLDER_MODE = 0o700
 LOG_DRAIN_SECONDS = 2
+DEATH_WAIT_SECONDS = 3.0
+DEATH_POLL_SECONDS = 0.1
 KV_BYTES_PER_ELEMENT = {"f32": 4.0, "f16": 2.0, "bf16": 2.0, "q8_0": 1.0625, "q5_0": 0.6875, "q5_1": 0.75,
                         "q4_0": 0.5625, "q4_1": 0.625, "iq4_nl": 0.5625}
 DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
@@ -56,7 +58,15 @@ class LoadError(RuntimeError):
     pass
 
 
+class RunnerGone(Exception):
+    pass
+
+
 class WorkersDown(LoadError):
+    pass
+
+
+class WorkersBusy(WorkersDown):
     pass
 
 
@@ -186,6 +196,7 @@ class Runner:
     process_memory: Callable[[], dict[int, int]] = gpu.memory_by_process
     api_key: str = ""
     log_thread: threading.Thread | None = None
+    key_file: Path | None = None
 
     @property
     def name(self) -> str:
@@ -287,9 +298,11 @@ class RunnerPool:
         self.memory = memory or partial(gpu.card_memory, self.backend.name)
         self.process_memory = partial(gpu.memory_by_process, self.backend.name)
         self.runners: dict[str, Runner] = {}
+        self.loading: dict[int, Runner] = {}
         self.state = threading.Condition()
         self.load_lock = threading.Lock()
         self.state_dir = Path(config.state_dir)
+        self._remove_stale_key_files()
         self._reaper = threading.Thread(target=self._reap_forever, name="keep-alive-reaper", daemon=True)
         self._watcher = threading.Thread(target=self._watch_workers_forever, name="rpc-worker-watch", daemon=True)
 
@@ -375,7 +388,13 @@ class RunnerPool:
             return runner, runner.load_seconds
 
     def _load(self, plan: LaunchPlan) -> Runner:
-        workers = self._workers_for(plan)
+        try:
+            workers = self._workers_for(plan)
+        except WorkersBusy as error:
+            if plan.settings.get("rpc_when_down") == FAIL or not self._fits_here_now(plan):
+                raise
+            log.warning("%s; loading %s on this machine instead", error, plan.model.name)
+            return self._load_as_planned(plan)
         if not workers:
             return self._load_as_planned(plan)
         try:
@@ -398,6 +417,7 @@ class RunnerPool:
         if mode == RPC_AUTO and self.full_estimate_mb(plan) <= self.config.vram_budget_mb:
             return []
         wanted = self.health.named(plan.settings.get("rpc_workers"))
+        self._free_workers_for(plan.model.name, wanted)
         answering = self._reachable_workers(wanted)
         if len(answering) == len(wanted):
             return answering
@@ -407,6 +427,46 @@ class RunnerPool:
             raise WorkersDown(f"{reason}; start the worker, or set rpc_when_down to local to load it on this machine")
         log.warning("%s; loading it on this machine instead", reason)
         return []
+
+    def _free_workers_for(self, name: str, wanted: list[rpc.RpcWorker]) -> None:
+        addresses = {worker.address for worker in wanted}
+        with self.state:
+            holders = [runner for runner in self.runners.values() if runner.alive and runner.name != name
+                       and addresses & {worker.address for worker in runner.plan.workers}]
+            busy = [runner for runner in holders if runner.in_flight]
+            if busy:
+                held = ", ".join(sorted({worker.label for runner in busy for worker in runner.plan.workers
+                                         if worker.address in addresses}))
+                raise WorkersBusy(f"rpc worker {held} is serving {', '.join(runner.name for runner in busy)}, which is answering "
+                                  f"a request, and a worker serves one model at a time; try {name} again when it is done")
+            for runner in holders:
+                runner.stopping = True
+                del self.runners[runner.name]
+        for runner in holders:
+            log.info("unloading %s to free rpc worker %s for %s", runner.name,
+                     ", ".join(worker.label for worker in runner.plan.workers), name)
+            self._stop(runner)
+
+    def _fits_here_now(self, plan: LaunchPlan) -> bool:
+        needed = self.estimate_mb(plan)
+        with self.state:
+            busy_mb = sum(runner.estimate_mb for runner in self.runners.values() if runner.in_flight)
+            idle_mb = sum(runner.estimate_mb for runner in self.runners.values() if not runner.in_flight)
+        card = self.memory()
+        return busy_mb + needed <= self.config.vram_budget_mb and (card is None or card.free_mb + idle_mb >= needed)
+
+    def drop_if_dead(self, runner: Runner) -> bool:
+        deadline = time.monotonic() + DEATH_WAIT_SECONDS
+        while runner.process.poll() is None and time.monotonic() < deadline:
+            time.sleep(DEATH_POLL_SECONDS)
+        if runner.process.poll() is None:
+            return False
+        with self.state:
+            runner.stopping = True
+            if self.runners.get(runner.name) is runner:
+                del self.runners[runner.name]
+        log.warning("the model runner for %s died with %s while answering a request", runner.name, runner.process.returncode)
+        return True
 
     def workers_status(self) -> list[dict]:
         used_by: dict[str, list[str]] = {}
@@ -562,21 +622,35 @@ class RunnerPool:
         key_file = self._write_key_file(plan.model.name, api_key)
         arguments = build_arguments(self.config, plan, port, key_file)
         log.info("loading %s (ctx %d, ~%d MiB here%s): %s", plan.model.name, plan.ctx, estimate, on_workers, " ".join(arguments[1:]))
+        runner = None
         try:
             process = self.launcher(arguments, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=environment,
                                     start_new_session=True)
             runner = Runner(plan=plan, port=port, process=process, estimate_mb=estimate, process_memory=self.process_memory,
-                            api_key=api_key, log_thread=start_scrubbed_log(process, log_path))
+                            api_key=api_key, log_thread=start_scrubbed_log(process, log_path), key_file=key_file)
+            with self.state:
+                self.loading[id(runner)] = runner
             try:
                 self._wait_until_ready(runner, log_path)
             except LoadError:
                 self._stop(runner)
                 raise
         finally:
+            if runner is not None:
+                with self.state:
+                    self.loading.pop(id(runner), None)
             key_file.unlink(missing_ok=True)
         runner.load_seconds = time.monotonic() - started
         log.info("loaded %s in %.1fs on port %d", plan.model.name, runner.load_seconds, port)
         return runner
+
+    def _remove_stale_key_files(self) -> None:
+        folder = self.state_dir / KEYS_FOLDER
+        if not folder.is_dir():
+            return
+        for path in folder.iterdir():
+            if path.is_file():
+                path.unlink(missing_ok=True)
 
     def _write_key_file(self, name: str, api_key: str) -> Path:
         folder = self.state_dir / KEYS_FOLDER
@@ -594,7 +668,7 @@ class RunnerPool:
 
     def _reachable_workers(self, workers: list[rpc.RpcWorker]) -> list[rpc.RpcWorker]:
         attached = self._attached_addresses()
-        reachable = self.health.check([worker for worker in workers if worker.address not in attached])
+        reachable = self.health.check([worker for worker in workers if worker.address not in attached], silence_is_down=True)
         return [worker for worker in workers if worker.address in attached or worker in reachable]
 
     def _silent_workers(self, runner: Runner) -> list[rpc.RpcWorker]:
@@ -607,17 +681,24 @@ class RunnerPool:
             names = ", ".join(f"{worker.label} ({worker.address})" for worker in silent)
             raise WorkersDown(f"rpc worker {names} stopped answering while {runner.name} was loading")
 
+    def _blame_unconfirmed_workers(self, runner: Runner) -> None:
+        self._check_workers_while_loading(runner)
+        unconfirmed = [worker for worker in runner.plan.workers if not self.health.answered_last(worker)]
+        if unconfirmed:
+            names = ", ".join(f"{worker.label} ({worker.address})" for worker in unconfirmed)
+            raise WorkersDown(f"the model runner for {runner.name} exited while loading, and rpc worker {names} did not answer")
+
     def _wait_until_ready(self, runner: Runner, log_path: Path) -> None:
         deadline = time.monotonic() + self.config.load_timeout_seconds
         next_worker_check = time.monotonic() + WORKER_RECHECK_SECONDS
         while time.monotonic() < deadline:
             if runner.process.poll() is not None:
-                if runner.plan.workers:
-                    self._check_workers_while_loading(runner)
                 if runner.log_thread:
                     runner.log_thread.join(timeout=LOG_DRAIN_SECONDS)
                 log.error("the model runner for %s exited with %s while loading; its last lines: %s", runner.name,
                           runner.process.returncode, scrub(last_lines(log_path)))
+                if runner.plan.workers:
+                    self._blame_unconfirmed_workers(runner)
                 raise LoadError(f"the model runner for {runner.name} exited with {runner.process.returncode} while loading; "
                                 "the engine log has the details")
             if runner.plan.workers and time.monotonic() >= next_worker_check:
@@ -687,10 +768,14 @@ class RunnerPool:
 
     def shutdown(self) -> None:
         with self.state:
-            runners = list(self.runners.values())
+            runners = list(self.runners.values()) + list(self.loading.values())
             self.runners.clear()
+            self.loading.clear()
         for runner in runners:
+            runner.stopping = True
             self._stop(runner)
+            if runner.key_file:
+                runner.key_file.unlink(missing_ok=True)
 
 
 def safe_file_name(name: str) -> str:

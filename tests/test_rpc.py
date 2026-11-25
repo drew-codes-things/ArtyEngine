@@ -11,7 +11,7 @@ import pytest
 from arty_engine import rpc
 from arty_engine.config import Config
 from arty_engine.gpu import GpuMemory
-from arty_engine.runner import FOREVER, RunnerPool, WorkersDown, build_arguments
+from arty_engine.runner import FOREVER, RunnerPool, WorkersBusy, WorkersDown, build_arguments
 from arty_engine.server import Engine, make_handler
 from arty_engine.store import ModelStore
 from engine_harness import error_of, http_json
@@ -20,6 +20,7 @@ from fake_store import build_store
 
 TOO_SMALL_BUDGET_MB = 150
 ROOMY_BUDGET_MB = 100000
+NO_ROOM_MB = 1
 BACKLOG_FILLERS = 4
 LOAD_SECONDS = 1.5
 WATCH_CYCLES = 3
@@ -275,16 +276,147 @@ def test_a_refused_port_counts_as_down():
     assert status == rpc.DOWN and detail
 
 
-def test_a_long_load_over_a_busy_bare_worker_is_not_aborted(tmp_path, busy_worker, monkeypatch):
+class BareWorkerTakenByTheLoad(FakeLauncher):
+    def __init__(self, worker: "IdleBareWorker"):
+        super().__init__(loading_when=lambda arguments: True)
+        self.worker = worker
+
+    def __call__(self, arguments, **kwargs):
+        if "--rpc" in arguments:
+            self.worker.fill_backlog()
+        return super().__call__(arguments, **kwargs)
+
+
+class IdleBareWorker:
+    def __init__(self):
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.bind(("127.0.0.1", 0))
+        self.socket.listen(1)
+        self.address = f"127.0.0.1:{self.socket.getsockname()[1]}"
+        self.held = []
+
+    def fill_backlog(self):
+        for _ in range(BACKLOG_FILLERS):
+            try:
+                self.held.append(socket.create_connection(("127.0.0.1", self.socket.getsockname()[1]), timeout=0.5))
+            except OSError:
+                break
+
+    def close(self):
+        for connection in self.held:
+            connection.close()
+        self.socket.close()
+
+
+@pytest.fixture
+def idle_bare_worker():
+    listener = IdleBareWorker()
+    yield listener
+    listener.close()
+
+
+def test_a_long_load_over_a_bare_worker_that_turns_busy_is_not_aborted(tmp_path, idle_bare_worker, monkeypatch):
     monkeypatch.setattr("arty_engine.runner.WORKER_RECHECK_SECONDS", 0.2)
-    launcher = FakeLauncher(loading_when=lambda arguments: True)
-    pool, store, _ = make_pool(tmp_path, launcher=launcher, rpc_workers=[busy_worker.address],
+    launcher = BareWorkerTakenByTheLoad(idle_bare_worker)
+    pool, store, _ = make_pool(tmp_path, launcher=launcher, rpc_workers=[idle_bare_worker.address],
                                model_settings={"qwen3:14b": {"rpc": "always", "rpc_when_down": "fail"}})
     pool.health.timeout = 0.3
     threading.Timer(LOAD_SECONDS, lambda: setattr(launcher.launched[0].server, "loading", False)).start()
     runner, _ = pool.acquire(store.get("qwen3:14b"), 1024)
     pool.release(runner, FOREVER)
-    assert len(launcher.launched) == 1 and value_after(launcher.launched[0].arguments, "--rpc") == busy_worker.address
+    assert len(launcher.launched) == 1 and value_after(launcher.launched[0].arguments, "--rpc") == idle_bare_worker.address
+    pool.shutdown()
+
+
+def test_a_worker_whose_accept_queue_is_full_is_down_before_a_load_so_the_model_loads_here(tmp_path, busy_worker):
+    pool, store, launcher = make_pool(tmp_path, budget=ROOMY_BUDGET_MB, rpc_workers=[busy_worker.address],
+                                      model_settings={"qwen3:14b": {"rpc": "always"}})
+    pool.health.timeout = 0.3
+    started = time.monotonic()
+    runner, _ = pool.acquire(store.get("qwen3:14b"), 1024)
+    pool.release(runner, FOREVER)
+    assert time.monotonic() - started < LOAD_SECONDS and "--rpc" not in launcher.launched[0].arguments
+    assert pool.workers_status()[0]["up"] is False
+    pool.shutdown()
+
+
+def test_a_worker_whose_accept_queue_is_full_fails_at_once_in_fail_mode(tmp_path, busy_worker):
+    pool, store, launcher = make_pool(tmp_path, rpc_workers=[busy_worker.address],
+                                      model_settings={"qwen3:14b": {"rpc": "always", "rpc_when_down": "fail"}})
+    pool.health.timeout = 0.3
+    started = time.monotonic()
+    with pytest.raises(WorkersDown, match="did not answer"):
+        pool.acquire(store.get("qwen3:14b"), 1024)
+    assert time.monotonic() - started < LOAD_SECONDS and launcher.launched == []
+    pool.shutdown()
+
+
+def test_a_runner_that_exits_while_loading_with_a_silent_worker_falls_back_to_this_machine(tmp_path, worker):
+    answers = iter([(rpc.UP, "")])
+    launcher = FakeLauncher()
+    pool, store, _ = make_pool(tmp_path, budget=ROOMY_BUDGET_MB, launcher=launcher, rpc_workers=[worker.address],
+                               model_settings={"qwen3:14b": {"rpc": "always"}})
+    pool.health.prober = lambda probed, timeout: next(answers, (rpc.UNKNOWN, "no answer"))
+    original = launcher.__call__
+
+    def exits_when_given_workers(arguments, **kwargs):
+        process = original(arguments, **kwargs)
+        if "--rpc" in arguments:
+            process.terminate()
+        return process
+    pool.launcher = exits_when_given_workers
+    runner, _ = pool.acquire(store.get("qwen3:14b"), 1024)
+    pool.release(runner, FOREVER)
+    assert len(launcher.launched) == 2 and "--rpc" in launcher.launched[0].arguments
+    assert "--rpc" not in launcher.launched[1].arguments and pool.loaded() == [runner]
+    pool.shutdown()
+
+
+def two_models_on_one_worker(tmp_path, worker, budget=TOO_SMALL_BUDGET_MB, when_down="local"):
+    settings = {"rpc": "always", "rpc_when_down": when_down}
+    return make_pool(tmp_path, budget=budget, rpc_workers=[{"address": worker.address, "label": "pc"}],
+                     model_settings={"qwen3:14b": settings, "untemplated:latest": settings})
+
+
+def test_a_second_model_for_a_held_worker_unloads_the_idle_holder_first(tmp_path, worker):
+    pool, store, launcher = two_models_on_one_worker(tmp_path, worker, budget=ROOMY_BUDGET_MB)
+    first, _ = pool.acquire(store.get("qwen3:14b"), 1024)
+    pool.release(first, FOREVER)
+    second, _ = pool.acquire(store.get("untemplated:latest"), 1024)
+    pool.release(second, FOREVER)
+    assert pool.loaded() == [second] and not first.alive
+    assert value_after(launcher.launched[1].arguments, "--rpc") == worker.address
+    pool.shutdown()
+
+
+def test_a_second_model_for_a_worker_whose_holder_is_busy_answers_at_once_in_fail_mode(tmp_path, worker):
+    pool, store, launcher = two_models_on_one_worker(tmp_path, worker, when_down="fail")
+    first, _ = pool.acquire(store.get("qwen3:14b"), 1024)
+    started = time.monotonic()
+    with pytest.raises(WorkersBusy, match="serves one model at a time"):
+        pool.acquire(store.get("untemplated:latest"), 1024)
+    assert time.monotonic() - started < LOAD_SECONDS and len(launcher.launched) == 1 and first.alive
+    pool.release(first, FOREVER)
+    pool.shutdown()
+
+
+def test_a_second_model_for_a_worker_whose_holder_is_busy_loads_here_when_it_fits(tmp_path, worker):
+    pool, store, launcher = two_models_on_one_worker(tmp_path, worker, budget=ROOMY_BUDGET_MB)
+    first, _ = pool.acquire(store.get("qwen3:14b"), 1024)
+    second, _ = pool.acquire(store.get("untemplated:latest"), 1024)
+    assert "--rpc" not in launcher.launched[1].arguments and first.alive and second.alive
+    pool.release(first, FOREVER)
+    pool.release(second, FOREVER)
+    pool.shutdown()
+
+
+def test_a_second_model_for_a_worker_whose_holder_is_busy_answers_at_once_when_it_does_not_fit_here(tmp_path, worker):
+    pool, store, launcher = two_models_on_one_worker(tmp_path, worker, budget=NO_ROOM_MB)
+    first, _ = pool.acquire(store.get("qwen3:14b"), 1024)
+    with pytest.raises(WorkersBusy):
+        pool.acquire(store.get("untemplated:latest"), 1024)
+    assert len(launcher.launched) == 1
+    pool.release(first, FOREVER)
     pool.shutdown()
 
 
@@ -320,7 +452,8 @@ def test_a_runner_that_dies_with_its_worker_is_dropped_at_once_even_mid_request(
 def test_a_worker_shows_in_use_and_up_as_soon_as_a_model_loads_on_it(tmp_path, worker):
     pool, store, _ = make_pool(tmp_path, rpc_workers=[{"address": worker.address, "label": "pc"}],
                                model_settings={"qwen3:14b": {"rpc": "always"}})
-    pool.health.prober = lambda probed, timeout: (rpc.UNKNOWN, "no answer")
+    answers = iter([(rpc.UP, "")])
+    pool.health.prober = lambda probed, timeout: next(answers, (rpc.UNKNOWN, "no answer"))
     runner, _ = pool.acquire(store.get("qwen3:14b"), 1024)
     pool.release(runner, FOREVER)
     described = pool.workers_status()[0]
@@ -380,6 +513,25 @@ def test_the_status_api_shows_workers_and_the_models_on_them(tmp_path, worker):
         status = http_json(f"{running.url}/api/status")
         assert status["workers"] == workers and status["loaded"][0]["rpc_workers"] == [{"label": "pc-1060", "address": worker.address}]
         assert http_json(f"{running.url}/api/ps")["models"][0]["rpc_workers"][0]["label"] == "pc-1060"
+    finally:
+        running.close()
+
+
+def test_a_request_that_finds_its_runner_dead_is_answered_by_a_fresh_runner(tmp_path):
+    running = ApiEngine(tmp_path)
+    launched = running.launcher.launched
+
+    def dies_on_the_first_runner(body):
+        if len(launched) == 1:
+            launched[0].returncode = -6
+            raise ConnectionAbortedError("the rpc worker went away")
+        return CHAT_REPLY
+
+    running.launcher.replies["/v1/chat/completions"] = dies_on_the_first_runner
+    try:
+        reply = http_json(f"{running.url}/api/chat", {"model": "qwen3:14b", "messages": [{"role": "user", "content": "hi"}],
+                                                      "stream": False, "options": {"num_ctx": 1024}})
+        assert reply["message"]["content"] == "hi" and len(launched) == 2
     finally:
         running.close()
 

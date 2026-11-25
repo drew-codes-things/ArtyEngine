@@ -8,7 +8,7 @@ from http import HTTPStatus
 from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 from . import remote, translate
-from .runner import is_reranker
+from .runner import RunnerGone, is_reranker
 from .scrub import scrub
 
 OPENAI_PREFIX = "/v1/"
@@ -54,6 +54,10 @@ class RelayError(Exception):
         self.message = message
 
 
+class RelayUnreachable(RelayError, RunnerGone):
+    pass
+
+
 def openai_error(status: int, message: str) -> dict:
     return {"error": {"message": message, "type": ERROR_TYPES.get(status, "server_error"), "code": status}}
 
@@ -79,7 +83,7 @@ def runner_call(runner, path: str, body=None, method: str | None = None):
         raise RelayError(error.code if error.code < 500 or error.code == HTTPStatus.NOT_IMPLEMENTED else 500,
                          scrub(runner_message(error))) from error
     except (urllib.error.URLError, OSError) as error:
-        raise RelayError(500, f"the model runner stopped answering: {error}") from error
+        raise RelayUnreachable(500, f"the model runner stopped answering: {error}") from error
 
 
 def runner_json(runner, path: str, body=None, method: str | None = None):

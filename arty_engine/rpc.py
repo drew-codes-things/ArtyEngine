@@ -104,15 +104,22 @@ class WorkerHealth:
             return list(self.workers)
         return [worker for worker in self.workers if worker.label in names or worker.address in names]
 
-    def check(self, workers: list[RpcWorker]) -> list[RpcWorker]:
+    def check(self, workers: list[RpcWorker], silence_is_down: bool = False) -> list[RpcWorker]:
         reachable = []
         for worker in workers:
             started = time.monotonic()
             status, detail = self.prober(worker, self.timeout)
+            if status == UNKNOWN and silence_is_down:
+                status, detail = DOWN, f"{detail}; no model of this engine holds it, and an idle worker answers at once"
             self._record(worker, status, detail, (time.monotonic() - started) * 1000)
             if status != DOWN:
                 reachable.append(worker)
         return reachable
+
+    def answered_last(self, worker: RpcWorker) -> bool:
+        with self.lock:
+            state = self.states.get(worker.address)
+            return bool(state and state.up)
 
     def _record(self, worker: RpcWorker, status: str, detail: str, latency_ms: float) -> None:
         with self.lock:
