@@ -1,5 +1,4 @@
 import argparse
-import fnmatch
 import hashlib
 import re
 import shutil
@@ -20,7 +19,6 @@ REPOSITORY = Path(__file__).resolve().parents[1]
 NOTICES = REPOSITORY / "THIRD_PARTY_NOTICES"
 REQUIRED_COPYRIGHT = "Copyright (c) 2023-2026 The ggml authors"
 LICENSE_NAMES = ("LICENSE", "LICENSE.txt", "LICENSE.md")
-LIBRARY_PATTERNS = ("*.so", "*.so.*", "*.dll", "*.dylib")
 SERVER_ENDING = "-server"
 WORKER_ENDING = "rpc-server"
 FIXED_TIME = (1980, 1, 1, 0, 0, 0)
@@ -34,6 +32,14 @@ UPSTREAM_LIBRARY_PREFIX = "lib" + "ll" + "ama"
 ENGINE_LIBRARY_PREFIX = "libarty-runtime"
 BACKEND_MODULE = re.compile(r"^libggml-(?!base\.)[A-Za-z0-9_-]+\.so$")
 PATCHELF_TIMEOUT_SECONDS = 60
+PE_MAGIC = b"MZ"
+UPSTREAM_WINDOWS_PREFIX = "ll" + "ama"
+ENGINE_WINDOWS_PREFIX = "arty-runtime"
+WINDOWS_BACKEND_MODULE = re.compile(r"^ggml-(?!base\.)[A-Za-z0-9_-]+\.dll$", re.IGNORECASE)
+OPENMP_LIBRARY = re.compile(r"^libomp[0-9]*\.(dll|so(\..*)?)$", re.IGNORECASE)
+OPENMP_LICENCE_PATTERN = "LICENSE-*OpenMP*"
+NOTICES_MIT_TEXT = re.compile(r"^MIT License\n.*?^SOFTWARE\.\n", re.MULTILINE | re.DOTALL)
+PE_TOOL_HINT = "install it with: pip install 'arty-engine[packaging]' (or pip install lief)"
 
 
 class PackagingError(RuntimeError):
@@ -103,17 +109,37 @@ def is_worker_name(name: str) -> bool:
     return name.endswith(WORKER_ENDING)
 
 
-def license_file(folder: Path) -> Path:
+def license_file(folder: Path) -> Path | None:
     for name in LICENSE_NAMES:
         found = sorted(folder.rglob(name))
         if found:
             return found[0]
-    raise PackagingError("the archive has no LICENSE file; the runtime's MIT notice must ship with it")
+    return None
 
 
-def libraries(folder: Path) -> list[Path]:
-    return sorted({path for path in folder.iterdir() if path.is_file()
-                   and any(fnmatch.fnmatch(path.name, pattern) for pattern in LIBRARY_PATTERNS)})
+def required_license_file(folder: Path) -> Path:
+    found = license_file(folder)
+    if found is None:
+        raise PackagingError("the archive has no LICENSE file; the runtime's MIT notice must ship with it")
+    return found
+
+
+def licence_from_notices(staging: Path) -> Path:
+    found = NOTICES_MIT_TEXT.search(NOTICES.read_text())
+    if not found:
+        raise PackagingError("the archive has no LICENSE file and THIRD_PARTY_NOTICES holds no MIT License text to ship instead")
+    target = staging / "LICENSE"
+    target.write_text(found.group(0))
+    return target
+
+
+def openmp_licences(folder: Path, files: list[tuple[Path, str, int]]) -> list[tuple[Path, str, int]]:
+    if not any(OPENMP_LIBRARY.match(name) for _, name, _ in files):
+        return []
+    found = sorted(path for path in folder.rglob(OPENMP_LICENCE_PATTERN) if path.is_file())
+    if not found:
+        raise PackagingError("the build ships the OpenMP runtime without its licence (a LICENSE-*OpenMP* file)")
+    return [(path, path.name, PLAIN_MODE) for path in found]
 
 
 def is_elf(path: Path) -> bool:
@@ -187,9 +213,99 @@ def linux_files(patchelf: str, server: Path, worker: Path, staging: Path) -> lis
     return files
 
 
-def windows_files(server: Path, worker: Path) -> list[tuple[Path, str, int]]:
-    files = [(server, SERVER_BINARY + WINDOWS_SUFFIX, EXECUTABLE_MODE), (worker, WORKER_BINARY + WINDOWS_SUFFIX, EXECUTABLE_MODE)]
-    return files + [(library, library.name, EXECUTABLE_MODE) for library in libraries(server.parent)]
+def load_pe_tool():
+    try:
+        import lief
+    except ImportError as error:
+        raise PackagingError(f"lief is needed to give the Windows libraries their ArtyEngine names; {PE_TOOL_HINT}") from error
+    return lief
+
+
+def is_pe(path: Path) -> bool:
+    with open(path, "rb") as handle:
+        return handle.read(len(PE_MAGIC)) == PE_MAGIC
+
+
+def windows_shipped_name(name: str) -> str:
+    if name.lower().startswith(UPSTREAM_WINDOWS_PREFIX):
+        return ENGINE_WINDOWS_PREFIX + name[len(UPSTREAM_WINDOWS_PREFIX):]
+    return name
+
+
+def parsed_pe(pe_tool, path: Path):
+    binary = pe_tool.PE.parse(str(path))
+    if binary is None:
+        raise PackagingError(f"{path.name} is not a Windows (PE) binary lief can read")
+    return binary
+
+
+def pe_imports(pe_tool, path: Path) -> list[str]:
+    binary = parsed_pe(pe_tool, path)
+    return [entry.name for entry in binary.imports] + [entry.name for entry in binary.delay_imports]
+
+
+def imported_libraries(pe_tool, folder: Path, roots: list[Path]) -> dict[str, Path]:
+    present = {path.name.lower(): path for path in folder.iterdir() if path.is_file()}
+    shipped: dict[str, Path] = {}
+    waiting = list(roots)
+    while waiting:
+        for name in pe_imports(pe_tool, waiting.pop()):
+            candidate = present.get(name.lower())
+            if candidate is None or candidate.name in shipped:
+                continue
+            shipped[candidate.name] = candidate
+            waiting.append(candidate)
+    return shipped
+
+
+def rename_pe_entries(binary, renames: dict[str, str], own_name: str) -> bool:
+    lowered = {old.lower(): new for old, new in renames.items()}
+    changed = False
+    for entry in [*binary.imports, *binary.delay_imports]:
+        new_name = lowered.get(entry.name.lower())
+        if new_name:
+            entry.name = new_name
+            changed = True
+    if own_name in renames.values() and binary.has_exports:
+        binary.get_export().name = own_name
+        changed = True
+    return changed
+
+
+def renamed_pe(pe_tool, source: Path, staging: Path, name: str, renames: dict[str, str]) -> Path:
+    target = staging / name
+    binary = parsed_pe(pe_tool, source)
+    if not rename_pe_entries(binary, renames, name):
+        shutil.copyfile(source, target)
+        return target
+    config = pe_tool.PE.Builder.config_t()
+    config.imports = True
+    config.exports = binary.has_exports
+    binary.write(str(target), config)
+    left = {old.lower() for old in renames} & {imported.lower() for imported in pe_imports(pe_tool, target)}
+    if left:
+        raise PackagingError(f"{name} still imports {', '.join(sorted(left))} after renaming")
+    return target
+
+
+def windows_files(pe_tool, server: Path, worker: Path, staging: Path) -> list[tuple[Path, str, int]]:
+    for binary in (server, worker):
+        if not is_pe(binary):
+            raise PackagingError(f"{binary.name} is not a Windows (PE) binary")
+    folder = server.parent
+    modules = sorted(path for path in folder.iterdir() if path.is_file() and WINDOWS_BACKEND_MODULE.match(path.name))
+    linked = imported_libraries(pe_tool, folder, [server, worker, *modules])
+    for module in modules:
+        linked.setdefault(module.name, module)
+    renames = {name: windows_shipped_name(name) for name in linked if windows_shipped_name(name) != name}
+    files = [(renamed_pe(pe_tool, server, staging, SERVER_BINARY + WINDOWS_SUFFIX, renames), SERVER_BINARY + WINDOWS_SUFFIX,
+              EXECUTABLE_MODE),
+             (renamed_pe(pe_tool, worker, staging, WORKER_BINARY + WINDOWS_SUFFIX, renames), WORKER_BINARY + WINDOWS_SUFFIX,
+              EXECUTABLE_MODE)]
+    for name, source in sorted(linked.items()):
+        shipped = renames.get(name, name)
+        files.append((renamed_pe(pe_tool, source, staging, shipped, renames), shipped, EXECUTABLE_MODE))
+    return files
 
 
 def add_file(bundle: zipfile.ZipFile, source: Path, name: str, mode: int) -> None:
@@ -206,9 +322,10 @@ def check_licence(licence: Path) -> None:
         raise PackagingError(f"the runtime licence and THIRD_PARTY_NOTICES must both carry {REQUIRED_COPYRIGHT!r}")
 
 
-def write_bundle(target: Path, files: list[tuple[Path, str, int]], licence: Path) -> None:
+def write_bundle(target: Path, files: list[tuple[Path, str, int]], licence: Path,
+                 more_licences: list[tuple[Path, str, int]] = ()) -> None:
     with zipfile.ZipFile(target, "w") as bundle:
-        for source, name, mode in files:
+        for source, name, mode in [*files, *more_licences]:
             add_file(bundle, source, name, mode)
         add_file(bundle, licence, "LICENSE", PLAIN_MODE)
         add_file(bundle, NOTICES, "THIRD_PARTY_NOTICES", PLAIN_MODE)
@@ -235,16 +352,18 @@ def package(platform: str, source: Path, sha256: str, out: Path, server_name: st
         extract(source, unpacked)
         server = one_binary(unpacked, server_name, is_server_name, "server")
         worker = one_binary(unpacked, worker_name, is_worker_name, "worker")
-        licence = license_file(unpacked)
-        check_licence(licence)
+        staging = Path(scratch) / "staging"
+        staging.mkdir()
         if server.name.endswith(WINDOWS_SUFFIX):
-            files = windows_files(server, worker)
+            licence = license_file(unpacked) or licence_from_notices(staging)
+            check_licence(licence)
+            files = windows_files(load_pe_tool(), server, worker, staging)
         else:
-            staging = Path(scratch) / "staging"
-            staging.mkdir()
+            licence = required_license_file(unpacked)
+            check_licence(licence)
             files = linux_files(patchelf or find_patchelf(), server, worker, staging)
         partial = target.with_name(target.name + ".partial")
-        write_bundle(partial, files, licence)
+        write_bundle(partial, files, licence, openmp_licences(unpacked, files))
         partial.replace(target)
     record_checksum(out, target.name, sha256_of(target))
     return target

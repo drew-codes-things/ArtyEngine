@@ -8,6 +8,9 @@ version = "0.1.0"
 description = "Arty's own model engine"
 requires-python = ">=3.10"
 
+[project.optional-dependencies]
+packaging = ["lief>=1.0"]
+
 [project.scripts]
 arty-engine = "arty_engine.cli:entry"
 

@@ -43,7 +43,11 @@ works as it is.
 the binaries, adds the licence files and writes `SHA256SUMS`); publishing them is a separate, manual step. For Linux
 builds it ships only the libraries the two binaries load (and the backend modules the runtime opens by name, such as
 `libggml-cpu-*.so`), gives the runtime's own libraries `libarty-runtime*` names and rewrites the links to them with
-`patchelf` (`apt install patchelf`, or `--patchelf <path>`). Windows builds keep their DLLs as they are.
+`patchelf` (`apt install patchelf`, or `--patchelf <path>`). For Windows builds it ships only the DLLs the two `.exe`
+files import (and the backend modules), renames the runtime's own DLLs to `arty-runtime*.dll` and rewrites the import
+tables with [lief](https://lief.re) (`pip install 'arty-engine[packaging]'`, needed only to package Windows builds). A
+Windows archive without a LICENSE file gets the MIT text from THIRD_PARTY_NOTICES, and the OpenMP runtime ships with
+its own licence file.
 
 Then write the config the service reads, starting from the shipped one:
 

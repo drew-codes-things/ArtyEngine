@@ -88,7 +88,8 @@ with `amd-smi`, `rocm-smi` or the amdgpu driver's own files on an AMD card ([unt
 
 - **Linux with an NVIDIA GPU**, with `nvidia-smi` on the `PATH`. Built and tested on an RTX 3060 (12 GB) in a Debian 13
   container. AMD cards have a code path that has never run on a real AMD card; see [AMD GPUs (untested)](#amd-gpus-untested).
-- **Python 3.10 or newer.** No packages to install. The tests need `pytest`.
+- **Python 3.10 or newer.** No packages to install. The tests need `pytest`; packaging Windows runtime builds needs
+  `lief` (`pip install 'arty-engine[packaging]'`).
 - **The model runtime**, a prebuilt release for your GPU (see [Install](#install)). If the CUDA runtime libraries it
   needs (`libcudart`, `libcublas`) are not on the system, put them in a folder and list it in `library_path`.
 

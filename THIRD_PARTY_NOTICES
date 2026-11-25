@@ -31,6 +31,11 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 
+The OpenMP runtime
+
+The Windows runtime zips include the LLVM OpenMP runtime (libomp.dll), which the runtime's CPU code loads. It is
+distributed under the Apache License v2.0 with LLVM Exceptions; its licence ships next to it as LICENSE-LLVM-OpenMP.
+
 The CUDA runtime libraries
 
 The CUDA build of the runtime loads NVIDIA's CUDA runtime libraries. They are NVIDIA's, are not part of

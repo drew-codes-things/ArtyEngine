@@ -1,4 +1,5 @@
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -13,6 +14,7 @@ import pytest
 
 from arty_engine import runtime
 from arty_engine.runtime import EARLIER_WORKER_NAMES, SERVER, WORKER, ReleaseInfo, RuntimeInstallError, install, locate_binary
+from pe_fixture import write_pe
 from test_no_runtime_names import UNWANTED_NAMES
 
 EARLIER_WORKER = EARLIER_WORKER_NAMES[0]
@@ -24,6 +26,9 @@ UNUSED_LIBRARY = f"lib{UPSTREAM_WORD}-bench-impl.so"
 PATCHELF = os.environ.get("PATCHELF") or shutil.which("patchelf") or ""
 C_COMPILER = shutil.which("gcc") or shutil.which("cc") or ""
 needs_elf_tools = pytest.mark.skipif(not (PATCHELF and C_COMPILER), reason="needs a C compiler and patchelf")
+needs_pe_tool = pytest.mark.skipif(importlib.util.find_spec("lief") is None, reason="needs lief")
+CORE_WORD = "gg" + "ml"
+OPENMP_LICENCE = "LICENSE-LLVM-OpenMP"
 REPOSITORY = Path(__file__).resolve().parents[1]
 PACKAGER = REPOSITORY / "tools" / "package_runtime.py"
 INFO = ReleaseInfo(release="runtime-b1", platforms=("linux-x64", "windows-x64"), sha256={})
@@ -333,14 +338,82 @@ def test_the_packager_asks_for_the_name_when_two_servers_could_be_meant(tmp_path
     assert ran.stdout == "other 42\n"
 
 
-def test_windows_builds_keep_their_exe_suffix(tmp_path):
-    archive = upstream_archive(tmp_path, "zip", extra={"tool-server.exe": "win server", EARLIER_WORKER + ".exe": "win worker",
-                                                       "tool.dll": "dll"})
+def windows_archive(tmp_path: Path, openmp_licence: bool = True) -> Path:
+    folder = tmp_path / "upstream-win"
+    folder.mkdir()
+    kernel = "KERNEL32.dll"
+    graph = {
+        f"{UPSTREAM_WORD}-server.exe": [f"{UPSTREAM_WORD}-server-impl.dll", kernel],
+        f"{UPSTREAM_WORD}-server-impl.dll": [f"{UPSTREAM_WORD}-common.dll", f"{UPSTREAM_WORD}.dll", "mtmd.dll", f"{CORE_WORD}.dll"],
+        f"{UPSTREAM_WORD}-common.dll": [f"{UPSTREAM_WORD}.dll", f"{CORE_WORD}-base.dll"],
+        f"{UPSTREAM_WORD}.dll": [f"{CORE_WORD}.dll", f"{CORE_WORD}-base.dll"],
+        "mtmd.dll": [f"{UPSTREAM_WORD}.dll"],
+        f"{CORE_WORD}.dll": [f"{CORE_WORD}-base.dll"],
+        f"{CORE_WORD}-base.dll": ["libomp.dll"],
+        "libomp.dll": [kernel],
+        f"{CORE_WORD}-cpu-x64.dll": [f"{CORE_WORD}-base.dll"],
+        f"{CORE_WORD}-rpc.dll": [f"{CORE_WORD}-base.dll"],
+        f"{EARLIER_WORKER}.exe": [f"{CORE_WORD}.dll", kernel],
+        f"{UPSTREAM_WORD}-cli.exe": [f"{UPSTREAM_WORD}-cli-impl.dll"],
+        f"{UPSTREAM_WORD}-cli-impl.dll": [f"{UPSTREAM_WORD}.dll"],
+        f"{UPSTREAM_WORD}-bench-impl.dll": [f"{UPSTREAM_WORD}.dll"],
+        f"{UPSTREAM_WORD}-quantize-impl.dll": [f"{UPSTREAM_WORD}.dll"],
+        f"{UPSTREAM_WORD}-perplexity-impl.dll": [f"{UPSTREAM_WORD}.dll"],
+    }
+    for name, imports in graph.items():
+        write_pe(folder / name, imports, dll=name.endswith(".dll"))
+    if openmp_licence:
+        (folder / OPENMP_LICENCE).write_text("Apache License v2.0 with LLVM Exceptions\n")
+    archive = tmp_path / "upstream-win.zip"
+    with zipfile.ZipFile(archive, "w") as bundle:
+        for path in sorted(folder.iterdir()):
+            bundle.write(path, path.name)
+    return archive
+
+
+def shipped_imports(bundle: zipfile.ZipFile, folder: Path, name: str) -> list[str]:
+    import lief
+    path = folder / name
+    path.write_bytes(bundle.read(name))
+    binary = lief.PE.parse(str(path))
+    return [entry.name for entry in binary.imports]
+
+
+@needs_pe_tool
+def test_a_windows_build_ships_only_imported_libraries_under_engine_names(tmp_path):
+    finished = package(tmp_path, windows_archive(tmp_path), "windows-x64")
+    assert finished.returncode == 0, finished.stderr
+    shipped = tmp_path / "shipped"
+    shipped.mkdir()
+    with zipfile.ZipFile(tmp_path / "out" / "arty-runtime-windows-x64.zip") as bundle:
+        names = sorted(bundle.namelist())
+        assert names == sorted(["arty-runtime-server.exe", "arty-runtime-worker.exe", "arty-runtime-server-impl.dll",
+                                "arty-runtime-common.dll", "arty-runtime.dll", "mtmd.dll", f"{CORE_WORD}.dll",
+                                f"{CORE_WORD}-base.dll", f"{CORE_WORD}-cpu-x64.dll", f"{CORE_WORD}-rpc.dll", "libomp.dll",
+                                "LICENSE", OPENMP_LICENCE, "THIRD_PARTY_NOTICES"])
+        assert not [name for name in names if UPSTREAM_WORD in name.lower()]
+        assert shipped_imports(bundle, shipped, "arty-runtime-server.exe") == ["arty-runtime-server-impl.dll", "KERNEL32.dll"]
+        assert shipped_imports(bundle, shipped, "arty-runtime-server-impl.dll") == ["arty-runtime-common.dll", "arty-runtime.dll",
+                                                                           "mtmd.dll", f"{CORE_WORD}.dll"]
+        assert shipped_imports(bundle, shipped, "mtmd.dll") == ["arty-runtime.dll"]
+        binaries = [entry for entry in names if entry.endswith((".exe", ".dll"))]
+        every_import = [name for entry in binaries for name in shipped_imports(bundle, shipped, entry)]
+        assert not [name for name in every_import if UPSTREAM_WORD in name.lower()]
+        licence = bundle.read("LICENSE").decode()
+        assert licence.startswith("MIT License") and "The ggml authors" in licence and licence.rstrip().endswith("SOFTWARE.")
+
+
+@needs_pe_tool
+def test_a_windows_build_that_ships_openmp_needs_its_licence(tmp_path):
+    finished = package(tmp_path, windows_archive(tmp_path, openmp_licence=False), "windows-x64")
+    assert finished.returncode == 1 and "OpenMP" in finished.stderr
+
+
+def test_the_packager_refuses_a_windows_build_that_is_not_pe(tmp_path):
+    archive = upstream_archive(tmp_path, "zip", extra={"tool-server.exe": "win server", EARLIER_WORKER + ".exe": "win worker"})
     finished = package(tmp_path, archive, "windows-x64", "", "--server-binary", "tool-server.exe", "--worker-binary",
                        EARLIER_WORKER + ".exe")
-    assert finished.returncode == 0, finished.stderr
-    with zipfile.ZipFile(tmp_path / "out" / "arty-runtime-windows-x64.zip") as bundle:
-        assert bundle.read("arty-runtime-server.exe") == b"win server" and "tool.dll" in bundle.namelist()
+    assert finished.returncode == 1 and "not a Windows (PE) binary" in finished.stderr
 
 
 def test_the_runtime_command_finds_binaries(tmp_path):
