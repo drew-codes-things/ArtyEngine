@@ -19,7 +19,7 @@ why. [api.md](api.md) has the details of each route.
 | `/api/create` with a recipe (`FROM`, `PARAMETER`, `TEMPLATE`, `SYSTEM`, `LICENSE`, `ADAPTER`, `MESSAGE`), from a model, a blob or files | Yes |
 | `/api/copy` | Yes |
 | `HEAD`/`POST /api/blobs/<digest>` | Yes |
-| Options that shape a load: `num_ctx`, `num_gpu` (0 for CPU, above 0 for that many layers), `main_gpu`, `num_thread`, `num_batch`, `use_mmap`, `use_mlock`, `numa`, `low_vram` | Yes |
+| Options that shape a load: `num_ctx`, `num_gpu` (0 for CPU, above 0 for that many layers), `main_gpu`, `num_thread`, `num_batch`, `use_mmap`, `use_mlock`, `numa`, `low_vram` | Yes; `num_gpu` up to 1024 and `main_gpu` up to 63, `num_thread` is cut to the CPU count and `num_batch` to the context |
 | Sampling options: `temperature`, `top_k`, `top_p`, `min_p`, `typical_p`, `repeat_penalty`, `repeat_last_n`, `presence_penalty`, `frequency_penalty`, `seed`, `stop`, `mirostat` and its two settings, `num_predict`, `num_keep` | Yes |
 | `/api/push` | No: there is no registry to push to (501) |
 | `/api/create` `quantize` | No: pull a quantized build instead (501) |

@@ -1,4 +1,5 @@
 import json
+import os
 import re
 
 import pytest
@@ -399,3 +400,21 @@ def test_the_recorded_length_is_what_reaches_thinking():
 def test_caught_leaks_are_grouped_by_rule():
     splitter = splitter_after("x</think>a" + " <think>b</think>" * 1000, "stop")
     assert splitter.leaks_by_rule() == {translate.BEFORE_FIRST_CLOSE: (1, 1), translate.TAGGED_BLOCK: (1000, 1000)}
+
+
+def test_requested_threads_are_cut_to_this_machine_s_cpu_count():
+    assert translate.load_settings({"num_thread": 1_000_000})["threads"] == (os.cpu_count() or 1)
+    assert translate.load_settings({"num_thread": 1})["threads"] == 1
+
+
+@pytest.mark.parametrize("options, problem", [
+    ({"main_gpu": translate.MOST_GPU_INDEX + 1}, "main_gpu must be between 0 and"),
+    ({"num_gpu": translate.MOST_GPU_LAYERS + 1}, "num_gpu must be between -1 and"),
+])
+def test_out_of_range_gpu_options_are_refused(options, problem):
+    with pytest.raises(translate.RequestError, match=problem):
+        translate.load_settings(options)
+
+
+def test_the_usual_all_layers_request_still_works():
+    assert translate.load_settings({"num_gpu": 999})["gpu_layers"] == 999

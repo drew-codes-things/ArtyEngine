@@ -3,6 +3,7 @@ import logging
 import math
 import os
 import re
+import secrets
 import socket
 import subprocess
 import threading
@@ -15,6 +16,7 @@ from functools import partial
 from pathlib import Path
 
 from . import gpu, rpc
+from .scrub import scrub, start_scrubbed_log
 from .backend import Backend, resolve_backend
 from .config import Config, SpeculativeSettings
 from .gguf import whole_number
@@ -33,9 +35,13 @@ REAPER_INTERVAL_SECONDS = 1.0
 WAIT_FOR_IDLE_SECONDS = 600
 WORKER_RECHECK_SECONDS = 5.0
 WORKER_WATCH_SECONDS = 15.0
-DOWN_CHECKS_BEFORE_UNLOAD = 2
 RANK_POOLING = 4
 SLOTS_FOLDER = "slots"
+KEYS_FOLDER = "keys"
+KEY_BYTES = 32
+PRIVATE_FILE_MODE = 0o600
+PRIVATE_FOLDER_MODE = 0o700
+LOG_DRAIN_SECONDS = 2
 KV_BYTES_PER_ELEMENT = {"f32": 4.0, "f16": 2.0, "bf16": 2.0, "q8_0": 1.0625, "q5_0": 0.6875, "q5_1": 0.75,
                         "q4_0": 0.5625, "q4_1": 0.625, "iq4_nl": 0.5625}
 DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
@@ -152,10 +158,10 @@ class LaunchPlan:
         return {**run_settings(self.settings), **self.load_options}
 
 
-def warn_about_unknown_leakers(leaker_names: set[str], store: ModelStore) -> None:
-    for name in sorted(leaker_names - set(store.names())):
-        log.warning("%s in thinking_leakers matches no installed model, so it has no effect until a model of that name "
-                    "is installed", name)
+def warn_about_unknown_names(names: set[str], store: ModelStore, setting: str) -> None:
+    for name in sorted(names - set(store.names())):
+        log.warning("%s in %s matches no installed model, so it has no effect until a model of that name "
+                    "is installed", name, setting)
 
 
 def may_leak_thinking(model: Model, template_source: Model, leaker_names: set[str]) -> bool:
@@ -178,10 +184,19 @@ class Runner:
     stopping: bool = False
     unload_requested: bool = False
     process_memory: Callable[[], dict[int, int]] = gpu.memory_by_process
+    api_key: str = ""
+    log_thread: threading.Thread | None = None
 
     @property
     def name(self) -> str:
         return self.plan.model.name
+
+    @property
+    def headers(self) -> dict:
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+        return headers
 
     @property
     def base_url(self) -> str:
@@ -213,12 +228,14 @@ def placement_arguments(plan: LaunchPlan) -> list[str]:
     return arguments + layout_arguments(layout)
 
 
-def build_arguments(config: Config, plan: LaunchPlan, port: int) -> list[str]:
+def build_arguments(config: Config, plan: LaunchPlan, port: int, key_file: Path | None = None) -> list[str]:
     model = plan.model
     run = plan.run
     arguments = [config.runner_binary, "--model", str(model.model_path), "--host", "127.0.0.1", "--port", str(port),
                  "--no-webui", "--offline", "-c", str(plan.ctx), "-np", str(run.get("parallel", config.parallel)), "-a", model.name,
                  "--fit-target", str(config.fit_target_mb), "--no-warmup", "--metrics"]
+    if key_file:
+        arguments += ["--api-key-file", str(key_file)]
     if plan.slot_dir:
         arguments += ["--slot-save-path", str(plan.slot_dir)]
     arguments += placement_arguments(plan) + run_arguments(run)
@@ -264,7 +281,8 @@ class RunnerPool:
         self.health = rpc.WorkerHealth(config.workers, prober=prober)
         self.store = store
         self.leaker_names = {parse_name(name).display for name in config.thinking_leakers}
-        warn_about_unknown_leakers(self.leaker_names, store)
+        warn_about_unknown_names(self.leaker_names, store, "thinking_leakers")
+        warn_about_unknown_names({parse_name(name).display for name in config.model_settings}, store, "model_settings")
         self.launcher = launcher
         self.memory = memory or partial(gpu.card_memory, self.backend.name)
         self.process_memory = partial(gpu.memory_by_process, self.backend.name)
@@ -289,8 +307,11 @@ class RunnerPool:
             if model.context_length:
                 ctx = min(ctx, model.context_length)
         speculative = SpeculativeSettings() if model.is_embedding or cpu_only else self.config.speculative_for(model.name)
+        load_options = dict(load_options or {})
+        if load_options.get("batch", 0) > ctx:
+            load_options["batch"] = ctx
         plan = LaunchPlan(model=model, ctx=ctx, speculative=speculative, cpu_only=cpu_only,
-                          settings=self.config.settings_for(model.name), load_options=dict(load_options or {}),
+                          settings=self.config.settings_for(model.name), load_options=load_options,
                           slot_dir=self.state_dir / SLOTS_FOLDER / safe_file_name(model.name))
         if speculative.draft:
             plan.draft_path = self.store.get(speculative.draft).model_path
@@ -377,7 +398,7 @@ class RunnerPool:
         if mode == RPC_AUTO and self.full_estimate_mb(plan) <= self.config.vram_budget_mb:
             return []
         wanted = self.health.named(plan.settings.get("rpc_workers"))
-        answering = self.health.check(wanted)
+        answering = self._reachable_workers(wanted)
         if len(answering) == len(wanted):
             return answering
         silent = ", ".join(f"{worker.label} ({worker.address})" for worker in wanted if worker not in answering)
@@ -420,15 +441,23 @@ class RunnerPool:
                 stop_now = keep_alive == 0 or runner.unload_requested
             self.state.notify_all()
         if stop_now:
-            self.unload(runner.name)
+            self.unload_runner(runner)
 
     def borrow(self, name: str) -> Runner | None:
         with self.state:
             runner = self.runners.get(name)
-            if not runner or not runner.alive:
+            if not runner or not runner.alive or runner.unload_requested:
                 return None
             runner.in_flight += 1
             return runner
+
+    def give_back(self, runner: Runner) -> None:
+        with self.state:
+            runner.in_flight -= 1
+            stop_now = runner.in_flight == 0 and runner.unload_requested
+            self.state.notify_all()
+        if stop_now:
+            self.unload_runner(runner)
 
     def touch(self, model: Model, keep_alive: float | None) -> bool:
         with self.state:
@@ -453,17 +482,24 @@ class RunnerPool:
     def unload(self, name: str) -> bool:
         with self.state:
             runner = self.runners.get(name)
-            if not runner:
-                return False
+        if not runner:
+            return False
+        self.unload_runner(runner)
+        return True
+
+    def unload_runner(self, runner: Runner) -> None:
+        with self.state:
             if runner.in_flight:
                 runner.expires_at = time.monotonic()
                 runner.expires_wall = time.time()
                 runner.unload_requested = True
-                return True
+                return
             runner.stopping = True
-            del self.runners[name]
+            runner.unload_requested = True
+            if self.runners.get(runner.name) is runner:
+                del self.runners[runner.name]
+            self.state.notify_all()
         self._stop(runner)
-        return True
 
     def _retire(self, name: str) -> None:
         with self.state:
@@ -476,7 +512,8 @@ class RunnerPool:
             if runner.in_flight and runner.alive:
                 raise LoadError(f"{name} is still answering another request with different settings; try again when it is done")
             runner.stopping = True
-            self.runners.pop(name, None)
+            if self.runners.get(name) is runner:
+                del self.runners[name]
         self._stop(runner)
 
     def _make_room(self, needed_mb: int, for_name: str) -> None:
@@ -513,7 +550,6 @@ class RunnerPool:
         port = free_port()
         if plan.slot_dir:
             plan.slot_dir.mkdir(parents=True, exist_ok=True)
-        arguments = build_arguments(self.config, plan, port)
         logs = self.state_dir / "logs"
         logs.mkdir(parents=True, exist_ok=True)
         log_path = logs / f"{safe_file_name(plan.model.name)}.log"
@@ -522,22 +558,48 @@ class RunnerPool:
             environment.update(self.backend.cpu_only_environment)
         started = time.monotonic()
         on_workers = f", with rpc workers {', '.join(worker.label for worker in plan.workers)}" if plan.workers else ""
+        api_key = secrets.token_urlsafe(KEY_BYTES)
+        key_file = self._write_key_file(plan.model.name, api_key)
+        arguments = build_arguments(self.config, plan, port, key_file)
         log.info("loading %s (ctx %d, ~%d MiB here%s): %s", plan.model.name, plan.ctx, estimate, on_workers, " ".join(arguments[1:]))
-        with open(log_path, "ab") as output:
-            process = self.launcher(arguments, stdout=output, stderr=subprocess.STDOUT, env=environment, start_new_session=True)
-        runner = Runner(plan=plan, port=port, process=process, estimate_mb=estimate, process_memory=self.process_memory)
         try:
-            self._wait_until_ready(runner, log_path)
-        except LoadError:
-            self._stop(runner)
-            raise
+            process = self.launcher(arguments, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=environment,
+                                    start_new_session=True)
+            runner = Runner(plan=plan, port=port, process=process, estimate_mb=estimate, process_memory=self.process_memory,
+                            api_key=api_key, log_thread=start_scrubbed_log(process, log_path))
+            try:
+                self._wait_until_ready(runner, log_path)
+            except LoadError:
+                self._stop(runner)
+                raise
+        finally:
+            key_file.unlink(missing_ok=True)
         runner.load_seconds = time.monotonic() - started
         log.info("loaded %s in %.1fs on port %d", plan.model.name, runner.load_seconds, port)
         return runner
 
+    def _write_key_file(self, name: str, api_key: str) -> Path:
+        folder = self.state_dir / KEYS_FOLDER
+        folder.mkdir(parents=True, exist_ok=True)
+        folder.chmod(PRIVATE_FOLDER_MODE)
+        path = folder / f"{safe_file_name(name)}.{secrets.token_hex(4)}.key"
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, PRIVATE_FILE_MODE)
+        with os.fdopen(descriptor, "w") as output:
+            output.write(api_key + "\n")
+        return path
+
+    def _attached_addresses(self) -> set[str]:
+        with self.state:
+            return {worker.address for runner in self.runners.values() if runner.alive for worker in runner.plan.workers}
+
+    def _reachable_workers(self, workers: list[rpc.RpcWorker]) -> list[rpc.RpcWorker]:
+        attached = self._attached_addresses()
+        reachable = self.health.check([worker for worker in workers if worker.address not in attached])
+        return [worker for worker in workers if worker.address in attached or worker in reachable]
+
     def _silent_workers(self, runner: Runner) -> list[rpc.RpcWorker]:
-        answering = self.health.check(list(runner.plan.workers))
-        return [worker for worker in runner.plan.workers if worker not in answering]
+        reachable = self.health.check(list(runner.plan.workers))
+        return [worker for worker in runner.plan.workers if worker not in reachable]
 
     def _check_workers_while_loading(self, runner: Runner) -> None:
         silent = self._silent_workers(runner)
@@ -552,13 +614,18 @@ class RunnerPool:
             if runner.process.poll() is not None:
                 if runner.plan.workers:
                     self._check_workers_while_loading(runner)
-                raise LoadError(f"the model runner for {runner.name} exited with {runner.process.returncode} while loading: "
-                                f"{last_lines(log_path)}")
+                if runner.log_thread:
+                    runner.log_thread.join(timeout=LOG_DRAIN_SECONDS)
+                log.error("the model runner for %s exited with %s while loading; its last lines: %s", runner.name,
+                          runner.process.returncode, scrub(last_lines(log_path)))
+                raise LoadError(f"the model runner for {runner.name} exited with {runner.process.returncode} while loading; "
+                                "the engine log has the details")
             if runner.plan.workers and time.monotonic() >= next_worker_check:
                 self._check_workers_while_loading(runner)
                 next_worker_check = time.monotonic() + WORKER_RECHECK_SECONDS
             try:
-                with urllib.request.urlopen(f"{runner.base_url}/health", timeout=HEALTH_TIMEOUT_SECONDS) as response:
+                request = urllib.request.Request(f"{runner.base_url}/health", headers=runner.headers)
+                with urllib.request.urlopen(request, timeout=HEALTH_TIMEOUT_SECONDS) as response:
                     if response.status == 200:
                         return
             except (urllib.error.URLError, OSError):
@@ -586,20 +653,17 @@ class RunnerPool:
             dead = [runner for runner in self.runners.values() if runner.process.poll() is not None]
             for runner in expired + dead:
                 runner.stopping = True
-                self.runners.pop(runner.name, None)
+                if self.runners.get(runner.name) is runner:
+                    del self.runners[runner.name]
         for runner in dead:
-            log.warning("the model runner for %s died with %s", runner.name, runner.process.returncode)
+            on_workers = f" (it used rpc worker {', '.join(worker.label for worker in runner.plan.workers)})" if runner.plan.workers else ""
+            log.warning("the model runner for %s died with %s%s; the next request loads it again", runner.name,
+                        runner.process.returncode, on_workers)
         for runner in expired:
             self._stop(runner)
 
     def watch_workers_once(self) -> None:
-        self.health.check(self.health.workers)
-        for runner in self.loaded():
-            lost = [worker for worker in runner.plan.workers if self.health.down_in_a_row(worker) >= DOWN_CHECKS_BEFORE_UNLOAD]
-            if lost:
-                log.warning("unloading %s: its rpc worker %s stopped answering; the next request loads it again", runner.name,
-                            ", ".join(f"{worker.label} ({worker.address})" for worker in lost))
-                self.unload(runner.name)
+        self._reachable_workers(self.health.workers)
 
     def _watch_workers_forever(self) -> None:
         while True:

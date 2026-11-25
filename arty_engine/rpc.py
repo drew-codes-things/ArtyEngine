@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 log = logging.getLogger("arty-engine.rpc")
 
 CHECK_TIMEOUT_SECONDS = 2.0
+UP, DOWN, UNKNOWN = "up", "down", "unknown"
 LOWEST_PORT, HIGHEST_PORT = 1, 65535
 WORKER_SETTINGS = ("address", "label", "memory_mb")
 UNSAFE_ADDRESS_CHARACTERS = set(", \t\r\n")
@@ -72,12 +73,14 @@ def parse_workers(value) -> list[RpcWorker]:
     return workers
 
 
-def probe(worker: RpcWorker, timeout: float = CHECK_TIMEOUT_SECONDS) -> str:
+def probe(worker: RpcWorker, timeout: float = CHECK_TIMEOUT_SECONDS) -> tuple[str, str]:
     try:
         with socket.create_connection((worker.host, worker.port), timeout=timeout):
-            return ""
+            return UP, ""
+    except (socket.timeout, TimeoutError):
+        return UNKNOWN, f"no answer within {timeout:g}s (busy serving a client, or out of reach)"
     except OSError as error:
-        return str(error) or error.__class__.__name__
+        return DOWN, str(error) or error.__class__.__name__
 
 
 @dataclass
@@ -86,7 +89,6 @@ class WorkerState:
     checked_at: float | None = None
     latency_ms: float | None = None
     error: str = ""
-    down_in_a_row: int = 0
 
 
 @dataclass
@@ -103,30 +105,28 @@ class WorkerHealth:
         return [worker for worker in self.workers if worker.label in names or worker.address in names]
 
     def check(self, workers: list[RpcWorker]) -> list[RpcWorker]:
-        answering = []
+        reachable = []
         for worker in workers:
             started = time.monotonic()
-            problem = self.prober(worker, self.timeout)
-            self._record(worker, problem, (time.monotonic() - started) * 1000)
-            if not problem:
-                answering.append(worker)
-        return answering
+            status, detail = self.prober(worker, self.timeout)
+            self._record(worker, status, detail, (time.monotonic() - started) * 1000)
+            if status != DOWN:
+                reachable.append(worker)
+        return reachable
 
-    def _record(self, worker: RpcWorker, problem: str, latency_ms: float) -> None:
+    def _record(self, worker: RpcWorker, status: str, detail: str, latency_ms: float) -> None:
         with self.lock:
             state = self.states.setdefault(worker.address, WorkerState())
             was_up = state.up
-            state.up, state.checked_at, state.error = not problem, time.time(), problem
-            state.latency_ms = None if problem else round(latency_ms, 1)
-            state.down_in_a_row = state.down_in_a_row + 1 if problem else 0
-        if problem and was_up is not False:
-            log.warning("rpc worker %s (%s) is not answering: %s", worker.label, worker.address, problem)
-        if not problem and was_up is False:
+            state.up = {UP: True, DOWN: False}.get(status)
+            state.checked_at, state.error = time.time(), detail
+            state.latency_ms = round(latency_ms, 1) if status == UP else None
+        if status == DOWN and was_up is not False:
+            log.warning("rpc worker %s (%s) is not answering: %s", worker.label, worker.address, detail)
+        elif status == UNKNOWN and was_up is not None:
+            log.info("rpc worker %s (%s): %s", worker.label, worker.address, detail)
+        elif status == UP and was_up is False:
             log.info("rpc worker %s (%s) is answering again", worker.label, worker.address)
-
-    def down_in_a_row(self, worker: RpcWorker) -> int:
-        with self.lock:
-            return self.states.get(worker.address, WorkerState()).down_in_a_row
 
     def describe(self, used_by: dict[str, list[str]]) -> list[dict]:
         with self.lock:
@@ -134,7 +134,8 @@ class WorkerHealth:
         described = []
         for worker in self.workers:
             state = states.get(worker.address, WorkerState())
+            models = sorted(used_by.get(worker.address, []))
             described.append({"label": worker.label, "address": worker.address, "memory_mb": worker.memory_mb,
-                              "up": state.up, "checked_at": state.checked_at, "latency_ms": state.latency_ms,
-                              "error": state.error, "models": sorted(used_by.get(worker.address, []))})
+                              "up": True if models else state.up, "in_use": bool(models), "checked_at": state.checked_at,
+                              "latency_ms": state.latency_ms, "error": "" if models else state.error, "models": models})
         return described

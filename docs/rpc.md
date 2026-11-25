@@ -33,19 +33,25 @@ A request with `num_gpu: 0` never uses workers.
 
 ### Health checks
 
-Before every load that would use workers, each worker gets a TCP connect (2 seconds). A worker that does not answer
-is logged, and the load goes on locally (`rpc_when_down: "local"`) or fails with 503 naming the worker (`"fail"`), at
-once, never after the 600 second load timeout. During a load the workers are checked again every 5 seconds; a worker
-that stops answering stops the load, which then falls back the same way. While models are loaded, the workers they use
-are checked every 15 seconds, and a model whose worker missed two checks in a row is unloaded, so the next request
-loads it again (locally or with the worker, whichever answers).
+Before every load that would use workers, each worker gets a TCP connect (2 seconds). Only a refused or unreachable
+worker counts as down: it is logged, and the load goes on locally (`rpc_when_down: "local"`) or fails with 503 naming
+the worker (`"fail"`), at once, never after the 600 second load timeout. A connect that times out counts as unknown,
+not down, because a bare runtime worker serves one client at a time with a backlog of one: while a model runner holds
+its connection, further connects wait and time out though the worker is fine. During a load the workers are checked
+again every 5 seconds; a worker that is refused or unreachable stops the load, which then falls back the same way.
+
+While one of the engine's own loaded models uses a worker, that worker is never probed: its health is that model
+runner's process. If the worker goes away, the runner fails its next request and exits; the engine drops it at once,
+even with requests still running, and the next request loads the model again (locally or with the worker, whichever
+answers). Workers no loaded model uses are probed every 15 seconds for `/api/workers`.
 
 All the named workers must answer: the layout settings below name devices by position, so a load with fewer workers
 than planned would put layers in the wrong place.
 
-`GET /api/workers` lists each worker with `label`, `address`, `memory_mb`, `up`, `checked_at`, `latency_ms`, `error`
-and `models` (the loaded models using it). `GET /api/status` has the same list next to the loaded models, the runtime
-binary, the backend and the card. `/api/ps` shows `rpc_workers` for each model, and `/metrics` has
+`GET /api/workers` lists each worker with `label`, `address`, `memory_mb`, `up` (`true`, `false`, or `null` when the
+last check timed out), `in_use` (a loaded model holds it), `checked_at`, `latency_ms`, `error` and `models` (the loaded
+models using it). `GET /api/status` has the same list next to the loaded models, the runtime release, the backend and
+the card. `/api/ps` shows `rpc_workers` for each model, and `/metrics` has
 `arty_engine_rpc_worker_up`.
 
 ## Placing a model's layers
@@ -88,6 +94,7 @@ or with a settings file, `--config worker.json`:
 | Setting | Flag | What it does |
 |---|---|---|
 | `listen` | `--listen` | `host:port` to serve on; default `0.0.0.0:50052` |
+| `open` | `--open` | Allow a network `listen` with no `allowed_clients`; without it the worker refuses to start that way |
 | `allowed_clients` | `--allow` (repeat) | Addresses or networks (`192.168.1.0/24`) allowed in; others are refused and logged |
 | `devices` | `--devices` | Devices to share; all of them when left out |
 | `cache_dir` | `--cache-dir` | Keeps the model weights sent to it on disk, so a reload sends far less |
@@ -97,9 +104,11 @@ or with a settings file, `--config worker.json`:
 
 The runtime worker has no authentication of its own: whoever can reach its port can run work on the GPU and read
 what is sent to it. With `allowed_clients` the runtime worker listens on 127.0.0.1 only and `arty-engine worker`
-stands in front of it, passing on connections from the allowed addresses and refusing the rest. Without
-`allowed_clients` on a network address the worker warns at start (three times on `0.0.0.0`), and the firewall is
-then the only guard. Keep workers on the home network, never forwarded from the internet.
+stands in front of it, passing on connections from the allowed addresses and refusing the rest (at most 16 at once,
+with TCP keepalive; if it ever stops taking connections the worker exits with code 3 so its service restarts it).
+A network `listen` without `allowed_clients` is refused unless `open` (`--open`) is set; then the worker warns at
+start (three times on `0.0.0.0`), and the firewall is the only guard. Keep workers on the home network, never
+forwarded from the internet.
 
 ### Linux
 

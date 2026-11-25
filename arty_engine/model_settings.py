@@ -1,5 +1,7 @@
 import math
 
+from .store import ModelNotFound, parse_name
+
 RPC_AUTO, RPC_ALWAYS, RPC_NEVER = "auto", "always", "never"
 RPC_MODES = (RPC_AUTO, RPC_ALWAYS, RPC_NEVER)
 LOAD_LOCALLY, FAIL = "local", "fail"
@@ -133,7 +135,15 @@ def check_one_model(model: str, settings, worker_names: set[str]) -> None:
 def check_model_settings(value, worker_names: set[str]) -> None:
     if not isinstance(value, dict):
         raise ValueError("model_settings must be an object of model name to settings")
+    seen: dict[str, str] = {}
     for model, settings in value.items():
+        try:
+            display = parse_name(model).display
+        except ModelNotFound as error:
+            raise ValueError(f"model_settings: {error}") from error
+        if display in seen:
+            raise ValueError(f"model_settings names {seen[display]} and {model}, which are the same model ({display})")
+        seen[display] = model
         check_one_model(model, settings, worker_names)
 
 

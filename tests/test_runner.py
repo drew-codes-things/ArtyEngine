@@ -1,4 +1,8 @@
+import logging
+import subprocess
+import sys
 import time
+from pathlib import Path
 
 import pytest
 
@@ -8,7 +12,7 @@ from arty_engine.config import Config
 from arty_engine.gpu import GpuMemory
 from arty_engine.runner import FOREVER, LoadError, RunnerPool, build_arguments, compact_tool_definitions, kv_cache_mb
 from arty_engine.store import ModelStore
-from fake_runner import FakeLauncher
+from fake_runner import KEY_FILE_MODES, FakeLauncher
 from fake_store import add_model, build_store
 
 
@@ -430,3 +434,77 @@ def test_a_thinking_leaker_name_that_matches_no_model_is_warned_about(tmp_path, 
     make_pool(tmp_path, thinking_leakers=["mimo:9b", "mimo-v2.6"])
     assert "mimo-v2.6:latest" in caplog.text and "thinking_leakers" in caplog.text
     assert "mimo:9b" not in caplog.text
+
+
+UPSTREAM_WORD = "ll" + "ama"
+CORE_WORD = "gg" + "ml"
+UPSTREAM_LINES = [f"W srv  server_setup: no API key (see https://github.com/{CORE_WORD}-org/{UPSTREAM_WORD}.c{'p'}p/pull/1)",
+                  f"E {UPSTREAM_WORD}_model_load: failed to read /srv/blobs/sha256-abc",
+                  f"E {CORE_WORD}_backend_init: no device", f"#13 0x0 in {UPSTREAM_WORD}_server(int, char**) ()"]
+
+
+def crashing_launcher(exit_code: int):
+    script = "import sys\n" + "".join(f"print({line!r})\n" for line in UPSTREAM_LINES) + f"sys.exit({exit_code})\n"
+
+    def launch(arguments, **settings):
+        return subprocess.Popen([sys.executable, "-c", script], **settings)
+    return launch
+
+
+def names_upstream(text: str) -> bool:
+    lowered = text.lower()
+    return UPSTREAM_WORD in lowered or f"{CORE_WORD}-org" in lowered or "github.com" in lowered
+
+
+def test_a_crash_while_loading_answers_a_fixed_message_and_keeps_the_runtime_s_words_in_the_engine_log(tmp_path, caplog):
+    caplog.set_level(logging.ERROR)
+    pool, store, _ = make_pool(tmp_path, launcher=crashing_launcher(3))
+    with pytest.raises(LoadError) as raised:
+        pool.acquire(store.get("qwen3:14b"), None)
+    assert str(raised.value) == "the model runner for qwen3:14b exited with 3 while loading; the engine log has the details"
+    assert "model_load: failed" in caplog.text and not names_upstream(caplog.text)
+
+
+def test_the_model_log_on_disk_is_written_scrubbed(tmp_path):
+    pool, store, _ = make_pool(tmp_path, launcher=crashing_launcher(3))
+    with pytest.raises(LoadError):
+        pool.acquire(store.get("qwen3:14b"), None)
+    written = (Path(tmp_path) / "state" / "logs" / "qwen3_14b.log").read_text()
+    assert "(link removed)" in written and "runtime_model_load: failed" in written and "libruntime" not in written
+    assert not names_upstream(written)
+
+
+def test_each_runner_gets_its_own_key_from_a_private_file_that_is_gone_after_the_load(tmp_path):
+    pool, store, launcher = make_pool(tmp_path)
+    first, _ = pool.acquire(store.get("qwen3:14b"), None)
+    second, _ = pool.acquire(store.get("mimo:9b"), None)
+    key_files = [Path(process.arguments[process.arguments.index("--api-key-file") + 1]) for process in launcher.launched]
+    assert first.api_key and second.api_key and first.api_key != second.api_key
+    assert [process.api_key for process in launcher.launched] == [first.api_key, second.api_key]
+    assert first.headers["Authorization"] == f"Bearer {first.api_key}"
+    assert KEY_FILE_MODES[-2:] == [0o600, 0o600] and not any(path.exists() for path in key_files)
+    assert not any(first.api_key in argument for argument in launcher.launched[0].arguments)
+    pool.release(first, FOREVER)
+    pool.release(second, FOREVER)
+    pool.shutdown()
+
+
+def test_model_settings_find_a_model_by_any_spelling_of_its_name(tmp_path, caplog):
+    caplog.set_level(logging.WARNING)
+    pool, store, launcher = make_pool(tmp_path, model_settings={"library/qwen3:14b": {"gpu_layers": 7}, "nothere": {}})
+    runner, _ = pool.acquire(store.get("qwen3:14b"), None)
+    arguments = launcher.launched[0].arguments
+    assert arguments[arguments.index("-ngl") + 1] == "7"
+    assert "nothere:latest in model_settings matches no installed model" in caplog.text
+    pool.release(runner, FOREVER)
+    pool.shutdown()
+
+
+def test_two_model_settings_for_the_same_model_are_refused():
+    with pytest.raises(ValueError, match="the same model"):
+        Config(model_settings={"qwen3": {"gpu_layers": 1}, "qwen3:latest": {"gpu_layers": 2}})
+
+
+def test_a_batch_larger_than_the_context_is_cut_to_the_context(tmp_path):
+    pool, store, _ = make_pool(tmp_path)
+    assert pool.plan(store.get("qwen3:14b"), 512, load_options={"batch": 4096}).load_options["batch"] == 512

@@ -6,6 +6,7 @@ from pathlib import Path
 from .model_settings import check_model_settings
 from .remote import check_remote_models
 from .rpc import RpcWorker, parse_workers
+from .store import parse_name
 
 CONFIG_ENV = "ARTY_ENGINE_CONFIG"
 AUTO_BACKEND = "auto"
@@ -95,7 +96,11 @@ class Config:
         return parse_workers(self.rpc_workers)
 
     def settings_for(self, model_name: str) -> dict:
-        return dict(self.model_settings.get(model_name) or {})
+        wanted = parse_name(model_name).display
+        for name, settings in self.model_settings.items():
+            if parse_name(name).display == wanted:
+                return dict(settings or {})
+        return {}
 
     def speculative_for(self, model_name: str) -> SpeculativeSettings:
         settings = self.speculative.get(model_name)

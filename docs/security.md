@@ -7,3 +7,8 @@ loopback, which stops other web sites from reaching it through your browser. A p
 or a web app you trust, goes in `allowed_hosts` or `allowed_origins`.
 
 The shipped service unit runs the engine as root (see [Installing](install.md)).
+
+Each model runner the engine starts listens on 127.0.0.1 only and gets its own random key, which the engine reads
+from a file only it and the runner can read (removed once the runner is up) and sends with every request, so other
+programs on the machine can not use a runner directly. The runners' logs in `state_dir/logs` are written through a
+filter that takes out links and the runtime library's names.

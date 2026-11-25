@@ -1,5 +1,6 @@
 import json
 import math
+import os
 import time
 from datetime import datetime, timezone
 
@@ -21,6 +22,8 @@ THINK_CLOSE = "</think>"
 THINK_TAGS = (THINK_OPEN, THINK_CLOSE)
 THINKING_SWITCH = "enable_thinking"
 LARGEST_TOKEN_COUNT = 2 ** 31 - 1
+MOST_GPU_LAYERS = 1024
+MOST_GPU_INDEX = 63
 INT64_LIMITS = (-(2 ** 63), 2 ** 63 - 1)
 WHOLE_NUMBER_FIELDS = {"top_k", "seed", "repeat_last_n", "mirostat"}
 
@@ -103,13 +106,13 @@ def true_or_false(value, label: str) -> bool:
 def load_settings(options: dict) -> dict:
     settings = {}
     layers = options.get("num_gpu")
-    if layers is not None and bounded_whole_number(layers, "num_gpu", -1, LARGEST_TOKEN_COUNT) > 0:
+    if layers is not None and bounded_whole_number(layers, "num_gpu", -1, MOST_GPU_LAYERS) > 0:
         settings["gpu_layers"] = whole_number(layers, "num_gpu")
-    for option, setting in (("num_thread", "threads"), ("num_batch", "batch")):
+    for option, setting, most in (("num_thread", "threads", os.cpu_count() or 1), ("num_batch", "batch", LARGEST_TOKEN_COUNT)):
         if options.get(option) is not None and bounded_whole_number(options[option], option, 0, LARGEST_TOKEN_COUNT) > 0:
-            settings[setting] = whole_number(options[option], option)
+            settings[setting] = min(whole_number(options[option], option), most)
     if options.get("main_gpu") is not None:
-        settings["main_gpu"] = bounded_whole_number(options["main_gpu"], "main_gpu", 0, LARGEST_TOKEN_COUNT)
+        settings["main_gpu"] = bounded_whole_number(options["main_gpu"], "main_gpu", 0, MOST_GPU_INDEX)
     without_mmap = options.get("use_mmap") is not None and not true_or_false(options["use_mmap"], "use_mmap")
     locked = options.get("use_mlock") is not None and true_or_false(options["use_mlock"], "use_mlock")
     if locked:

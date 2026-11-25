@@ -20,6 +20,9 @@ from fake_store import build_store
 
 TOO_SMALL_BUDGET_MB = 150
 ROOMY_BUDGET_MB = 100000
+BACKLOG_FILLERS = 4
+LOAD_SECONDS = 1.5
+WATCH_CYCLES = 3
 CHAT_REPLY = {"json": {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "hi"}}]}}
 
 
@@ -128,7 +131,7 @@ def test_request_load_options_win_over_the_model_settings(tmp_path):
 def test_a_model_that_fits_never_asks_the_workers(tmp_path):
     asked = []
     pool, store, launcher = make_pool(tmp_path, budget=ROOMY_BUDGET_MB, rpc_workers=[closed_address()])
-    pool.health.prober = lambda worker, timeout: asked.append(worker) or ""
+    pool.health.prober = lambda worker, timeout: asked.append(worker) or (rpc.UP, "")
     runner, _ = pool.acquire(store.get("qwen3:14b"), 1024)
     pool.release(runner, FOREVER)
     assert asked == [] and "--rpc" not in launcher.launched[0].arguments
@@ -236,16 +239,103 @@ def test_a_worker_that_drops_during_the_load_fails_clearly_when_asked_to(tmp_pat
     assert len(launcher.launched) == 1 and launcher.launched[0].returncode == -15
 
 
-def test_a_loaded_model_is_unloaded_after_its_worker_stays_down(tmp_path, worker):
-    pool, store, _ = make_pool(tmp_path, rpc_workers=[worker.address])
+class BusyBareWorker:
+    def __init__(self):
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.bind(("127.0.0.1", 0))
+        self.socket.listen(1)
+        self.address = f"127.0.0.1:{self.socket.getsockname()[1]}"
+        self.held = []
+        for _ in range(BACKLOG_FILLERS):
+            try:
+                self.held.append(socket.create_connection(("127.0.0.1", self.socket.getsockname()[1]), timeout=0.5))
+            except OSError:
+                break
+
+    def close(self):
+        for connection in self.held:
+            connection.close()
+        self.socket.close()
+
+
+@pytest.fixture
+def busy_worker():
+    listener = BusyBareWorker()
+    yield listener
+    listener.close()
+
+
+def test_a_busy_bare_worker_counts_as_unknown_not_down(busy_worker):
+    status, detail = rpc.probe(rpc.RpcWorker(address=busy_worker.address, label="pc"), timeout=0.5)
+    assert status == rpc.UNKNOWN and "busy" in detail
+
+
+def test_a_refused_port_counts_as_down():
+    status, detail = rpc.probe(rpc.RpcWorker(address=closed_address(), label="x"), timeout=1)
+    assert status == rpc.DOWN and detail
+
+
+def test_a_long_load_over_a_busy_bare_worker_is_not_aborted(tmp_path, busy_worker, monkeypatch):
+    monkeypatch.setattr("arty_engine.runner.WORKER_RECHECK_SECONDS", 0.2)
+    launcher = FakeLauncher(loading_when=lambda arguments: True)
+    pool, store, _ = make_pool(tmp_path, launcher=launcher, rpc_workers=[busy_worker.address],
+                               model_settings={"qwen3:14b": {"rpc": "always", "rpc_when_down": "fail"}})
+    pool.health.timeout = 0.3
+    threading.Timer(LOAD_SECONDS, lambda: setattr(launcher.launched[0].server, "loading", False)).start()
     runner, _ = pool.acquire(store.get("qwen3:14b"), 1024)
     pool.release(runner, FOREVER)
-    pool.watch_workers_once()
-    assert pool.loaded() == [runner]
-    worker.close()
-    pool.watch_workers_once()
-    assert pool.loaded() == [runner]
-    pool.watch_workers_once()
+    assert len(launcher.launched) == 1 and value_after(launcher.launched[0].arguments, "--rpc") == busy_worker.address
+    pool.shutdown()
+
+
+def test_a_worker_held_by_a_live_runner_is_never_probed_and_the_model_stays(tmp_path, worker):
+    pool, store, _ = make_pool(tmp_path, rpc_workers=[{"address": worker.address, "label": "pc"}],
+                               model_settings={"qwen3:14b": {"rpc": "always"}})
+    runner, _ = pool.acquire(store.get("qwen3:14b"), 1024)
+    pool.release(runner, FOREVER)
+    asked = []
+    pool.health.prober = lambda probed, timeout: asked.append(probed) or (rpc.DOWN, "refused")
+    for _ in range(WATCH_CYCLES):
+        pool.watch_workers_once()
+    assert asked == [] and pool.loaded() == [runner]
+    assert pool.workers_status()[0]["in_use"] is True and pool.workers_status()[0]["up"] is True
+    pool.shutdown()
+
+
+def test_a_runner_that_dies_with_its_worker_is_dropped_at_once_even_mid_request(tmp_path, worker):
+    pool, store, launcher = make_pool(tmp_path, rpc_workers=[worker.address], model_settings={"qwen3:14b": {"rpc": "always"}})
+    model = store.get("qwen3:14b")
+    first, _ = pool.acquire(model, 1024)
+    launcher.launched[0].terminate()
+    pool.reap_once()
+    assert not pool.holds("qwen3:14b")
+    second, _ = pool.acquire(model, 1024)
+    assert second is not first and len(launcher.launched) == 2
+    pool.release(first, 0)
+    pool.release(second, FOREVER)
+    assert pool.loaded() == [second]
+    pool.shutdown()
+
+
+def test_a_worker_shows_in_use_and_up_as_soon_as_a_model_loads_on_it(tmp_path, worker):
+    pool, store, _ = make_pool(tmp_path, rpc_workers=[{"address": worker.address, "label": "pc"}],
+                               model_settings={"qwen3:14b": {"rpc": "always"}})
+    pool.health.prober = lambda probed, timeout: (rpc.UNKNOWN, "no answer")
+    runner, _ = pool.acquire(store.get("qwen3:14b"), 1024)
+    pool.release(runner, FOREVER)
+    described = pool.workers_status()[0]
+    assert described["in_use"] is True and described["up"] is True and described["error"] == ""
+    pool.unload("qwen3:14b")
+    assert pool.workers_status()[0]["in_use"] is False
+    pool.shutdown()
+
+
+def test_a_borrowed_read_never_takes_a_runner_that_is_being_unloaded(tmp_path):
+    pool, store, _ = make_pool(tmp_path, budget=ROOMY_BUDGET_MB)
+    runner, _ = pool.acquire(store.get("qwen3:14b"), 1024)
+    pool.unload("qwen3:14b")
+    assert runner.unload_requested and pool.borrow("qwen3:14b") is None
+    pool.release(runner, FOREVER)
     assert pool.loaded() == []
 
 
@@ -259,10 +349,6 @@ def test_worker_health_is_described_with_the_models_that_use_it(tmp_path, worker
     assert described["pc"]["up"] is True and described["pc"]["models"] == [] and described["pc"]["memory_mb"] == 5800
     assert described[down]["up"] is False and described[down]["error"]
     pool.shutdown()
-
-
-def test_probe_reports_a_refused_port():
-    assert rpc.probe(rpc.RpcWorker(address=closed_address(), label="x"), timeout=1)
 
 
 class ApiEngine:

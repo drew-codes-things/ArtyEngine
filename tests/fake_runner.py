@@ -1,13 +1,16 @@
 import json
+import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class FakeRunnerServer:
-    def __init__(self, port: int, replies: dict, loading: bool = False):
+    def __init__(self, port: int, replies: dict, loading: bool = False, api_key: str = ""):
         self.replies = replies
         self.loading = loading
+        self.api_key = api_key
         self.requests: list[dict] = []
+        self.refused: list[str] = []
         server = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -22,7 +25,16 @@ class FakeRunnerServer:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def _refused(self) -> bool:
+                if not server.api_key or self.path == "/health" or self.headers.get("Authorization") == f"Bearer {server.api_key}":
+                    return False
+                server.refused.append(self.path)
+                self._send(401, {"error": {"message": "Invalid API Key", "type": "authentication_error"}})
+                return True
+
             def do_GET(self):
+                if self._refused():
+                    return
                 if server.loading:
                     self._send(503, {"error": {"message": "Loading model"}})
                     return
@@ -37,6 +49,8 @@ class FakeRunnerServer:
                     self._send(200, reply["json"])
 
             def do_POST(self):
+                if self._refused():
+                    return
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
                 server.requests.append({"path": self.path, "body": body})
                 reply = server.replies.get(self.path)
@@ -60,6 +74,18 @@ class FakeRunnerServer:
         self.http.server_close()
 
 
+KEY_FILE_MODES: list[int] = []
+
+
+def read_api_key(arguments: list[str]) -> str:
+    if "--api-key-file" not in arguments:
+        return ""
+    path = arguments[arguments.index("--api-key-file") + 1]
+    KEY_FILE_MODES.append(os.stat(path).st_mode & 0o777)
+    with open(path) as key_file:
+        return key_file.read().strip()
+
+
 class FakeProcess:
     next_pid = 50000
 
@@ -68,7 +94,9 @@ class FakeProcess:
         FakeProcess.next_pid += 1
         self.pid = FakeProcess.next_pid
         self.returncode = 1 if fail else None
-        self.server = None if fail else FakeRunnerServer(int(arguments[arguments.index("--port") + 1]), replies, loading)
+        self.api_key = read_api_key(arguments)
+        self.server = None if fail else FakeRunnerServer(int(arguments[arguments.index("--port") + 1]), replies, loading,
+                                                         self.api_key)
 
     def poll(self):
         return self.returncode
