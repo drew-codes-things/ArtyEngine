@@ -45,6 +45,7 @@ EVENT_DATA = b"data: "
 ERROR_MEMBER = b"\"error\""
 EVENT_LINE_END = b"\n"
 END_OF_EVENTS = b"[DONE]"
+LONGEST_CHECKED_LINE_BYTES = 8 * 1024 * 1024
 LAST_EVENT_TYPES = ("message_stop", "response.completed", "response.incomplete", "response.failed", "error")
 PRIVATE_PROPS = ("build_info", "model_path")
 LONGEST_SLOT_FILE_NAME = 100
@@ -129,6 +130,39 @@ def ends_the_stream(line: bytes) -> bool:
     if not isinstance(event, dict):
         return False
     return remote.is_last_event(event) or event.get("type") in LAST_EVENT_TYPES or "error" in event
+
+
+class StreamEndWatcher:
+    def __init__(self):
+        self.current = bytearray()
+        self.oversized = False
+        self.ended = False
+        self.unchecked_line_last = False
+        self.at_line_start = True
+
+    def feed(self, piece: bytes) -> None:
+        self.at_line_start = piece.endswith(EVENT_LINE_END)
+        if not self.oversized:
+            self.current += piece
+            if len(self.current) > LONGEST_CHECKED_LINE_BYTES:
+                self.oversized = True
+                self.current.clear()
+        if self.at_line_start:
+            self._close_line()
+
+    def finished(self) -> bool:
+        if not self.at_line_start:
+            self._close_line()
+        return self.ended or self.unchecked_line_last
+
+    def _close_line(self) -> None:
+        if self.oversized:
+            self.unchecked_line_last = True
+        elif self.current.strip():
+            self.ended = self.ended or ends_the_stream(bytes(self.current))
+            self.unchecked_line_last = False
+        self.current.clear()
+        self.oversized = False
 
 
 def cut_stream_event(failure: str) -> bytes:
@@ -439,14 +473,13 @@ class CompatRoutes:
         if not line:
             raise RelayUnreachable(500, f"the model runner closed its answer before sending anything{failure}")
         self._start_events()
-        ended, at_line_start = False, True
+        watcher = StreamEndWatcher()
         while line:
-            ended = ended or (at_line_start and ends_the_stream(line))
-            at_line_start = line.endswith(EVENT_LINE_END)
+            watcher.feed(line)
             self._write_chunk(event_line_scrubbed(line))
             line, failure = read_runner_line(response)
-        if not ended:
-            self._write_chunk((b"" if at_line_start else EVENT_LINE_END) + cut_stream_event(failure))
+        if not watcher.finished():
+            self._write_chunk((b"" if watcher.at_line_start else EVENT_LINE_END) + cut_stream_event(failure))
         self._end_stream()
 
     def _write_chunk(self, chunk: bytes) -> None:

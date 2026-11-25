@@ -337,6 +337,45 @@ def test_a_complete_pass_through_stream_gets_no_error_event(tmp_path, path):
     assert "event: error" not in lines
 
 
+BIG_TEXT = "x" * (100 * 1024)
+BIG_FINAL_EVENTS = {
+    "/completion": ['data: {"content": "h", "stop": false}', 'data: {"content": "", "stop": true, "prompt": "%s"}' % BIG_TEXT],
+    "/v1/responses": ['event: response.created\ndata: {"type": "response.created"}',
+                      'event: response.completed\ndata: {"type": "response.completed", "response": {"output_text": "%s"}}' % BIG_TEXT],
+}
+
+
+@pytest.mark.parametrize("path", sorted(BIG_FINAL_EVENTS))
+def test_a_final_event_longer_than_one_read_still_ends_the_stream(tmp_path, path):
+    engine = failing_engine(tmp_path, {path: {"cut_sse": BIG_FINAL_EVENTS[path]}})
+    try:
+        lines = raw_event_lines(f"{engine.url}{path}", PASS_THROUGH_REQUEST)
+    finally:
+        engine.close()
+    assert "event: error" not in lines and BIG_TEXT in lines[-1]
+
+
+@pytest.mark.parametrize("path", sorted(BIG_FINAL_EVENTS))
+def test_a_stream_cut_after_a_big_event_that_is_not_its_end_gets_an_error_event(tmp_path, path):
+    big_middle = 'data: {"content": "%s", "stop": false}' % BIG_TEXT
+    engine = failing_engine(tmp_path, {path: {"cut_sse": [BIG_FINAL_EVENTS[path][0], big_middle]}})
+    try:
+        lines = raw_event_lines(f"{engine.url}{path}", PASS_THROUGH_REQUEST)
+    finally:
+        engine.close()
+    assert lines[-2] == "event: error" and BIG_TEXT in lines[-3]
+
+
+def test_a_final_event_past_the_checked_size_is_not_called_a_cut(tmp_path, monkeypatch):
+    monkeypatch.setattr("arty_engine.compat.LONGEST_CHECKED_LINE_BYTES", 1024)
+    engine = failing_engine(tmp_path, {"/completion": {"cut_sse": BIG_FINAL_EVENTS["/completion"]}})
+    try:
+        lines = raw_event_lines(f"{engine.url}/completion", PASS_THROUGH_REQUEST)
+    finally:
+        engine.close()
+    assert "event: error" not in lines and BIG_TEXT in lines[-1]
+
+
 def test_the_runtime_release_is_the_engine_s_folder_name_or_external():
     from arty_engine.server import runtime_release_name
     upstream = "ll" + "ama"
