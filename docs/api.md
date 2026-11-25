@@ -32,8 +32,11 @@
 Errors on the `/v1` routes have the OpenAI shape, `{"error": {"message", "type", "code"}}`; the others keep
 `{"error": "<message>"}`. Error messages from the runtime, including an error event in the middle of a stream and the
 `error` member of an answer passed through as it is (`/completion`, `/v1/responses`, `/v1/messages`), have the runtime's
-own names replaced by `runtime`; the generated text is never changed. [parity.md](parity.md) lists what the engine
-covers of the common local-model protocols.
+own names replaced by `runtime`; the generated text is never changed. A stream passed through as it is ends the way
+the runtime ends it (`[DONE]`, `"stop": true`, `message_stop`, `response.completed`); when the runtime stops before
+that, the engine adds an `event: error` with a `{"type": "error", "error": {...}}` body, and when it closed before
+sending anything the request is asked again on a fresh runner. [parity.md](parity.md) lists what the engine covers of
+the common local-model protocols.
 
 Every answer carries `Server: arty-engine/<version>`.
 

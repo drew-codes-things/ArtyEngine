@@ -44,6 +44,8 @@ PASS_THROUGH_CHUNK_BYTES = 65536
 EVENT_DATA = b"data: "
 ERROR_MEMBER = b"\"error\""
 EVENT_LINE_END = b"\n"
+END_OF_EVENTS = b"[DONE]"
+LAST_EVENT_TYPES = ("message_stop", "response.completed", "response.incomplete", "response.failed", "error")
 PRIVATE_PROPS = ("build_info", "model_path")
 LONGEST_SLOT_FILE_NAME = 100
 SLOT_FILE_NAME = re.compile(rf"[A-Za-z0-9][A-Za-z0-9._-]{{0,{LONGEST_SLOT_FILE_NAME - 1}}}")
@@ -97,6 +99,42 @@ def relay_cut(events, detail: str) -> RelayError:
     if not events.received:
         return RelayUnreachable(500, f"the model runner closed its answer before sending anything{detail}")
     return RelayError(500, f"the model runner's answer stopped before its end{detail}")
+
+
+def read_whole_answer(response) -> bytes:
+    try:
+        return response.read()
+    except OSError as error:
+        raise RelayUnreachable(500, f"the model runner stopped answering: {error}") from error
+
+
+def read_runner_line(response) -> tuple[bytes, str]:
+    try:
+        return response.readline(PASS_THROUGH_CHUNK_BYTES), ""
+    except OSError as error:
+        return b"", f": {error}"
+
+
+def ends_the_stream(line: bytes) -> bool:
+    text = line.strip()
+    if not text.startswith(EVENT_DATA.strip()):
+        return False
+    data = text[len(EVENT_DATA.strip()):].strip()
+    if data == END_OF_EVENTS:
+        return True
+    try:
+        event = json.loads(data)
+    except ValueError:
+        return False
+    if not isinstance(event, dict):
+        return False
+    return remote.is_last_event(event) or event.get("type") in LAST_EVENT_TYPES or "error" in event
+
+
+def cut_stream_event(failure: str) -> bytes:
+    message = f"the model runner's answer stopped before its end{failure}"
+    payload = {"type": "error", **openai_error(500, message)}
+    return f"event: error\ndata: {json.dumps(payload)}\n\n".encode()
 
 
 def openai_error(status: int, message: str) -> dict:
@@ -391,15 +429,29 @@ class CompatRoutes:
             with runner_call(runner, path, body) as response:
                 content_type = response.headers.get("Content-Type") or "application/json"
                 if not content_type.startswith(EVENT_STREAM):
-                    self._send_text(200, errors_scrubbed(response.read().decode(errors="replace")), content_type)
+                    self._send_text(200, errors_scrubbed(read_whole_answer(response).decode(errors="replace")), content_type)
                     return
-                self._start_events()
-                for line in iter(lambda: response.readline(PASS_THROUGH_CHUNK_BYTES), b""):
-                    chunk = event_line_scrubbed(line)
-                    self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
-                    self.wfile.flush()
-                self._end_stream()
+                self._pass_events_through(response)
         self._with_local(model, request, keep_alive, run)
+
+    def _pass_events_through(self, response) -> None:
+        line, failure = read_runner_line(response)
+        if not line:
+            raise RelayUnreachable(500, f"the model runner closed its answer before sending anything{failure}")
+        self._start_events()
+        ended, at_line_start = False, True
+        while line:
+            ended = ended or (at_line_start and ends_the_stream(line))
+            at_line_start = line.endswith(EVENT_LINE_END)
+            self._write_chunk(event_line_scrubbed(line))
+            line, failure = read_runner_line(response)
+        if not ended:
+            self._write_chunk((b"" if at_line_start else EVENT_LINE_END) + cut_stream_event(failure))
+        self._end_stream()
+
+    def _write_chunk(self, chunk: bytes) -> None:
+        self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
+        self.wfile.flush()
 
     def native_completion(self):
         self._pass_through("/completion")

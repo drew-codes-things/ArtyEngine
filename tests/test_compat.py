@@ -277,6 +277,66 @@ def test_errors_in_passed_through_bodies_and_streams_are_scrubbed_but_answers_ar
     assert error_events and UPSTREAM_WORD not in "".join(error_events)
 
 
+COMPLETE_PASS_THROUGH_STREAMS = {
+    "/v1/messages": ['event: message_start\ndata: {"type": "message_start"}', 'event: message_stop\ndata: {"type": "message_stop"}'],
+    "/completion": ['data: {"content": "h", "stop": false}', 'data: {"content": "", "stop": true}'],
+    "/v1/responses": ['event: response.created\ndata: {"type": "response.created"}',
+                      'event: response.completed\ndata: {"type": "response.completed"}'],
+}
+
+
+def raw_event_lines(url, body):
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        assert response.headers["Content-Type"] == "text/event-stream"
+        return [line.decode().strip() for line in response if line.strip()]
+
+
+PASS_THROUGH_REQUEST = {"model": "qwen3:14b", "stream": True, "prompt": "x", "messages": [{"role": "user", "content": "x"}],
+                        "input": "x"}
+
+
+@pytest.mark.parametrize("path", sorted(COMPLETE_PASS_THROUGH_STREAMS))
+def test_a_streamed_pass_through_whose_runner_closed_before_answering_is_asked_again(tmp_path, path):
+    engine = failing_engine(tmp_path, {})
+    launched = engine.launcher.launched
+
+    def closes_after_the_headers_on_the_first_runner(body):
+        if len(launched) == 1:
+            launched[0].returncode = -6
+            return {"cut_sse": []}
+        return {"sse": COMPLETE_PASS_THROUGH_STREAMS[path]}
+
+    engine.launcher.replies[path] = closes_after_the_headers_on_the_first_runner
+    try:
+        lines = raw_event_lines(f"{engine.url}{path}", PASS_THROUGH_REQUEST)
+    finally:
+        engine.close()
+    assert lines == [line for event in COMPLETE_PASS_THROUGH_STREAMS[path] for line in event.split("\n")] and len(launched) == 2
+
+
+@pytest.mark.parametrize("path", sorted(COMPLETE_PASS_THROUGH_STREAMS))
+def test_a_pass_through_stream_that_stops_midway_ends_with_an_error_event(tmp_path, path):
+    engine = failing_engine(tmp_path, {path: {"cut_sse": COMPLETE_PASS_THROUGH_STREAMS[path][:1]}})
+    try:
+        lines = raw_event_lines(f"{engine.url}{path}", PASS_THROUGH_REQUEST)
+    finally:
+        engine.close()
+    first_event = COMPLETE_PASS_THROUGH_STREAMS[path][0].split("\n")
+    assert lines[:len(first_event)] == first_event and lines[-2] == "event: error"
+    assert "stopped before its end" in json.loads(lines[-1][len("data: "):])["error"]["message"]
+
+
+@pytest.mark.parametrize("path", sorted(COMPLETE_PASS_THROUGH_STREAMS))
+def test_a_complete_pass_through_stream_gets_no_error_event(tmp_path, path):
+    engine = failing_engine(tmp_path, {path: {"cut_sse": COMPLETE_PASS_THROUGH_STREAMS[path]}})
+    try:
+        lines = raw_event_lines(f"{engine.url}{path}", PASS_THROUGH_REQUEST)
+    finally:
+        engine.close()
+    assert "event: error" not in lines
+
+
 def test_the_runtime_release_is_the_engine_s_folder_name_or_external():
     from arty_engine.server import runtime_release_name
     upstream = "ll" + "ama"
