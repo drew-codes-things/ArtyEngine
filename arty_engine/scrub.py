@@ -11,9 +11,9 @@ NEUTRAL_WORD = "runtime"
 LINK_REPLACEMENT = "(link removed)"
 UPSTREAM_SPELLINGS = re.compile(rf"{LIBRARY_WORD}[._ -]?c{'p'}p|{LIBRARY_WORD}[-_]server|o{LIBRARY_WORD}|{CORE_WORD}-org",
                                 re.IGNORECASE)
-UPSTREAM_PREFIXES = re.compile(rf"\blib(?:{LIBRARY_WORD}|{CORE_WORD})(?=[_.-])|\b(?:{LIBRARY_WORD}|{CORE_WORD})(?=_[A-Za-z])")
-UPSTREAM_VARIABLES = re.compile(rf"\b(?:{LIBRARY_WORD.upper()}|{CORE_WORD.upper()})_")
-MODEL_TAG_AHEAD = r"[\w-]*:(?=[A-Za-z0-9])(?!\d+\b)"
+UPSTREAM_PREFIXES = re.compile(rf"\blib(?:{LIBRARY_WORD}|{CORE_WORD})(?=[_.\s-]|$)|\b(?:{LIBRARY_WORD}|{CORE_WORD})(?=_[A-Za-z])")
+UPSTREAM_VARIABLES = re.compile(rf"(?:{LIBRARY_WORD.upper()}|{CORE_WORD.upper()})_")
+MODEL_TAG_AHEAD = r":(?=[A-Za-z0-9])(?!\d+\b)|-[\w-]*:(?:\d+[A-Za-z]|latest\b)"
 UPSTREAM_WORD = re.compile(rf"(?<!meta-)\b{LIBRARY_WORD}\b(?![\s._-]*\d)(?!{MODEL_TAG_AHEAD})")
 ARCHITECTURE_VALUE = re.compile(r"(?:architecture|tokenizer\.\w+\.model)[\"']?(?:\s+str)?\s*[=:]\s*[\"']?$")
 ARCHITECTURE_CONTEXT_CHARS = 80

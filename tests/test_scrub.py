@@ -21,6 +21,10 @@ LINES_WRITTEN = 4000
     (f"{CORE.upper()}_ASSERT failed at {LIBRARY}-context.cpp:42", "RUNTIME_ASSERT failed at runtime-context.cpp:42"),
     (f"{CORE}_backend_init: no device", "runtime_backend_init: no device"),
     (f"{LIBRARY}: failed to load", "runtime: failed to load"),
+    (f"cmake -D{LIBRARY.upper()}_CUDA=ON -D{CORE.upper()}_NATIVE=OFF", "cmake -DRUNTIME_CUDA=ON -DRUNTIME_NATIVE=OFF"),
+    (f"lib{LIBRARY} not found", "libruntime not found"),
+    (f"{LIBRARY}-context:error in decode", "runtime-context:error in decode"),
+    (f"{LIBRARY}:8080 refused", "runtime:8080 refused"),
     (f"see https://github.com/{CORE}-org/{LIBRARY}.c{'p'}p/pull/1", "see (link removed)"),
 ])
 def test_bare_runtime_words_are_rewritten(line, expected):
@@ -30,7 +34,7 @@ def test_bare_runtime_words_are_rewritten(line, expected):
 @pytest.mark.parametrize("text", [
     "Llama 3.1 8B", f"{LIBRARY}3.2", f"{LIBRARY} 3", f"{LIBRARY}-3.1-instruct", "TinyLlama", f"code{LIBRARY}",
     f"hf.co/meta-{LIBRARY}/Llama-3.1-8B", f"pull https://huggingface.co/meta-{LIBRARY}/Llama-3.2-1B first",
-    f"{LIBRARY}-guard3:8b", f"{LIBRARY}:latest", f"{LIBRARY}_3_instruct",
+    f"{LIBRARY}-guard3:8b", f"{LIBRARY}-guard:latest", f"{LIBRARY}:latest", f"{LIBRARY}:8b", f"{LIBRARY}_3_instruct",
     f"general.architecture str = {LIBRARY}", f'"general.architecture": "{LIBRARY}"', f"tokenizer.{CORE}.model str = {LIBRARY}",
     f"bad special token: 'tokenizer.{CORE}.padding_token_id'", f"{CORE} backend",
 ])
