@@ -56,8 +56,8 @@ Python standard library only (see [License](#license)).
   extras (projector, template, parameters, system prompt, license) by sha256; the files themselves sit once each in
   `blobs`. Models keep short names such as `qwen3:14b`, and pulled ones are named after their Hugging Face repository.
 - **One runtime process per model.** For each loaded model the engine starts a prebuilt model runtime (see
-  [NOTICE](NOTICE)) on a local port, so a crash takes down one model, not the server. The runtime is downloaded
-  separately and never copied into this repository.
+  [THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES)) on a local port, so a crash takes down one model, not the server. The
+  runtime is downloaded from ArtyEngine's own releases and never copied into this repository.
 - **VRAM budget swapping.** Before a model loads, the engine estimates what it needs (weights, KV cache, overhead)
   and unloads the least recently used idle models until it fits `vram_budget_mb` and the card's free memory.
   A model loaded on the CPU (`num_gpu: 0`) needs none of it, so it never unloads or waits for another model.
@@ -97,9 +97,10 @@ layout Arty uses. Any other folders work; set them in the config. The full walk-
 [docs/install.md](docs/install.md).
 
 1. Copy this repository to `/srv/ai/arty-engine/src`.
-2. Download the runtime's official CUDA build from https://github.com/ggml-org/llama.cpp/releases (tested with release
-   b12110 for CUDA 12.8), unpack it under `/srv/ai/arty-engine/runtime/`, and link `/srv/ai/arty-engine/runtime/server`
-   to its model server binary.
+2. Install the model runtime from ArtyEngine's own releases (release `runtime-b12110`, tested with the CUDA 12.8
+   build): `python3 -m arty_engine runtime install --platform linux-cuda-12.8-x64`. It checks the zip's SHA-256,
+   unpacks it under `/srv/ai/arty-engine/runtime/` and points the `server` and `worker` links there
+   ([docs/install.md](docs/install.md#the-model-runtime)).
 3. Copy `deploy/engine.json` to `/srv/ai/arty-engine/engine.json` and set at least `vram_budget_mb` to a little under
    your card's memory.
 4. Install `deploy/arty-engine.service`, then check the engine answers:
@@ -161,14 +162,15 @@ What each command does, its refusals, and `tools/unused_blobs.py` are in [docs/s
 card. Treat it as a starting point; `tools/amd-check.sh` ([docs/amd-check.md](docs/amd-check.md)) checks it on a
 machine that has one. The setup, supported cards and container devices are in [docs/amd.md](docs/amd.md).
 
-**Which runtime build.** Two official release builds of the same runtime as the CUDA one (release b12110, the one the
-engine was tested with), each unpacked into a folder of its own:
+**Which runtime build.** The ROCm and Vulkan builds of the same runtime release as the CUDA one (`runtime-b12110`),
+from ArtyEngine's own releases, each unpacked into a folder of its own (`arty-engine runtime install --platform
+linux-rocm-10.0-x64` or `linux-vulkan-x64`):
 
-- ROCm: https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-ubuntu-rocm-10.0-x64.tar.gz
-- Vulkan: https://github.com/ggml-org/llama.cpp/releases/download/b12110/llama-b12110-bin-ubuntu-vulkan-x64.tar.gz
+- ROCm: https://github.com/drew-codes-things/ArtyEngine/releases/download/runtime-b12110/arty-runtime-linux-rocm-10.0-x64.zip
+- Vulkan: https://github.com/drew-codes-things/ArtyEngine/releases/download/runtime-b12110/arty-runtime-linux-vulkan-x64.zip
 
-Their published sha256 digests are `664b5c218ec9a38d1e7b543bae7407dc62a4051ba09ddc51bd29f68ee77da674` (ROCm) and
-`a5d741940956ec62e8783aee7e5a4c7c761af867d6f027c3277a51e1a3ac59b0` (Vulkan).
+Their SHA-256 digests are pinned in `arty_engine/runtime_release.json` once the zips are published, and listed in the
+release's `SHA256SUMS`.
 
 The build carries GPU code for gfx908, gfx90a, gfx942, gfx950, gfx1010 to gfx1012,
 gfx1030 to gfx1036, gfx1100 to gfx1103, gfx1150 to gfx1152, gfx1200 and gfx1201.
@@ -199,5 +201,5 @@ replay answers recorded from real runs (`tests/fixtures/`).
 
 [PolyForm Strict 1.0.0](LICENSE). In short: you may use the engine for any noncommercial purpose (personal use,
 research, hobby projects, and use by charities, schools, public research and government bodies), but you may not
-distribute it or make changes or new works based on it. It comes as is, without warranty. See [NOTICE](NOTICE) for
-the model runtime the engine starts, which is MIT licensed.
+distribute it or make changes or new works based on it. It comes as is, without warranty. See [NOTICE](NOTICE) and
+[THIRD_PARTY_NOTICES](THIRD_PARTY_NOTICES) for the model runtime the engine starts, which is MIT licensed.

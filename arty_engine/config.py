@@ -70,10 +70,13 @@ class Config:
     gpu_backend: str = AUTO_BACKEND
     runtimes: dict = field(default_factory=dict)
     remote_models: dict = field(default_factory=dict)
+    runtime_url: str = ""
 
     def __post_init__(self):
         check_gpu_settings(self.gpu_backend, self.runtimes)
         check_remote_models(self.remote_models)
+        if not isinstance(self.runtime_url, str) or (self.runtime_url and not self.runtime_url.startswith(("https://", "http://"))):
+            raise ValueError("runtime_url must be empty or an http(s) address of a runtime zip")
         if not isinstance(self.thinking_leakers, list) or not all(isinstance(name, str) for name in self.thinking_leakers):
             raise ValueError("thinking_leakers must be a list of model names")
 

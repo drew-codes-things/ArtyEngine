@@ -1,0 +1,15 @@
+{
+  "release": "runtime-b12110",
+  "platforms": [
+    "linux-x64",
+    "linux-cuda-12.8-x64",
+    "linux-cuda-13.4-x64",
+    "linux-vulkan-x64",
+    "linux-rocm-10.0-x64",
+    "windows-x64",
+    "windows-cuda-12.4-x64",
+    "windows-cuda-13.4-x64",
+    "windows-vulkan-x64"
+  ],
+  "sha256": {}
+}

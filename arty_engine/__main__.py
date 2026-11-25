@@ -1,3 +1,3 @@
-from .server import main
+from .cli import entry
 
-main()
+entry()

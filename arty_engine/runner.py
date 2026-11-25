@@ -17,6 +17,7 @@ from . import gpu
 from .backend import Backend, resolve_backend
 from .config import Config, SpeculativeSettings
 from .gguf import whole_number
+from .runtime import SERVER, locate_binary
 from .store import Model, ModelStore, parse_name
 from .translate import THINKING_SWITCH
 
@@ -206,7 +207,7 @@ def speculative_arguments(config: Config, plan: LaunchPlan) -> list[str]:
 class RunnerPool:
     def __init__(self, config: Config, store: ModelStore, launcher=subprocess.Popen, memory=None, backend: Backend | None = None):
         self.backend = backend or resolve_backend(config)
-        self.config = replace(config, runner_binary=self.backend.runner_binary, library_path=list(self.backend.library_path))
+        self.config = replace(config, runner_binary=locate_binary(self.backend.runner_binary, SERVER), library_path=list(self.backend.library_path))
         self.store = store
         self.leaker_names = {parse_name(name).display for name in config.thinking_leakers}
         warn_about_unknown_leakers(self.leaker_names, store)

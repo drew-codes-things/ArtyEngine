@@ -6,8 +6,9 @@ sysfs and device nodes) on machines without an AMD card. Treat it as a starting 
 
 ## Runtime builds
 
-The download links of the two builds and their sha256 digests are in the [README](../README.md#amd-gpus-untested). Link a `server` in each folder to its
-model server binary (not the RPC server), as for CUDA.
+The download links of the two builds are in the [README](../README.md#amd-gpus-untested); `arty-engine runtime install
+--platform linux-rocm-10.0-x64 --dir <folder>` (or `linux-vulkan-x64`) unpacks one into a folder of its own and points
+its `server` link at `arty-runtime-server`, as for CUDA.
 
 - The **ROCm** build loads ROCm 10.0's `libamdhip64.so.7`, `libhipblas.so.3` and `librocblas.so.5`, which it does not
   include. Either install ROCm 10.0 on the system, or install AMD's own Python packages of it into a folder, the way

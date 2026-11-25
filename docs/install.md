@@ -10,10 +10,34 @@ sudo mkdir -p /srv/ai/arty-engine/runtime
 sudo cp -r . /srv/ai/arty-engine/src
 ```
 
-Download the runtime's official CUDA build from https://github.com/ggml-org/llama.cpp/releases (the engine was
-tested with release b12110 for CUDA 12.8), unpack it into a folder of its own under `/srv/ai/arty-engine/runtime/`,
-and link `/srv/ai/arty-engine/runtime/server` to the model server binary in that folder (not the RPC server). The
-engine runs the binary through that link, so a new release is one changed link.
+## The model runtime
+
+The engine starts a prebuilt model runtime for each model. ArtyEngine publishes it as zips on its own GitHub
+releases (release `runtime-b12110`, tested with the CUDA 12.8 build), one per platform, each holding
+`arty-runtime-server`, `arty-runtime-worker` (the RPC worker), their libraries, the runtime's `LICENSE` and
+[THIRD_PARTY_NOTICES](../THIRD_PARTY_NOTICES):
+
+```bash
+cd /srv/ai/arty-engine/src
+sudo python3 -m arty_engine runtime install --platform linux-cuda-12.8-x64
+python3 -m arty_engine runtime find
+```
+
+`install` downloads `arty-runtime-<platform>.zip`, checks its SHA-256 against the digest pinned in
+`arty_engine/runtime_release.json` (or the release's `SHA256SUMS` while none is pinned), unpacks it into
+`/srv/ai/arty-engine/runtime/runtime-b12110-<platform>/` and points the `runtime/server` and `runtime/worker` links
+there, so a new release is one changed link. Platforms: `linux-x64` (CPU only), `linux-cuda-12.8-x64`,
+`linux-cuda-13.4-x64`, `linux-vulkan-x64`, `linux-rocm-10.0-x64`, `windows-x64`, `windows-cuda-12.4-x64`,
+`windows-cuda-13.4-x64`, `windows-vulkan-x64`. The CUDA builds need NVIDIA's CUDA runtime libraries; list their folder
+in `library_path`.
+
+To use a runtime zip from somewhere else, set `runtime_url` in `engine.json` (or pass `--url`) together with
+`--sha256`, the zip's SHA-256. `runner_binary` may name the binary, its link, or the runtime folder; in a folder the
+engine looks for `arty-runtime-server` and then `server`, and a folder unpacked from an earlier official build zip
+works as it is.
+
+`tools/package_runtime.py` builds these zips from the official build archives (it checks the archive's SHA-256, renames
+the binaries, adds the licence files and writes `SHA256SUMS`); publishing them is a separate, manual step.
 
 Then write the config the service reads, starting from the shipped one:
 

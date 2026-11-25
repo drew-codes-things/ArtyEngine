@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "arty-engine"
+version = "0.1.0"
+description = "Arty's own model engine"
+requires-python = ">=3.10"
+
+[project.scripts]
+arty-engine = "arty_engine.cli:entry"
+
+[tool.setuptools]
+packages = ["arty_engine"]
+
+[tool.setuptools.package-data]
+arty_engine = ["*.json"]

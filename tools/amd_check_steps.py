@@ -14,6 +14,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from arty_engine import gpu
+from arty_engine.runtime import ReleaseInfo, unpack
 
 REQUEST_TIMEOUT_SECONDS = 600
 PULL_TIMEOUT_SECONDS = 3600
@@ -231,6 +232,10 @@ def parser() -> argparse.ArgumentParser:
     digest = steps.add_parser("published-digest")
     digest.add_argument("release_file", type=Path)
     digest.add_argument("asset")
+    steps.add_parser("pinned-digest").add_argument("platform")
+    unpacking = steps.add_parser("unpack")
+    unpacking.add_argument("archive", type=Path)
+    unpacking.add_argument("folder", type=Path)
     config = steps.add_parser("write-config")
     for name in ("out", "work"):
         config.add_argument(f"--{name}", type=Path, required=True)
@@ -263,6 +268,11 @@ def run(arguments: argparse.Namespace) -> str:
         return str(free_port())
     if step == "published-digest":
         return published_digest(arguments.release_file, arguments.asset)
+    if step == "pinned-digest":
+        return ReleaseInfo.read().sha256.get(arguments.platform, "")
+    if step == "unpack":
+        unpack(arguments.archive, arguments.folder)
+        return str(arguments.folder)
     if step == "write-config":
         settings = write_config(arguments.out, arguments.port, arguments.work, arguments.backend, arguments.runner, arguments.library)
         return f"{arguments.out} (listen {settings['listen']}, vram_budget_mb {settings['vram_budget_mb']})"

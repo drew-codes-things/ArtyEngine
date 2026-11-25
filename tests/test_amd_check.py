@@ -9,7 +9,7 @@ import signal
 import socket
 import subprocess
 import sys
-import tarfile
+import zipfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -36,7 +36,7 @@ echo "$1" >> "$FAKE_ROOT/curl-calls"
 [ -z "${FAKE_CURL_SLOW:-}" ] || sleep "$FAKE_CURL_SLOW"
 case "$1" in
   *api.github.com*) [ -f "$FAKE_ROOT/release.json" ] || exit 22; cp "$FAKE_ROOT/release.json" "$out" ;;
-  *) cp "$FAKE_ROOT/runtime.tar.gz" "$out" ;;
+  *) cp "$FAKE_ROOT/runtime.zip" "$out" ;;
 esac
 """
 FAKE_LDD = """#!/bin/bash
@@ -84,9 +84,10 @@ def script_value(name: str) -> str:
 
 RELEASE = script_value("RELEASE")
 ASSET_PREFIX = script_value("ASSET_URL_PREFIX").replace("$RELEASE", RELEASE).rsplit("/", 1)[1]
-ROCM_ASSET = f"{ASSET_PREFIX}{script_value('ROCM_ASSET_KIND')}.tar.gz"
-VULKAN_ASSET = f"{ASSET_PREFIX}{script_value('VULKAN_ASSET_KIND')}.tar.gz"
-RUNTIME_PROJECT_WORDS = {part.split("-")[0].split(".")[0] for part in script_value("RELEASE_API").split("/repos/")[1].split("/")[:2]}
+ROCM_KIND = script_value("ROCM_ASSET_KIND")
+VULKAN_KIND = script_value("VULKAN_ASSET_KIND")
+ROCM_ASSET = f"{ASSET_PREFIX}{ROCM_KIND}.zip"
+VULKAN_ASSET = f"{ASSET_PREFIX}{VULKAN_KIND}.zip"
 
 
 def program(folder: Path, name: str, text: str) -> None:
@@ -142,15 +143,12 @@ class Rig:
         path.write_text("")
 
     def build_runtime(self) -> str:
-        package = self.root / "package" / "pkg-b1"
-        package.mkdir(parents=True)
-        program(package, "fake-server", FAKE_SERVER)
-        program(package, "fake-rpc-server", "#!/bin/bash\nexit 1\n")
-        for library in ("libfake-hip.so", "libfake-vulkan.so"):
-            (package / library).write_text("")
-        archive = self.root / "runtime.tar.gz"
-        with tarfile.open(archive, "w:gz") as bundle:
-            bundle.add(package, arcname="pkg-b1")
+        archive = self.root / "runtime.zip"
+        with zipfile.ZipFile(archive, "w") as bundle:
+            bundle.writestr("arty-runtime-server", FAKE_SERVER)
+            bundle.writestr("arty-runtime-worker", "#!/bin/bash\nexit 1\n")
+            for library in ("libfake-hip.so", "libfake-vulkan.so"):
+                bundle.writestr(library, "")
         return hashlib.sha256(archive.read_bytes()).hexdigest()
 
     def release_listing(self, digest: str) -> None:
@@ -166,16 +164,22 @@ class Rig:
         return subprocess.run(["bash", str(script), "--report", str(self.report), *arguments], cwd=self.root,
                               env={**self.environment, **extra}, capture_output=True, text=True, timeout=SCRIPT_TIMEOUT_SECONDS)
 
-    def kit_pinned_to_this_runtime(self, constant: str) -> Path:
+    def kit_with_pins(self, pins: dict[str, str]) -> Path:
         tools = self.root / "kit" / "tools"
         tools.mkdir(parents=True)
-        text = re.sub(rf"^{constant}=.*$", f"{constant}={self.runtime_digest}", SCRIPT.read_text(), count=1, flags=re.M)
-        (tools / SCRIPT.name).write_text(text)
+        shutil.copy(SCRIPT, tools)
         shutil.copy(SCRIPT.with_name("amd_check_steps.py"), tools)
         shutil.copytree(SCRIPT.parents[1] / "arty_engine", tools.parent / "arty_engine",
                         ignore=shutil.ignore_patterns("__pycache__"))
+        release_file = tools.parent / "arty_engine" / "runtime_release.json"
+        release = json.loads(release_file.read_text())
+        release["sha256"] = pins
+        release_file.write_text(json.dumps(release))
         self.environment.pop("AMD_CHECK_RUNTIME_SHA256")
         return tools / SCRIPT.name
+
+    def kit_pinned_to_this_runtime(self, kind: str) -> Path:
+        return self.kit_with_pins({kind: self.runtime_digest})
 
     def curl_calls(self) -> list[str]:
         calls = self.root / "curl-calls"
@@ -230,7 +234,7 @@ def test_a_dry_run_prints_the_plan_and_touches_nothing(rig):
     finished = rig.run("--dry-run")
     assert finished.returncode == 0, finished.stderr
     assert "1. detect the GPU" in finished.stdout and "9. stop the engine" in finished.stdout
-    assert "ubuntu-rocm-10.0-x64" in finished.stdout and "Qwen3-VL-2B" in finished.stdout
+    assert ROCM_KIND in finished.stdout and "Qwen3-VL-2B" in finished.stdout
     assert rig.curl_calls() == [] and not rig.report.exists() and rig.leftover_work() == []
 
 
@@ -263,7 +267,7 @@ def test_rocm_runs_through_download_config_and_engine_start_then_cleans_up(rig):
     steps = rig.steps()
     assert steps["detect"].startswith("PASS backend rocm.") and "/dev/kfd: yes" in steps["detect"]
     assert "card target: gfx1100" in steps["detect"]
-    assert steps["download"] == f"PASS release {RELEASE}, ubuntu-rocm-10.0-x64 build, sha256 {rig.runtime_digest} matches the pinned digest (the release listing agrees)"
+    assert steps["download"] == f"PASS release {RELEASE}, {ROCM_KIND} build, sha256 {rig.runtime_digest} matches the pinned digest (the release listing agrees)"
     assert steps["libraries"].startswith("PASS every library of the rocm backend loads (ROCm libraries: system)")
     assert steps["devices"] == "PASS   ROCm0: Fake Radeon (16368 MiB, 16000 MiB free)"
     assert steps["start"].startswith("PASS version") and "GPU backend rocm (set in the config)" in steps["start"]
@@ -273,7 +277,7 @@ def test_rocm_runs_through_download_config_and_engine_start_then_cleans_up(rig):
     assert not port_answers(port) and rig.leftover_work() == []
     assert any("rocm-10.0" in call for call in rig.curl_calls())
     assert result_line(rig) == "result: INCOMPLETE (stopped after start as asked; every step that ran passed)"
-    assert f"runtime: release {RELEASE}, ubuntu-rocm-10.0-x64 build" in rig.report.read_text()
+    assert f"runtime: release {RELEASE}, {ROCM_KIND} build" in rig.report.read_text()
 
 
 def test_the_written_config_names_the_backend_and_its_runtime(rig):
@@ -283,7 +287,7 @@ def test_the_written_config_names_the_backend_and_its_runtime(rig):
     work = rig.leftover_work()[0]
     config = json.loads((work / "engine.json").read_text())
     assert config["gpu_backend"] == "rocm" and config["listen"].startswith("127.0.0.1:")
-    assert config["runtimes"] == {"rocm": {"runner_binary": str(work / "runtime" / "fake-server"), "library_path": []}}
+    assert config["runtimes"] == {"rocm": {"runner_binary": str(work / "runtime" / "arty-runtime-server"), "library_path": []}}
     assert config["store"] == str(work / "models") and config["pull_keep_free_mb"] == 512
 
 
@@ -294,7 +298,7 @@ def test_no_kfd_means_the_vulkan_build(rig):
     assert finished.returncode == 0, finished.stdout
     steps = rig.steps()
     assert steps["detect"].startswith("PASS backend vulkan (no /dev/kfd)")
-    assert "ubuntu-vulkan-x64 build" in steps["download"] and "Vulkan0" in steps["devices"]
+    assert f"{VULKAN_KIND} build" in steps["download"] and "Vulkan0" in steps["devices"]
     assert steps["libraries"].startswith("PASS every library of the vulkan backend loads (ROCm libraries: not used)")
 
 
@@ -303,7 +307,7 @@ def test_a_digest_that_does_not_match_the_release_stops_the_check(rig):
     rig.release_listing("0" * 64)
     finished = rig.run()
     assert finished.returncode == EXIT_FAILED
-    assert rig.steps()["download"] == (f"FAIL release {RELEASE}, ubuntu-rocm-10.0-x64 build has sha256 {rig.runtime_digest}, "
+    assert rig.steps()["download"] == (f"FAIL release {RELEASE}, {ROCM_KIND} build has sha256 {rig.runtime_digest}, "
                                        f"but the release lists {'0' * 64}")
     assert "config" not in rig.steps() and rig.leftover_work() == []
 
@@ -313,7 +317,7 @@ def test_an_unreachable_release_listing_still_runs_a_runtime_that_matches_its_pi
     (rig.root / "release.json").unlink()
     rig.run("--stop-after", "download")
     download = rig.steps()["download"]
-    assert download.startswith(f"PASS release {RELEASE}, ubuntu-rocm-10.0-x64 build, sha256 {rig.runtime_digest} matches")
+    assert download.startswith(f"PASS release {RELEASE}, {ROCM_KIND} build, sha256 {rig.runtime_digest} matches")
     assert "pinned" in download and "listing could not be read" in download
 
 
@@ -322,15 +326,33 @@ def test_a_runtime_that_does_not_match_its_pinned_digest_stops_the_check_even_wh
     finished = rig.run(AMD_CHECK_RUNTIME_SHA256="1" * 64)
     assert finished.returncode == EXIT_FAILED, finished.stdout
     download = rig.steps()["download"]
-    assert download.startswith(f"FAIL release {RELEASE}, ubuntu-rocm-10.0-x64 build has sha256 {rig.runtime_digest}")
+    assert download.startswith(f"FAIL release {RELEASE}, {ROCM_KIND} build has sha256 {rig.runtime_digest}")
     assert "1" * 64 in download and "libraries" not in rig.steps() and rig.leftover_work() == []
 
 
-def test_the_kit_s_pinned_digests_match_the_readme():
+def test_the_readme_names_the_assets_the_kit_downloads():
     readme = (SCRIPT.parents[1] / "README.md").read_text()
-    published = dict(re.findall(r"`([0-9a-f]{64})` \((ROCm|Vulkan)\)", readme.replace("\n", " ")))
-    assert {kind: digest for digest, kind in published.items()} == {"ROCm": script_value("ROCM_RUNTIME_SHA256"),
-                                                                    "Vulkan": script_value("VULKAN_RUNTIME_SHA256")}
+    prefix = script_value("ASSET_URL_PREFIX").replace("$RELEASE", RELEASE)
+    for asset in (ROCM_ASSET, VULKAN_ASSET):
+        assert f"{prefix.rsplit('/', 1)[0]}/{asset}" in readme
+
+
+def test_a_runtime_with_no_pinned_digest_runs_when_the_release_listing_agrees(rig):
+    amd_with_rocm(rig)
+    kit = rig.kit_with_pins({})
+    finished = rig.run("--stop-after", "download", script=kit)
+    assert finished.returncode == 0, finished.stdout
+    assert rig.steps()["download"] == (f"PASS release {RELEASE}, {ROCM_KIND} build, sha256 {rig.runtime_digest} matches the "
+                                       "release listing (this kit pins no digest for it yet)")
+
+
+def test_a_runtime_with_no_pinned_digest_and_no_release_listing_is_not_run(rig):
+    amd_with_rocm(rig)
+    (rig.root / "release.json").unlink()
+    kit = rig.kit_with_pins({})
+    finished = rig.run("--stop-after", "download", script=kit)
+    assert finished.returncode == EXIT_FAILED, finished.stdout
+    assert "pins no digest" in rig.steps()["download"] and "libraries" not in rig.steps()
 
 
 def test_a_runtime_that_sees_no_gpu_fails(rig):
@@ -433,13 +455,10 @@ def test_the_temporary_folder_defaults_to_a_disk_backed_place(rig):
     assert "temporary folder under /var/tmp" in finished.stdout
 
 
-def test_the_kit_s_own_output_names_the_runtime_only_in_url_lines(rig):
+def test_the_kit_s_own_output_keeps_asset_and_library_names_out(rig):
     amd_with_rocm(rig)
     finished = rig.run("--stop-after", "start", FAKE_LDD_MISSING="1")
     assert finished.returncode == 0, finished.stdout
-    for line in finished.stdout.splitlines() + rig.report.read_text().splitlines():
-        if any(word in line.lower() for word in RUNTIME_PROJECT_WORDS):
-            assert "https://" in line, line
     assert ROCM_ASSET not in finished.stdout + rig.report.read_text()
     assert "libfake-hip.so" not in finished.stdout
 
@@ -579,37 +598,29 @@ def test_the_kit_holds_no_home_values_and_the_script_needs_no_sudo():
     assert "sudo" not in SCRIPT.read_text() and "sudo" not in KIT_FILES[1].read_text()
 
 
-def test_the_runtime_project_s_name_appears_only_on_its_download_url_lines():
-    assert len(RUNTIME_PROJECT_WORDS) == 2
-    for path in KIT_FILES:
-        for line in path.read_text().splitlines():
-            if any(word in line.lower() for word in RUNTIME_PROJECT_WORDS):
-                assert "https://" in line, (path.name, line)
-
-
 def test_the_rocm_build_is_checked_against_the_rocm_pin(rig):
     amd_with_rocm(rig)
-    kit = rig.kit_pinned_to_this_runtime("ROCM_RUNTIME_SHA256")
+    kit = rig.kit_pinned_to_this_runtime(ROCM_KIND)
     finished = rig.run("--stop-after", "download", script=kit)
     assert finished.returncode == 0, finished.stdout
-    assert rig.steps()["download"].startswith(f"PASS release {RELEASE}, ubuntu-rocm-10.0-x64 build, sha256 {rig.runtime_digest}")
+    assert rig.steps()["download"].startswith(f"PASS release {RELEASE}, {ROCM_KIND} build, sha256 {rig.runtime_digest}")
     assert rig.steps()["download"].endswith("(the release listing agrees)")
 
 
 def test_the_vulkan_build_is_checked_against_the_vulkan_pin(rig):
     rig.render_node()
     rig.release_listing(rig.runtime_digest)
-    kit = rig.kit_pinned_to_this_runtime("VULKAN_RUNTIME_SHA256")
+    kit = rig.kit_pinned_to_this_runtime(VULKAN_KIND)
     finished = rig.run("--stop-after", "download", script=kit, FAKE_DEVICES=VULKAN_DEVICES)
     assert finished.returncode == 0, finished.stdout
-    assert rig.steps()["download"].startswith(f"PASS release {RELEASE}, ubuntu-vulkan-x64 build, sha256 {rig.runtime_digest}")
+    assert rig.steps()["download"].startswith(f"PASS release {RELEASE}, {VULKAN_KIND} build, sha256 {rig.runtime_digest}")
     assert rig.steps()["download"].endswith("(the release listing agrees)")
 
 
 def test_the_copied_kit_still_fails_a_runtime_the_release_listing_does_not_name(rig):
     amd_with_rocm(rig)
     rig.release_listing("0" * 64)
-    kit = rig.kit_pinned_to_this_runtime("ROCM_RUNTIME_SHA256")
+    kit = rig.kit_pinned_to_this_runtime(ROCM_KIND)
     finished = rig.run("--stop-after", "download", script=kit)
     assert finished.returncode == EXIT_FAILED, finished.stdout
     assert rig.steps()["download"].endswith(f"but the release lists {'0' * 64}")
@@ -618,10 +629,10 @@ def test_the_copied_kit_still_fails_a_runtime_the_release_listing_does_not_name(
 def test_a_build_is_never_checked_against_the_other_build_s_pin(rig):
     rig.render_node()
     rig.release_listing(rig.runtime_digest)
-    kit = rig.kit_pinned_to_this_runtime("ROCM_RUNTIME_SHA256")
+    kit = rig.kit_with_pins({ROCM_KIND: rig.runtime_digest, VULKAN_KIND: "1" * 64})
     finished = rig.run("--stop-after", "download", script=kit, FAKE_DEVICES=VULKAN_DEVICES)
     assert finished.returncode == EXIT_FAILED
-    assert f"this kit pins {script_value('VULKAN_RUNTIME_SHA256')}" in rig.steps()["download"]
+    assert f"this kit pins {'1' * 64}" in rig.steps()["download"]
 
 
 def test_the_test_hook_that_replaces_the_pin_is_documented():

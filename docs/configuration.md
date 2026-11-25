@@ -29,6 +29,7 @@
 | `internal_models` | `[]` | Models kept out of `/api/tags` (such as a draft model); they still answer by name |
 | `thinking_leakers` | `[]` | Thinking models that write reasoning into their answer even when told not to; their streamed replies are held back until a leak is ruled out ([how](api.md#thinking-that-leaks-into-the-answer)) |
 | `extra_args` | `{}` | Per model: extra runtime arguments, as a list |
+| `runtime_url` | empty | A runtime zip at another address for `arty-engine runtime install` (which then needs `--sha256`); empty for ArtyEngine's own release ([install.md](install.md#the-model-runtime)) |
 | `allowed_hosts` | `[]` | Host names besides localhost, 127.0.0.1 and ::1 that requests may name in `Host` while the engine listens on loopback |
 | `allowed_origins` | `[]` | Host names of web pages besides localhost whose requests (with an `Origin` header) are served |
 | `gpu_backend` | `auto` | `cuda`, `rocm`, `vulkan` or `cpu`; `auto` picks one at start ([how](#choosing-a-gpu-backend)) |
