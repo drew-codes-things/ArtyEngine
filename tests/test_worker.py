@@ -88,15 +88,15 @@ class RunningWorker:
 
 def round_trip(port: int, payload: bytes) -> bytes:
     received = b""
-    with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
-        try:
+    try:
+        with socket.create_connection(("127.0.0.1", port), timeout=5) as connection:
             connection.sendall(payload)
             connection.shutdown(socket.SHUT_WR)
             while chunk := connection.recv(65536):
                 received += chunk
-        except OSError as error:
-            if isinstance(error, TimeoutError):
-                raise
+    except OSError as error:
+        if isinstance(error, (TimeoutError, ConnectionRefusedError)):
+            raise
     return received
 
 
