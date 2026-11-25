@@ -11,23 +11,30 @@ NEUTRAL_WORD = "runtime"
 LINK_REPLACEMENT = "(link removed)"
 UPSTREAM_SPELLINGS = re.compile(rf"{LIBRARY_WORD}[._ -]?c{'p'}p|{LIBRARY_WORD}[-_]server|o{LIBRARY_WORD}|{CORE_WORD}-org",
                                 re.IGNORECASE)
-UPSTREAM_PREFIXES = re.compile(rf"\blib(?:{LIBRARY_WORD}|{CORE_WORD})(?=[_.-])|\b(?:{LIBRARY_WORD}|{CORE_WORD})(?=_)")
+UPSTREAM_PREFIXES = re.compile(rf"\blib(?:{LIBRARY_WORD}|{CORE_WORD})(?=[_.-])|\b(?:{LIBRARY_WORD}|{CORE_WORD})(?=_[A-Za-z])")
 UPSTREAM_VARIABLES = re.compile(rf"\b(?:{LIBRARY_WORD.upper()}|{CORE_WORD.upper()})_")
-UPSTREAM_WORDS = re.compile(rf"\b(?:{LIBRARY_WORD}|{CORE_WORD})\b(?![\s._-]*\d)")
+MODEL_TAG_AHEAD = r"[\w-]*:(?=[A-Za-z0-9])(?!\d+\b)"
+UPSTREAM_WORD = re.compile(rf"(?<!meta-)\b{LIBRARY_WORD}\b(?![\s._-]*\d)(?!{MODEL_TAG_AHEAD})")
+ARCHITECTURE_VALUE = re.compile(r"(?:architecture|tokenizer\.\w+\.model)[\"']?(?:\s+str)?\s*[=:]\s*[\"']?$")
+ARCHITECTURE_CONTEXT_CHARS = 80
 LINK = re.compile(r"https?://[^\s)\]>\"']+")
 
 
-def names_upstream(text: str) -> bool:
-    lowered = text.lower()
-    return LIBRARY_WORD in lowered or CORE_WORD in lowered
+def names_upstream_project(link: str) -> bool:
+    return bool(UPSTREAM_SPELLINGS.search(link))
+
+
+def neutral_unless_architecture(found: re.Match) -> str:
+    before = found.string[max(0, found.start() - ARCHITECTURE_CONTEXT_CHARS):found.start()]
+    return found.group(0) if ARCHITECTURE_VALUE.search(before) else NEUTRAL_WORD
 
 
 def scrub(text: str) -> str:
-    text = LINK.sub(lambda found: LINK_REPLACEMENT if names_upstream(found.group(0)) else found.group(0), text)
+    text = LINK.sub(lambda found: LINK_REPLACEMENT if names_upstream_project(found.group(0)) else found.group(0), text)
     text = UPSTREAM_SPELLINGS.sub(NEUTRAL_WORD, text)
     text = UPSTREAM_VARIABLES.sub(lambda found: NEUTRAL_WORD.upper() + "_", text)
     text = UPSTREAM_PREFIXES.sub(lambda found: "lib" + NEUTRAL_WORD if found.group(0).startswith("lib") else NEUTRAL_WORD, text)
-    return UPSTREAM_WORDS.sub(NEUTRAL_WORD, text)
+    return UPSTREAM_WORD.sub(neutral_unless_architecture, text)
 
 
 def scrub_strings(value):

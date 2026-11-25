@@ -43,6 +43,7 @@ EVENT_STREAM = "text/event-stream"
 PASS_THROUGH_CHUNK_BYTES = 65536
 EVENT_DATA = b"data: "
 ERROR_MEMBER = b"\"error\""
+EVENT_LINE_END = b"\n"
 PRIVATE_PROPS = ("build_info", "model_path")
 LONGEST_SLOT_FILE_NAME = 100
 SLOT_FILE_NAME = re.compile(rf"[A-Za-z0-9][A-Za-z0-9._-]{{0,{LONGEST_SLOT_FILE_NAME - 1}}}")
@@ -60,21 +61,36 @@ class RelayUnreachable(RelayError, RunnerGone):
     pass
 
 
-def errors_scrubbed(text: str) -> str:
+def with_error_scrubbed(text: str) -> str | None:
     try:
         payload = json.loads(text)
     except ValueError:
-        return text
+        return None
     if not isinstance(payload, dict) or "error" not in payload:
-        return text
-    return json.dumps({**payload, "error": scrub_strings(payload["error"])})
+        return None
+    scrubbed = scrub_strings(payload["error"])
+    if scrubbed == payload["error"]:
+        return None
+    return json.dumps({**payload, "error": scrubbed})
+
+
+def errors_scrubbed(text: str) -> str:
+    scrubbed = with_error_scrubbed(text)
+    return text if scrubbed is None else scrubbed
 
 
 def event_line_scrubbed(line: bytes) -> bytes:
-    if not line.startswith(EVENT_DATA) or ERROR_MEMBER not in line:
+    if not line.startswith(EVENT_DATA) or ERROR_MEMBER not in line or not line.endswith(EVENT_LINE_END):
+        return line
+    try:
+        text = line[len(EVENT_DATA):].decode("utf-8")
+    except UnicodeDecodeError:
+        return line
+    scrubbed = with_error_scrubbed(text)
+    if scrubbed is None:
         return line
     ending = line[len(line.rstrip(b"\r\n")):]
-    return EVENT_DATA + errors_scrubbed(line[len(EVENT_DATA):].strip().decode(errors="replace")).encode() + ending
+    return EVENT_DATA + scrubbed.encode() + ending
 
 
 def relay_cut(events, detail: str) -> RelayError:
