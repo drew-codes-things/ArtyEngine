@@ -152,6 +152,8 @@ class StreamEndWatcher:
 
     def finished(self) -> bool:
         if not self.at_line_start:
+            if self.oversized:
+                return self.ended
             self._close_line()
         return self.ended or self.unchecked_line_last
 

@@ -3,6 +3,7 @@ import urllib.request
 
 import pytest
 
+from arty_engine.compat import StreamEndWatcher
 from engine_harness import RunningEngine, error_of, http_json
 
 UPSTREAM_WORD = "ll" + "ama"
@@ -374,6 +375,57 @@ def test_a_final_event_past_the_checked_size_is_not_called_a_cut(tmp_path, monke
     finally:
         engine.close()
     assert "event: error" not in lines and BIG_TEXT in lines[-1]
+
+
+SMALL_CAP_BYTES = 1024
+OVER_CAP_LINE = b"data: " + b"x" * (2 * SMALL_CAP_BYTES) + b"\n"
+GOING_ON_LINE = b'data: {"content": "h", "stop": false}\n'
+
+
+def test_an_over_cap_last_line_without_its_newline_is_called_a_cut(tmp_path, monkeypatch):
+    monkeypatch.setattr("arty_engine.compat.LONGEST_CHECKED_LINE_BYTES", SMALL_CAP_BYTES)
+    unterminated = 'data: {"content": "h", "stop": false}\n\ndata: {"content": "%s", "stop": false}' % BIG_TEXT
+    engine = failing_engine(tmp_path, {"/completion": {"raw_sse": unterminated}})
+    try:
+        lines = raw_event_lines(f"{engine.url}/completion", PASS_THROUGH_REQUEST)
+    finally:
+        engine.close()
+    assert lines[-2] == "event: error" and BIG_TEXT in lines[-3]
+
+
+def test_a_real_end_without_its_newline_is_not_called_a_cut(tmp_path):
+    unterminated = 'data: {"content": "h", "stop": false}\n\ndata: {"content": "", "stop": true}'
+    engine = failing_engine(tmp_path, {"/completion": {"raw_sse": unterminated}})
+    try:
+        lines = raw_event_lines(f"{engine.url}/completion", PASS_THROUGH_REQUEST)
+    finally:
+        engine.close()
+    assert "event: error" not in lines and lines[-1] == 'data: {"content": "", "stop": true}'
+
+
+def test_a_normal_line_after_an_over_cap_line_is_checked_again(monkeypatch):
+    monkeypatch.setattr("arty_engine.compat.LONGEST_CHECKED_LINE_BYTES", SMALL_CAP_BYTES)
+    watcher = StreamEndWatcher()
+    watcher.feed(OVER_CAP_LINE)
+    watcher.feed(GOING_ON_LINE)
+    assert not watcher.finished()
+
+
+def test_an_unterminated_end_after_an_over_cap_line_is_read(monkeypatch):
+    monkeypatch.setattr("arty_engine.compat.LONGEST_CHECKED_LINE_BYTES", SMALL_CAP_BYTES)
+    watcher = StreamEndWatcher()
+    watcher.feed(OVER_CAP_LINE)
+    watcher.feed(b"data: [DONE]")
+    assert watcher.finished()
+
+
+def test_the_watcher_never_holds_more_than_the_cap_of_one_line(monkeypatch):
+    monkeypatch.setattr("arty_engine.compat.LONGEST_CHECKED_LINE_BYTES", SMALL_CAP_BYTES)
+    watcher = StreamEndWatcher()
+    for _ in range(10):
+        watcher.feed(b"x" * (SMALL_CAP_BYTES // 2))
+        assert len(watcher.current) <= SMALL_CAP_BYTES
+    assert not watcher.finished()
 
 
 def test_the_runtime_release_is_the_engine_s_folder_name_or_external():

@@ -25,12 +25,12 @@ class FakeRunnerServer:
                 self.end_headers()
                 self.wfile.write(data)
 
-            def _send_cut_stream(self, events: list[str]):
+            def _send_cut_stream(self, data: bytes):
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
                 self.send_header("Connection", "close")
                 self.end_headers()
-                self.wfile.write("".join(f"{event}\n\n" for event in events).encode())
+                self.wfile.write(data)
                 self.wfile.flush()
                 self.close_connection = True
 
@@ -70,7 +70,9 @@ class FakeRunnerServer:
                 elif "sse" in reply:
                     self._send(200, ("\n\n".join(reply["sse"]) + "\n\n").encode(), "text/event-stream")
                 elif "cut_sse" in reply:
-                    self._send_cut_stream(reply["cut_sse"])
+                    self._send_cut_stream("".join(f"{event}\n\n" for event in reply["cut_sse"]).encode())
+                elif "raw_sse" in reply:
+                    self._send_cut_stream(reply["raw_sse"].encode())
                 elif "error" in reply:
                     self._send(reply.get("status", 400), {"error": {"message": reply["error"]}})
                 else:
