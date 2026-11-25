@@ -193,6 +193,8 @@ class Runner:
     expires_wall: float | None = None
     stopping: bool = False
     unload_requested: bool = False
+    latest_keep_alive: float | None = None
+    latest_keep_alive_noted: bool = False
     process_memory: Callable[[], dict[int, int]] = gpu.memory_by_process
     api_key: str = ""
     log_thread: threading.Thread | None = None
@@ -487,12 +489,20 @@ class RunnerPool:
                 return runner
         return None
 
+    def note_keep_alive(self, runner: Runner, keep_alive: float | None) -> None:
+        with self.state:
+            runner.latest_keep_alive = keep_alive
+            runner.latest_keep_alive_noted = True
+
     def release(self, runner: Runner, keep_alive: float | None) -> None:
         stop_now = False
         with self.state:
             runner.in_flight -= 1
             runner.last_used = time.monotonic()
             if runner.in_flight == 0:
+                if runner.latest_keep_alive_noted:
+                    keep_alive = runner.latest_keep_alive
+                    runner.latest_keep_alive_noted = False
                 if keep_alive is FOREVER:
                     runner.expires_at = runner.expires_wall = None
                 else:
@@ -525,6 +535,7 @@ class RunnerPool:
             if not runner or not runner.alive:
                 return False
             runner.in_flight += 1
+        self.note_keep_alive(runner, keep_alive)
         self.release(runner, keep_alive)
         return True
 

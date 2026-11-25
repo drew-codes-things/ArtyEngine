@@ -171,6 +171,7 @@ class Engine:
         try:
             for attempt in range(1, ATTEMPTS_WHEN_A_RUNNER_DIES + 1):
                 runner, load_seconds = self._runner_for(model, options, cpu_only, load_options, prefer_loaded)
+                self.pool.note_keep_alive(runner, keep_alive)
                 try:
                     return work(runner, load_seconds)
                 except RunnerGone:

@@ -1,9 +1,11 @@
 import json
+import threading
 import urllib.request
 
 import pytest
 
 from arty_engine.compat import ErrorLineHolder, StreamEndWatcher, ends_the_stream, event_line_scrubbed
+from arty_engine.runner import FOREVER
 from engine_harness import RunningEngine, error_of, http_json
 
 UPSTREAM_WORD = "ll" + "ama"
@@ -190,6 +192,30 @@ def test_a_loaded_model_is_reused_and_kept_alive(running):
                                                       "messages": [{"role": "user", "content": "hi"}]})
     assert len(running.launcher.launched) == 1
     assert running.engine.pool.loaded()[0].expires_at is None
+
+
+def test_the_latest_keep_alive_wins_when_an_earlier_request_lets_go_last(running, monkeypatch):
+    pool = running.engine.pool
+    release = pool.release
+    second_answered = threading.Event()
+    first_released = threading.Event()
+
+    def release_the_first_request_last(runner, keep_alive):
+        if keep_alive is not FOREVER:
+            second_answered.wait(30)
+            release(runner, keep_alive)
+            first_released.set()
+            return
+        release(runner, keep_alive)
+
+    monkeypatch.setattr(pool, "release", release_the_first_request_last)
+    http_json(f"{running.url}/api/chat", {"model": "qwen3:14b", "stream": False, "keep_alive": "1m",
+                                          "messages": [{"role": "user", "content": "hi"}]})
+    http_json(f"{running.url}/v1/chat/completions", {"model": "qwen3:14b", "keep_alive": -1,
+                                                      "messages": [{"role": "user", "content": "hi"}]})
+    second_answered.set()
+    assert first_released.wait(30)
+    assert pool.loaded()[0].expires_at is None
 
 
 def test_every_engine_call_to_a_runner_carries_that_runner_s_key(running):
