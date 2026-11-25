@@ -3,7 +3,7 @@ import urllib.request
 
 import pytest
 
-from arty_engine.compat import StreamEndWatcher
+from arty_engine.compat import StreamEndWatcher, ends_the_stream, event_line_scrubbed
 from engine_harness import RunningEngine, error_of, http_json
 
 UPSTREAM_WORD = "ll" + "ama"
@@ -380,6 +380,8 @@ def test_a_final_event_past_the_checked_size_is_not_called_a_cut(tmp_path, monke
 SMALL_CAP_BYTES = 1024
 OVER_CAP_LINE = b"data: " + b"x" * (2 * SMALL_CAP_BYTES) + b"\n"
 GOING_ON_LINE = b'data: {"content": "h", "stop": false}\n'
+NESTING_LEVELS = 30000
+DEEPER_THAN_THE_SCRUBBER_GOES = 1500
 
 
 def test_an_over_cap_last_line_without_its_newline_is_called_a_cut(tmp_path, monkeypatch):
@@ -426,6 +428,14 @@ def test_the_watcher_never_holds_more_than_the_cap_of_one_line(monkeypatch):
         watcher.feed(b"x" * (SMALL_CAP_BYTES // 2))
         assert len(watcher.current) <= SMALL_CAP_BYTES
     assert not watcher.finished()
+
+
+@pytest.mark.parametrize("levels", [DEEPER_THAN_THE_SCRUBBER_GOES, NESTING_LEVELS])
+def test_deeply_nested_events_are_neither_an_end_nor_a_crash(levels):
+    nested = b"[" * levels + b'"x"' + b"]" * levels
+    assert not ends_the_stream(b"data: " + nested + b"\n")
+    error_line = b'data: {"error": ' + nested + b"}\n"
+    assert event_line_scrubbed(error_line) == error_line
 
 
 def test_the_runtime_release_is_the_engine_s_folder_name_or_external():

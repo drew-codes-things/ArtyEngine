@@ -66,9 +66,12 @@ class RelayUnreachable(RelayError, RunnerGone):
 
 def with_error_scrubbed(text: str) -> str | None:
     try:
-        payload = json.loads(text)
-    except ValueError:
+        return error_member_scrubbed(json.loads(text))
+    except (ValueError, RecursionError):
         return None
+
+
+def error_member_scrubbed(payload) -> str | None:
     if not isinstance(payload, dict) or "error" not in payload:
         return None
     scrubbed = scrub_strings(payload["error"])
@@ -125,7 +128,7 @@ def ends_the_stream(line: bytes) -> bool:
         return True
     try:
         event = json.loads(data)
-    except ValueError:
+    except (ValueError, RecursionError):
         return False
     if not isinstance(event, dict):
         return False
