@@ -4,8 +4,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 class FakeRunnerServer:
-    def __init__(self, port: int, replies: dict):
+    def __init__(self, port: int, replies: dict, loading: bool = False):
         self.replies = replies
+        self.loading = loading
         self.requests: list[dict] = []
         server = self
 
@@ -22,7 +23,18 @@ class FakeRunnerServer:
                 self.wfile.write(data)
 
             def do_GET(self):
-                self._send(200, {"status": "ok"})
+                if server.loading:
+                    self._send(503, {"error": {"message": "Loading model"}})
+                    return
+                reply = server.replies.get(self.path) if self.path != "/health" else None
+                if callable(reply):
+                    reply = reply({})
+                if reply is None:
+                    self._send(200, {"status": "ok"})
+                elif "text" in reply:
+                    self._send(200, reply["text"].encode(), reply.get("content_type", "text/plain"))
+                else:
+                    self._send(200, reply["json"])
 
             def do_POST(self):
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
@@ -51,12 +63,12 @@ class FakeRunnerServer:
 class FakeProcess:
     next_pid = 50000
 
-    def __init__(self, arguments: list[str], replies: dict, fail: bool = False):
+    def __init__(self, arguments: list[str], replies: dict, fail: bool = False, loading: bool = False):
         self.arguments = arguments
         FakeProcess.next_pid += 1
         self.pid = FakeProcess.next_pid
         self.returncode = 1 if fail else None
-        self.server = None if fail else FakeRunnerServer(int(arguments[arguments.index("--port") + 1]), replies)
+        self.server = None if fail else FakeRunnerServer(int(arguments[arguments.index("--port") + 1]), replies, loading)
 
     def poll(self):
         return self.returncode
@@ -73,14 +85,15 @@ class FakeProcess:
 
 
 class FakeLauncher:
-    def __init__(self, replies: dict | None = None, fail: bool = False):
+    def __init__(self, replies: dict | None = None, fail: bool = False, loading_when=None):
         self.replies = replies or {}
         self.fail = fail
+        self.loading_when = loading_when or (lambda arguments: False)
         self.launched: list[FakeProcess] = []
         self.environments: list[dict] = []
 
     def __call__(self, arguments, **kwargs):
-        process = FakeProcess(arguments, self.replies, self.fail)
+        process = FakeProcess(arguments, self.replies, self.fail, self.loading_when(arguments))
         self.launched.append(process)
         self.environments.append(kwargs.get("env") or {})
         return process

@@ -93,6 +93,35 @@ def merged_options(model_params: dict, request_options: dict | None) -> dict:
     return merged
 
 
+def true_or_false(value, label: str) -> bool:
+    if not isinstance(value, bool):
+        raise RequestError(f"{label} must be true or false")
+    return value
+
+
+def load_settings(options: dict) -> dict:
+    settings = {}
+    layers = options.get("num_gpu")
+    if layers is not None and bounded_whole_number(layers, "num_gpu", -1, LARGEST_TOKEN_COUNT) > 0:
+        settings["gpu_layers"] = whole_number(layers, "num_gpu")
+    for option, setting in (("num_thread", "threads"), ("num_batch", "batch")):
+        if options.get(option) is not None and bounded_whole_number(options[option], option, 0, LARGEST_TOKEN_COUNT) > 0:
+            settings[setting] = whole_number(options[option], option)
+    if options.get("main_gpu") is not None:
+        settings["main_gpu"] = bounded_whole_number(options["main_gpu"], "main_gpu", 0, LARGEST_TOKEN_COUNT)
+    without_mmap = options.get("use_mmap") is not None and not true_or_false(options["use_mmap"], "use_mmap")
+    locked = options.get("use_mlock") is not None and true_or_false(options["use_mlock"], "use_mlock")
+    if locked:
+        settings["load_mode"] = "mlock" if without_mmap else "mmap+mlock"
+    elif without_mmap:
+        settings["load_mode"] = "none"
+    if options.get("numa") is not None and true_or_false(options["numa"], "numa"):
+        settings["numa"] = "distribute"
+    if options.get("low_vram") is not None and true_or_false(options["low_vram"], "low_vram"):
+        settings["kv_offload"] = False
+    return settings
+
+
 def sampling_fields(options: dict) -> dict:
     body = {}
     for option_name, runner_name in OPTION_FIELDS.items():
@@ -103,6 +132,8 @@ def sampling_fields(options: dict) -> dict:
         predict = bounded_whole_number(predict, "num_predict", FILL_CONTEXT, LARGEST_TOKEN_COUNT)
     if predict is not None and predict not in (NO_LIMIT, FILL_CONTEXT):
         body["max_tokens"] = predict
+    if options.get("num_keep") is not None:
+        body["n_keep"] = bounded_whole_number(options["num_keep"], "num_keep", -1, LARGEST_TOKEN_COUNT)
     return body
 
 

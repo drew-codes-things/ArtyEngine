@@ -1,3 +1,4 @@
+import json
 import logging
 import math
 import os
@@ -13,10 +14,12 @@ from dataclasses import dataclass, field, replace
 from functools import partial
 from pathlib import Path
 
-from . import gpu
+from . import gpu, rpc
 from .backend import Backend, resolve_backend
 from .config import Config, SpeculativeSettings
 from .gguf import whole_number
+from .model_settings import (FAIL, RPC_AUTO, RPC_NEVER, layout_arguments, layout_for, run_arguments,
+                             run_settings)
 from .runtime import SERVER, locate_binary
 from .store import Model, ModelStore, parse_name
 from .translate import THINKING_SWITCH
@@ -28,6 +31,11 @@ HEALTH_TIMEOUT_SECONDS = 2
 STOP_GRACE_SECONDS = 10
 REAPER_INTERVAL_SECONDS = 1.0
 WAIT_FOR_IDLE_SECONDS = 600
+WORKER_RECHECK_SECONDS = 5.0
+WORKER_WATCH_SECONDS = 15.0
+DOWN_CHECKS_BEFORE_UNLOAD = 2
+RANK_POOLING = 4
+SLOTS_FOLDER = "slots"
 KV_BYTES_PER_ELEMENT = {"f32": 4.0, "f16": 2.0, "bf16": 2.0, "q8_0": 1.0625, "q5_0": 0.6875, "q5_1": 0.75,
                         "q4_0": 0.5625, "q4_1": 0.625, "iq4_nl": 0.5625}
 DURATION_PART = re.compile(r"(\d+(?:\.\d+)?)(ms|h|m|s)")
@@ -39,6 +47,10 @@ COMPACT_SEPARATORS = 'separators=(",", ":")'
 
 
 class LoadError(RuntimeError):
+    pass
+
+
+class WorkersDown(LoadError):
     pass
 
 
@@ -119,10 +131,25 @@ class LaunchPlan:
     cpu_only: bool = False
     may_leak_thinking: bool = False
     named_thinking_leaker: bool = False
+    settings: dict = field(default_factory=dict)
+    load_options: dict = field(default_factory=dict)
+    workers: tuple = ()
+    slot_dir: Path | None = None
 
     @property
     def key(self) -> tuple:
-        return (self.model.load_digest, self.ctx, self.speculative.draft, self.speculative.spec_type, self.cpu_only)
+        return (self.model.load_digest, self.ctx, self.speculative.draft, self.speculative.spec_type, self.cpu_only,
+                json.dumps(self.load_options, sort_keys=True))
+
+    @property
+    def rpc_mode(self) -> str:
+        if self.cpu_only:
+            return RPC_NEVER
+        return self.settings.get("rpc", RPC_AUTO)
+
+    @property
+    def run(self) -> dict:
+        return {**run_settings(self.settings), **self.load_options}
 
 
 def warn_about_unknown_leakers(leaker_names: set[str], store: ModelStore) -> None:
@@ -168,33 +195,55 @@ class Runner:
         return self.process_memory().get(self.process.pid, 0)
 
 
+def is_reranker(model: Model) -> bool:
+    return model.is_embedding and whole_number(model.gguf.arch_value("pooling_type")) == RANK_POOLING
+
+
+def placement_arguments(plan: LaunchPlan) -> list[str]:
+    if plan.cpu_only:
+        return ["-ngl", "0", "--device", "none"]
+    arguments = []
+    if plan.workers:
+        arguments += ["--rpc", ",".join(worker.address for worker in plan.workers)]
+    layout = layout_for(plan.settings, with_workers=bool(plan.workers))
+    if "gpu_layers" in plan.load_options:
+        layout["gpu_layers"] = plan.load_options["gpu_layers"]
+    if "main_gpu" in plan.load_options:
+        layout["main_gpu"] = plan.load_options["main_gpu"]
+    return arguments + layout_arguments(layout)
+
+
 def build_arguments(config: Config, plan: LaunchPlan, port: int) -> list[str]:
     model = plan.model
+    run = plan.run
     arguments = [config.runner_binary, "--model", str(model.model_path), "--host", "127.0.0.1", "--port", str(port),
-                 "--no-webui", "--offline", "-c", str(plan.ctx), "-np", str(config.parallel), "-a", model.name,
-                 "--fit-target", str(config.fit_target_mb), "--no-warmup"]
-    if plan.cpu_only:
-        arguments += ["-ngl", "0", "--device", "none"]
+                 "--no-webui", "--offline", "-c", str(plan.ctx), "-np", str(run.get("parallel", config.parallel)), "-a", model.name,
+                 "--fit-target", str(config.fit_target_mb), "--no-warmup", "--metrics"]
+    if plan.slot_dir:
+        arguments += ["--slot-save-path", str(plan.slot_dir)]
+    arguments += placement_arguments(plan) + run_arguments(run)
     if model.is_embedding:
-        return arguments + ["--embedding", "-b", str(plan.ctx), "-ub", str(plan.ctx)]
-    arguments += ["--jinja", "--reasoning-format", "deepseek", "-fa", config.flash_attn,
-                  "-ctk", config.kv_cache_type, "-ctv", config.kv_cache_type, "-b", str(config.batch), "-ub", str(config.ubatch),
-                  "--cache-ram", str(config.cache_ram_mb)]
+        mode = "--rerank" if is_reranker(model) else "--embedding"
+        return arguments + [mode, "-b", str(plan.ctx), "-ub", str(plan.ctx)]
+    kv_cache_type = run.get("kv_cache_type", config.kv_cache_type)
+    arguments += ["--jinja", "--reasoning-format", "deepseek", "-fa", run.get("flash_attn", config.flash_attn),
+                  "-ctk", kv_cache_type, "-ctv", kv_cache_type, "-b", str(run.get("batch", config.batch)),
+                  "-ub", str(run.get("ubatch", config.ubatch)), "--cache-ram", str(config.cache_ram_mb)]
     if model.projector_path:
         arguments += ["--mmproj", str(model.projector_path)]
     if plan.template_file:
         arguments += ["--chat-template-file", str(plan.template_file)]
-    arguments += speculative_arguments(config, plan)
+    arguments += speculative_arguments(config, plan, kv_cache_type)
     return arguments + [str(item) for item in config.extra_args.get(model.name, [])]
 
 
-def speculative_arguments(config: Config, plan: LaunchPlan) -> list[str]:
+def speculative_arguments(config: Config, plan: LaunchPlan, kv_cache_type: str) -> list[str]:
     settings = plan.speculative
     arguments = []
     if plan.draft_path:
         arguments += ["--model-draft", str(plan.draft_path), "-ngld", "all", "--spec-draft-n-max", str(settings.draft_max),
                       "--spec-draft-n-min", str(settings.draft_min), "--spec-draft-p-min", str(settings.draft_p_min),
-                      "-ctkd", config.kv_cache_type, "-ctvd", config.kv_cache_type]
+                      "-ctkd", kv_cache_type, "-ctvd", kv_cache_type]
     if settings.spec_type:
         arguments += ["--spec-type", settings.spec_type]
         if settings.ngram_min:
@@ -205,9 +254,12 @@ def speculative_arguments(config: Config, plan: LaunchPlan) -> list[str]:
 
 
 class RunnerPool:
-    def __init__(self, config: Config, store: ModelStore, launcher=subprocess.Popen, memory=None, backend: Backend | None = None):
+    def __init__(self, config: Config, store: ModelStore, launcher=subprocess.Popen, memory=None, backend: Backend | None = None,
+                 prober=rpc.probe):
         self.backend = backend or resolve_backend(config)
-        self.config = replace(config, runner_binary=locate_binary(self.backend.runner_binary, SERVER), library_path=list(self.backend.library_path))
+        self.config = replace(config, runner_binary=locate_binary(self.backend.runner_binary, SERVER),
+                              library_path=list(self.backend.library_path))
+        self.health = rpc.WorkerHealth(config.workers, prober=prober)
         self.store = store
         self.leaker_names = {parse_name(name).display for name in config.thinking_leakers}
         warn_about_unknown_leakers(self.leaker_names, store)
@@ -219,11 +271,14 @@ class RunnerPool:
         self.load_lock = threading.Lock()
         self.state_dir = Path(config.state_dir)
         self._reaper = threading.Thread(target=self._reap_forever, name="keep-alive-reaper", daemon=True)
+        self._watcher = threading.Thread(target=self._watch_workers_forever, name="rpc-worker-watch", daemon=True)
 
     def start_reaper(self) -> None:
         self._reaper.start()
+        if self.health.workers:
+            self._watcher.start()
 
-    def plan(self, model: Model, ctx: int | None, cpu_only: bool = False) -> LaunchPlan:
+    def plan(self, model: Model, ctx: int | None, cpu_only: bool = False, load_options: dict | None = None) -> LaunchPlan:
         cpu_only = cpu_only or self.backend.runs_everything_on_the_cpu
         if model.is_embedding:
             ctx = model.context_length or self.config.default_ctx
@@ -232,7 +287,9 @@ class RunnerPool:
             if model.context_length:
                 ctx = min(ctx, model.context_length)
         speculative = SpeculativeSettings() if model.is_embedding or cpu_only else self.config.speculative_for(model.name)
-        plan = LaunchPlan(model=model, ctx=ctx, speculative=speculative, cpu_only=cpu_only)
+        plan = LaunchPlan(model=model, ctx=ctx, speculative=speculative, cpu_only=cpu_only,
+                          settings=self.config.settings_for(model.name), load_options=dict(load_options or {}),
+                          slot_dir=self.state_dir / SLOTS_FOLDER / safe_file_name(model.name))
         if speculative.draft:
             plan.draft_path = self.store.get(speculative.draft).model_path
         donor = self.store.template_donor(model)
@@ -258,19 +315,28 @@ class RunnerPool:
             path.write_text(template)
         return path
 
-    def estimate_mb(self, plan: LaunchPlan) -> int:
-        if plan.cpu_only:
-            return 0
+    def full_estimate_mb(self, plan: LaunchPlan) -> int:
         files = plan.model.model_path.stat().st_size
         if plan.model.projector_path:
             files += plan.model.projector_path.stat().st_size
         if plan.draft_path:
             files += plan.draft_path.stat().st_size
-        kv = 0 if plan.model.is_embedding else kv_cache_mb(plan.model, plan.ctx, self.config.kv_cache_type)
+        cache_type = plan.run.get("kv_cache_type", self.config.kv_cache_type)
+        kv = 0 if plan.model.is_embedding else kv_cache_mb(plan.model, plan.ctx, cache_type)
         return int(files / gpu.MIB) + kv + self.config.load_overhead_mb
 
-    def acquire(self, model: Model, ctx: int | None, cpu_only: bool = False) -> tuple[Runner, float]:
-        plan = self.plan(model, ctx, cpu_only)
+    def estimate_mb(self, plan: LaunchPlan) -> int:
+        if plan.cpu_only:
+            return 0
+        full = self.full_estimate_mb(plan)
+        if not plan.workers:
+            return full
+        on_workers = sum(worker.memory_mb for worker in plan.workers)
+        return max(self.config.load_overhead_mb, min(full - on_workers, self.config.vram_budget_mb))
+
+    def acquire(self, model: Model, ctx: int | None, cpu_only: bool = False,
+                load_options: dict | None = None) -> tuple[Runner, float]:
+        plan = self.plan(model, ctx, cpu_only, load_options)
         runner = self._reuse(plan)
         if runner:
             return runner, 0.0
@@ -279,13 +345,52 @@ class RunnerPool:
             if runner:
                 return runner, 0.0
             self._retire(model.name)
-            estimate = self.estimate_mb(plan)
-            self._make_room(estimate, model.name)
-            runner = self._launch(plan, estimate)
+            runner = self._load(plan)
             with self.state:
                 runner.in_flight = 1
                 self.runners[model.name] = runner
             return runner, runner.load_seconds
+
+    def _load(self, plan: LaunchPlan) -> Runner:
+        workers = self._workers_for(plan)
+        if not workers:
+            return self._load_as_planned(plan)
+        try:
+            return self._load_as_planned(replace(plan, workers=tuple(workers)))
+        except WorkersDown as error:
+            if plan.settings.get("rpc_when_down") == FAIL:
+                raise
+            log.warning("%s; loading %s on this machine instead", error, plan.model.name)
+        return self._load_as_planned(plan)
+
+    def _load_as_planned(self, plan: LaunchPlan) -> Runner:
+        estimate = self.estimate_mb(plan)
+        self._make_room(estimate, plan.model.name)
+        return self._launch(plan, estimate)
+
+    def _workers_for(self, plan: LaunchPlan) -> list[rpc.RpcWorker]:
+        mode = plan.rpc_mode
+        if mode == RPC_NEVER or not self.health.workers:
+            return []
+        if mode == RPC_AUTO and self.full_estimate_mb(plan) <= self.config.vram_budget_mb:
+            return []
+        wanted = self.health.named(plan.settings.get("rpc_workers"))
+        answering = self.health.check(wanted)
+        if len(answering) == len(wanted):
+            return answering
+        silent = ", ".join(f"{worker.label} ({worker.address})" for worker in wanted if worker not in answering)
+        reason = f"{plan.model.name} is set to use rpc workers, and {silent} did not answer"
+        if plan.settings.get("rpc_when_down") == FAIL:
+            raise WorkersDown(f"{reason}; start the worker, or set rpc_when_down to local to load it on this machine")
+        log.warning("%s; loading it on this machine instead", reason)
+        return []
+
+    def workers_status(self) -> list[dict]:
+        used_by: dict[str, list[str]] = {}
+        for runner in self.loaded():
+            for worker in runner.plan.workers:
+                used_by.setdefault(worker.address, []).append(runner.name)
+        return self.health.describe(used_by)
 
     def _reuse(self, plan: LaunchPlan) -> Runner | None:
         with self.state:
@@ -396,15 +501,18 @@ class RunnerPool:
 
     def _launch(self, plan: LaunchPlan, estimate: int) -> Runner:
         port = free_port()
+        if plan.slot_dir:
+            plan.slot_dir.mkdir(parents=True, exist_ok=True)
         arguments = build_arguments(self.config, plan, port)
         logs = self.state_dir / "logs"
         logs.mkdir(parents=True, exist_ok=True)
-        log_path = logs / f"{plan.model.name.replace('/', '_').replace(':', '_')}.log"
+        log_path = logs / f"{safe_file_name(plan.model.name)}.log"
         environment = {**os.environ, "LD_LIBRARY_PATH": ":".join(self.config.library_path + [str(Path(self.config.runner_binary).resolve().parent)])}
         if plan.cpu_only:
             environment.update(self.backend.cpu_only_environment)
         started = time.monotonic()
-        log.info("loading %s (ctx %d, ~%d MiB): %s", plan.model.name, plan.ctx, estimate, " ".join(arguments[1:]))
+        on_workers = f", with rpc workers {', '.join(worker.label for worker in plan.workers)}" if plan.workers else ""
+        log.info("loading %s (ctx %d, ~%d MiB here%s): %s", plan.model.name, plan.ctx, estimate, on_workers, " ".join(arguments[1:]))
         with open(log_path, "ab") as output:
             process = self.launcher(arguments, stdout=output, stderr=subprocess.STDOUT, env=environment, start_new_session=True)
         runner = Runner(plan=plan, port=port, process=process, estimate_mb=estimate, process_memory=self.process_memory)
@@ -417,12 +525,28 @@ class RunnerPool:
         log.info("loaded %s in %.1fs on port %d", plan.model.name, runner.load_seconds, port)
         return runner
 
+    def _silent_workers(self, runner: Runner) -> list[rpc.RpcWorker]:
+        answering = self.health.check(list(runner.plan.workers))
+        return [worker for worker in runner.plan.workers if worker not in answering]
+
+    def _check_workers_while_loading(self, runner: Runner) -> None:
+        silent = self._silent_workers(runner)
+        if silent:
+            names = ", ".join(f"{worker.label} ({worker.address})" for worker in silent)
+            raise WorkersDown(f"rpc worker {names} stopped answering while {runner.name} was loading")
+
     def _wait_until_ready(self, runner: Runner, log_path: Path) -> None:
         deadline = time.monotonic() + self.config.load_timeout_seconds
+        next_worker_check = time.monotonic() + WORKER_RECHECK_SECONDS
         while time.monotonic() < deadline:
             if runner.process.poll() is not None:
+                if runner.plan.workers:
+                    self._check_workers_while_loading(runner)
                 raise LoadError(f"the model runner for {runner.name} exited with {runner.process.returncode} while loading: "
                                 f"{last_lines(log_path)}")
+            if runner.plan.workers and time.monotonic() >= next_worker_check:
+                self._check_workers_while_loading(runner)
+                next_worker_check = time.monotonic() + WORKER_RECHECK_SECONDS
             try:
                 with urllib.request.urlopen(f"{runner.base_url}/health", timeout=HEALTH_TIMEOUT_SECONDS) as response:
                     if response.status == 200:
@@ -458,6 +582,23 @@ class RunnerPool:
         for runner in expired:
             self._stop(runner)
 
+    def watch_workers_once(self) -> None:
+        self.health.check(self.health.workers)
+        for runner in self.loaded():
+            lost = [worker for worker in runner.plan.workers if self.health.down_in_a_row(worker) >= DOWN_CHECKS_BEFORE_UNLOAD]
+            if lost:
+                log.warning("unloading %s: its rpc worker %s stopped answering; the next request loads it again", runner.name,
+                            ", ".join(f"{worker.label} ({worker.address})" for worker in lost))
+                self.unload(runner.name)
+
+    def _watch_workers_forever(self) -> None:
+        while True:
+            time.sleep(WORKER_WATCH_SECONDS)
+            try:
+                self.watch_workers_once()
+            except Exception:
+                log.exception("rpc worker watch failed")
+
     def _reap_forever(self) -> None:
         while True:
             time.sleep(REAPER_INTERVAL_SECONDS)
@@ -476,6 +617,10 @@ class RunnerPool:
             self.runners.clear()
         for runner in runners:
             self._stop(runner)
+
+
+def safe_file_name(name: str) -> str:
+    return name.replace("/", "_").replace(":", "_")
 
 
 def last_lines(path: Path, count: int = 8) -> str:

@@ -3,7 +3,9 @@ import os
 from dataclasses import dataclass, field, fields
 from pathlib import Path
 
+from .model_settings import check_model_settings
 from .remote import check_remote_models
+from .rpc import RpcWorker, parse_workers
 
 CONFIG_ENV = "ARTY_ENGINE_CONFIG"
 AUTO_BACKEND = "auto"
@@ -70,11 +72,15 @@ class Config:
     gpu_backend: str = AUTO_BACKEND
     runtimes: dict = field(default_factory=dict)
     remote_models: dict = field(default_factory=dict)
+    rpc_workers: list = field(default_factory=list)
+    model_settings: dict = field(default_factory=dict)
     runtime_url: str = ""
 
     def __post_init__(self):
         check_gpu_settings(self.gpu_backend, self.runtimes)
         check_remote_models(self.remote_models)
+        workers = parse_workers(self.rpc_workers)
+        check_model_settings(self.model_settings, {name for worker in workers for name in (worker.label, worker.address)})
         if not isinstance(self.runtime_url, str) or (self.runtime_url and not self.runtime_url.startswith(("https://", "http://"))):
             raise ValueError("runtime_url must be empty or an http(s) address of a runtime zip")
         if not isinstance(self.thinking_leakers, list) or not all(isinstance(name, str) for name in self.thinking_leakers):
@@ -83,6 +89,13 @@ class Config:
     @property
     def roots(self) -> list[Path]:
         return [Path(self.store)] + [Path(root) for root in self.model_roots]
+
+    @property
+    def workers(self) -> list[RpcWorker]:
+        return parse_workers(self.rpc_workers)
+
+    def settings_for(self, model_name: str) -> dict:
+        return dict(self.model_settings.get(model_name) or {})
 
     def speculative_for(self, model_name: str) -> SpeculativeSettings:
         settings = self.speculative.get(model_name)

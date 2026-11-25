@@ -1,0 +1,18 @@
+[Unit]
+Description=ArtyEngine worker: shares this machine's GPU with an ArtyEngine over the network
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=/srv/ai/arty-engine/src
+ExecStart=/usr/bin/python3 -m arty_engine worker --config /etc/arty-engine/worker.json
+Restart=on-failure
+RestartSec=5
+KillMode=control-group
+NoNewPrivileges=yes
+DynamicUser=yes
+SupplementaryGroups=video render
+CacheDirectory=arty-engine-worker
+
+[Install]
+WantedBy=multi-user.target

@@ -1,8 +1,8 @@
 import sys
 
-from . import runtime, server
+from . import runtime, server, worker
 
-COMMANDS = {"runtime": runtime.main}
+COMMANDS = {"worker": worker.main, "runtime": runtime.main}
 
 
 def run(argv: list[str]) -> int:

@@ -74,6 +74,8 @@ Python standard library only (see [License](#license)).
   unloads a model.
 - **Optional trainer hand-off.** With `trainer_url` set, the engine tells a GPU-sharing controller `/busy` before a
   request and `/done` after it, so something else (such as a training job) can use the card while the engine is idle.
+- **Other machines' GPUs.** A model too big for the card can be spread over RPC workers on the network, which the
+  engine health-checks before every load and falls back from at once ([docs/rpc.md](docs/rpc.md)).
 
 The engine is Python standard library only. It reads the card's free memory with `nvidia-smi` on an NVIDIA card, and
 with `amd-smi`, `rocm-smi` or the amdgpu driver's own files on an AMD card ([untested](#amd-gpus-untested)).

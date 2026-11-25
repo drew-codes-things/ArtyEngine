@@ -20,7 +20,7 @@ from .backend import Backend, resolve_backend
 from .config import Config, load_config
 from .gguf import GgufError
 from .pull import HF_NAME_FORM, Puller, PullError
-from .runner import LoadError, Runner, RunnerPool, parse_keep_alive
+from .runner import LoadError, Runner, RunnerPool, WorkersDown, parse_keep_alive
 from .store import ModelNotFound, ModelStore, NotOwned, iso_time, parse_name, roots_in_older_layout
 
 log = logging.getLogger("arty-engine")
@@ -138,12 +138,15 @@ class Engine:
 
     def with_runner(self, model, options: dict, keep_alive, work):
         cpu_only = options.get("num_gpu") == 0
+        load_options = translate.load_settings(options)
         request_id = uuid.uuid4().hex
         if not cpu_only:
             self.trainer.busy(request_id)
         try:
             try:
-                runner, load_seconds = self.pool.acquire(model, options.get("num_ctx"), cpu_only)
+                runner, load_seconds = self.pool.acquire(model, options.get("num_ctx"), cpu_only, load_options)
+            except WorkersDown as error:
+                raise ApiError(503, str(error)) from error
             except LoadError as error:
                 raise ApiError(500, str(error)) from error
             try:
@@ -215,7 +218,8 @@ def ps_entry(runner: Runner) -> dict:
     expires = (datetime.fromtimestamp(runner.expires_wall, tz=timezone.utc) if runner.expires_wall else None)
     return {"name": model.name, "model": model.name, "size": max(size, measured * gpu.MIB), "digest": model.digest, "details": model.details,
             "expires_at": iso_time(expires) if expires else FAR_FUTURE, "size_vram": measured * gpu.MIB if measured else size,
-            "context_length": runner.plan.ctx, "speculative": runner.plan.speculative.draft or runner.plan.speculative.spec_type or ""}
+            "context_length": runner.plan.ctx, "speculative": runner.plan.speculative.draft or runner.plan.speculative.spec_type or "",
+            "rpc_workers": [{"label": worker.label, "address": worker.address} for worker in runner.plan.workers]}
 
 
 def built_one_by_one(items: list, name_of, build, listing: str) -> list[dict]:
@@ -367,7 +371,8 @@ def make_handler(engine: Engine):
                 log.info("client went away before the %d answer to %s %s", status, self.command, self.path)
 
         def do_GET(self):
-            self._dispatch({"/": self.root, "/api/tags": self.tags, "/api/ps": self.ps, "/api/version": self.version})
+            self._dispatch({"/": self.root, "/api/tags": self.tags, "/api/ps": self.ps, "/api/version": self.version,
+                            "/api/workers": self.workers, "/api/status": self.status})
 
         def do_HEAD(self):
             self.close_connection = True
@@ -446,6 +451,15 @@ def make_handler(engine: Engine):
             self.send_header("Connection", "close")
             self.send_header("Content-Length", "0")
             self.end_headers()
+
+        def workers(self):
+            self._send_json(200, {"workers": engine.pool.workers_status()})
+
+        def status(self):
+            backend = engine.pool.backend
+            self._send_json(200, {"version": VERSION, "gpu_backend": backend.name, "runner_binary": engine.pool.config.runner_binary,
+                                  "vram_budget_mb": engine.config.vram_budget_mb, "card": card_status(engine.pool.memory()),
+                                  "loaded": loaded_list_entries(engine.pool.loaded()), "workers": engine.pool.workers_status()})
 
         def not_in_engine(self):
             raise ApiError(501, f"the engine doesn't do {urlsplit(self.path).path}: it pulls models from Hugging Face and "
@@ -685,6 +699,12 @@ def make_handler(engine: Engine):
     return Handler
 
 
+def card_status(memory: gpu.GpuMemory | None) -> dict | None:
+    if memory is None:
+        return None
+    return {"free_mb": memory.free_mb, "total_mb": memory.total_mb, "source": memory.source}
+
+
 def refuse_remote(model, reason: str) -> None:
     if remote.is_remote(model):
         raise ApiError(501, f"{model.name}: {reason}")
@@ -750,7 +770,8 @@ def exit_on_terminate(*_) -> None:
 
 
 def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(description="ArtyEngine, Arty's own model engine")
+    parser = argparse.ArgumentParser(prog="arty-engine", description="ArtyEngine, Arty's own model engine",
+                                     epilog="Other modes: arty-engine worker --help, arty-engine runtime --help")
     parser.add_argument("--config", default=None, help="JSON settings file (default: $ARTY_ENGINE_CONFIG or built-in defaults)")
     parser.add_argument("--listen", default=None, help="host:port to listen on")
     parser.add_argument("--verbose", action="store_true")
