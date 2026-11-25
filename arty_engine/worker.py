@@ -14,19 +14,28 @@ from pathlib import Path
 
 from .rpc import check_address, split_address
 from .runtime import WORKER, locate_binary
+from .scrub import LIBRARY_WORD
 
 log = logging.getLogger("arty-engine.worker")
 
 DEFAULT_LISTEN = "0.0.0.0:50052"
 LOOPBACK = "127.0.0.1"
 WILDCARD_HOSTS = ("0.0.0.0", "::", "")
-CACHE_VARIABLE = "LLAMA_CACHE"
+CACHE_VARIABLE = f"{LIBRARY_WORD.upper()}_CACHE"
 RELAY_CHUNK_BYTES = 1024 * 1024
 BACKLOG = 16
 START_SECONDS = 30
 START_POLL_SECONDS = 0.2
 STOP_GRACE_SECONDS = 10
 LOUD_REPEATS = 3
+MOST_RELAYS = 16
+CONNECT_TIMEOUT_SECONDS = 10
+ACCEPT_RETRY_SECONDS = 1
+GATE_STOPPED_EXIT = 3
+GATE_CHECK_SECONDS = 1
+OPEN_REFUSAL = (
+    "the rpc worker would listen on {listen} with no allowed_clients list, so anyone who can reach that port could use "
+    "it; set allowed_clients (--allow) to the engine's address, listen on 127.0.0.1, or pass --open to accept that")
 NO_AUTHENTICATION_WARNING = (
     "the rpc worker at {listen} has no authentication and no allowed_clients list: anyone who can reach this port can "
     "send it work and data and use its GPU and memory. Set allowed_clients to the engine's address, or bind it to a "
@@ -42,6 +51,7 @@ class WorkerConfig:
     worker_binary: str = "/srv/ai/arty-engine/runtime/worker"
     library_path: list = field(default_factory=list)
     threads: int = 0
+    open: bool = False
 
     def __post_init__(self):
         check_address(self.listen)
@@ -55,6 +65,8 @@ class WorkerConfig:
             raise ValueError("library_path must be a list of folders")
         if isinstance(self.threads, bool) or not isinstance(self.threads, int) or self.threads < 0:
             raise ValueError("threads must be a whole number, 0 for the runtime's default")
+        if not isinstance(self.open, bool):
+            raise ValueError("open must be true or false")
 
     @property
     def host(self) -> str:
@@ -157,15 +169,21 @@ def shut_both(*ends: socket.socket) -> None:
             log.debug("closing a relayed connection: %s", error)
 
 
+def tune(end: socket.socket) -> None:
+    end.settimeout(None)
+    end.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+    end.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+
+
 def relay_pair(client: socket.socket, inner_port: int) -> None:
     try:
-        inner = socket.create_connection((LOOPBACK, inner_port))
+        inner = socket.create_connection((LOOPBACK, inner_port), timeout=CONNECT_TIMEOUT_SECONDS)
     except OSError as error:
         log.warning("the runtime worker did not take a connection: %s", error)
         client.close()
         return
     for end in (client, inner):
-        end.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        tune(end)
     backwards = threading.Thread(target=pump, args=(inner, client), daemon=True)
     backwards.start()
     pump(client, inner)
@@ -183,6 +201,9 @@ class Gate:
     listener: socket.socket | None = None
     refused: int = 0
     stopping: bool = False
+    most_relays: int = MOST_RELAYS
+    relays: threading.BoundedSemaphore | None = None
+    stopped: threading.Event = field(default_factory=threading.Event)
 
     def open(self) -> int:
         family = socket.AF_INET6 if ":" in self.listen_host else socket.AF_INET
@@ -194,20 +215,46 @@ class Gate:
         return self.listener.getsockname()[1]
 
     def serve(self) -> None:
+        try:
+            self._accept_until_stopped()
+        except Exception:
+            log.exception("the rpc gate stopped taking connections")
+        finally:
+            self.stopped.set()
+
+    def _accept_until_stopped(self) -> None:
+        self.relays = threading.BoundedSemaphore(self.most_relays)
         while not self.stopping:
             try:
                 client, address = self.listener.accept()
-            except OSError:
+            except OSError as error:
                 if self.stopping:
                     return
-                raise
-            if not is_allowed(address[0], self.allowed):
-                self.refused += 1
-                log.warning("refused a connection from %s: not in allowed_clients", address[0])
-                client.close()
+                if self.listener.fileno() < 0:
+                    raise
+                log.warning("couldn't take a connection: %s", error)
+                time.sleep(ACCEPT_RETRY_SECONDS)
                 continue
-            log.debug("connection from %s", address[0])
-            threading.Thread(target=relay_pair, args=(client, self.inner_port), daemon=True).start()
+            self._hand_over(client, address[0])
+
+    def _hand_over(self, client: socket.socket, address: str) -> None:
+        if not is_allowed(address, self.allowed):
+            self.refused += 1
+            log.warning("refused a connection from %s: not in allowed_clients", address)
+            client.close()
+            return
+        if not self.relays.acquire(blocking=False):
+            log.warning("refused a connection from %s: already relaying %d connections", address, self.most_relays)
+            client.close()
+            return
+        log.debug("connection from %s", address)
+        threading.Thread(target=self._relay, args=(client,), daemon=True).start()
+
+    def _relay(self, client: socket.socket) -> None:
+        try:
+            relay_pair(client, self.inner_port)
+        finally:
+            self.relays.release()
 
     def close(self) -> None:
         self.stopping = True
@@ -239,6 +286,11 @@ def stop(process: subprocess.Popen) -> None:
         process.wait()
 
 
+def refuse_unless_meant(config: WorkerConfig) -> None:
+    if config.open_to_the_network and not config.open:
+        raise RuntimeError(OPEN_REFUSAL.format(listen=config.listen))
+
+
 def warn_when_open(config: WorkerConfig) -> None:
     if not config.open_to_the_network:
         return
@@ -251,6 +303,7 @@ def run(config: WorkerConfig, launcher=subprocess.Popen, ready=None) -> int:
     if not Path(binary).is_file():
         raise RuntimeError(f"no runtime worker at {config.worker_binary}; install the runtime (arty-engine runtime install) "
                            "or set worker_binary")
+    refuse_unless_meant(config)
     warn_when_open(config)
     gated = bool(config.allowed_clients)
     host, port = (LOOPBACK, free_loopback_port()) if gated else (config.host, config.port)
@@ -268,11 +321,21 @@ def run(config: WorkerConfig, launcher=subprocess.Popen, ready=None) -> int:
             log.info("rpc worker on %s (devices %s)", config.listen, ",".join(config.devices) or "all")
         if ready:
             ready(gate)
-        return process.wait()
+        return wait_for_either(process, gate)
     finally:
         if gate:
             gate.close()
         stop(process)
+
+
+def wait_for_either(process: subprocess.Popen, gate: Gate | None) -> int:
+    while gate is None or not gate.stopped.is_set():
+        try:
+            return process.wait(timeout=None if gate is None else GATE_CHECK_SECONDS)
+        except subprocess.TimeoutExpired:
+            continue
+    log.error("the rpc gate stopped, so the worker stops too")
+    return GATE_STOPPED_EXIT
 
 
 def with_flags(config: WorkerConfig, arguments: argparse.Namespace) -> WorkerConfig:
@@ -289,6 +352,8 @@ def with_flags(config: WorkerConfig, arguments: argparse.Namespace) -> WorkerCon
         changes["worker_binary"] = arguments.worker_binary
     if arguments.threads is not None:
         changes["threads"] = arguments.threads
+    if arguments.open:
+        changes["open"] = True
     return replace(config, **changes)
 
 
@@ -307,6 +372,7 @@ def main(argv: list[str]) -> int:
     parser.add_argument("--cache-dir", default="", help="keep a file cache of model weights here, so reloads send less")
     parser.add_argument("--worker-binary", default="", help="the runtime worker binary, or the runtime folder")
     parser.add_argument("--threads", type=int, default=None, help="CPU threads for the CPU device")
+    parser.add_argument("--open", action="store_true", help="allow listening on a network address with no --allow list")
     parser.add_argument("--verbose", action="store_true")
     arguments = parser.parse_args(argv)
     logging.basicConfig(level=logging.DEBUG if arguments.verbose else logging.INFO,

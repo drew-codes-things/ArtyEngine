@@ -1,6 +1,8 @@
+import argparse
 import json
 import logging
 import socket
+import struct
 import subprocess
 import sys
 import threading
@@ -10,15 +12,17 @@ from pathlib import Path
 import pytest
 
 from arty_engine import worker
-from arty_engine.worker import WorkerConfig, is_allowed, load_worker_config, networks, run, worker_arguments
+from arty_engine.worker import CACHE_VARIABLE, WorkerConfig, is_allowed, load_worker_config, networks, run, worker_arguments
 
 REPOSITORY = Path(__file__).resolve().parents[1]
+RESET_ROUNDS = 40
+UNREACHABLE_HOST = "192.0.2.1"
 FAKE_WORKER = f"""#!{sys.executable}
 import json, os, socket, sys, threading
 arguments = sys.argv[1:]
 host, port = arguments[arguments.index("-H") + 1], int(arguments[arguments.index("-p") + 1])
 with open(os.environ["FAKE_WORKER_LOG"], "w") as log:
-    json.dump({{"arguments": arguments, "cache": os.environ.get("LLAMA_CACHE", "")}}, log)
+    json.dump({{"arguments": arguments, "cache": os.environ.get({CACHE_VARIABLE!r}, "")}}, log)
 listener = socket.socket()
 listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
 listener.bind((host, port))
@@ -90,8 +94,9 @@ def round_trip(port: int, payload: bytes) -> bytes:
             connection.shutdown(socket.SHUT_WR)
             while chunk := connection.recv(65536):
                 received += chunk
-        except (ConnectionResetError, BrokenPipeError):
-            pass
+        except OSError as error:
+            if isinstance(error, TimeoutError):
+                raise
     return received
 
 
@@ -202,3 +207,163 @@ def test_the_worker_command_refuses_bad_settings_before_starting():
     finished = subprocess.run([sys.executable, "-m", "arty_engine", "worker", "--listen", "nowhere"], cwd=REPOSITORY,
                               capture_output=True, text=True, timeout=30)
     assert finished.returncode == 2 and "worker not started" in finished.stderr
+
+
+class EchoServer:
+    def __init__(self):
+        self.listener = socket.socket()
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(16)
+        self.port = self.listener.getsockname()[1]
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                client, _ = self.listener.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._echo, args=(client,), daemon=True).start()
+
+    @staticmethod
+    def _echo(client):
+        with client:
+            while data := client.recv(65536):
+                client.sendall(data)
+
+    def close(self):
+        self.listener.close()
+
+
+class AcceptFailsOnce:
+    def __init__(self, listener):
+        self.listener = listener
+        self.failed = False
+
+    def accept(self):
+        if not self.failed:
+            self.failed = True
+            raise OSError(24, "Too many open files")
+        return self.listener.accept()
+
+    def fileno(self):
+        return self.listener.fileno()
+
+    def close(self):
+        self.listener.close()
+
+
+@pytest.fixture
+def echo_server():
+    server = EchoServer()
+    yield server
+    server.close()
+
+
+def open_gate(inner_port: int, **settings) -> worker.Gate:
+    gate = worker.Gate("127.0.0.1", 0, inner_port, networks(["127.0.0.1"]), **settings)
+    gate.listen_port = gate.open()
+    return gate
+
+
+def test_a_worker_on_a_network_address_without_a_list_is_refused_unless_open(tmp_path, fake_worker):
+    with pytest.raises(RuntimeError, match="--open"):
+        run(WorkerConfig(listen=f"{UNREACHABLE_HOST}:{free_port()}", worker_binary=str(fake_worker)))
+    with pytest.raises(RuntimeError, match="--open"):
+        worker.refuse_unless_meant(WorkerConfig(listen="0.0.0.0:50052"))
+    worker.refuse_unless_meant(WorkerConfig(listen="0.0.0.0:50052", open=True))
+    worker.refuse_unless_meant(WorkerConfig(listen="0.0.0.0:50052", allowed_clients=["192.168.1.16"]))
+    worker.refuse_unless_meant(WorkerConfig(listen="127.0.0.1:50052"))
+    assert not (tmp_path / "worker-log.json").exists()
+
+
+def test_the_worker_command_refuses_an_open_listen_and_takes_the_open_flag(tmp_path, fake_worker):
+    finished = subprocess.run([sys.executable, "-m", "arty_engine", "worker", "--worker-binary", str(fake_worker), "--listen",
+                               f"{UNREACHABLE_HOST}:{free_port()}"], cwd=REPOSITORY, capture_output=True, text=True, timeout=30)
+    assert finished.returncode == 1 and "--open" in finished.stdout + finished.stderr
+    parsed = worker.with_flags(WorkerConfig(), argparse.Namespace(listen="", allow=[], devices="", cache_dir="", worker_binary="",
+                                                                   threads=None, open=True))
+    assert parsed.open is True
+
+
+def test_the_gate_keeps_taking_connections_after_an_accept_error(echo_server, caplog):
+    gate = open_gate(echo_server.port)
+    gate.listener = AcceptFailsOnce(gate.listener)
+    caplog.set_level(logging.WARNING)
+    threading.Thread(target=gate.serve, daemon=True).start()
+    try:
+        assert round_trip(gate.listen_port, b"still here") == b"still here"
+        assert "couldn't take a connection" in caplog.text and not gate.stopped.is_set()
+    finally:
+        gate.close()
+
+
+def test_the_gate_caps_the_relays_it_runs_at_once(echo_server, caplog):
+    gate = open_gate(echo_server.port, most_relays=1)
+    caplog.set_level(logging.WARNING)
+    threading.Thread(target=gate.serve, daemon=True).start()
+    held = socket.create_connection(("127.0.0.1", gate.listen_port), timeout=5)
+    try:
+        held.sendall(b"ping")
+        assert held.recv(4) == b"ping"
+        assert round_trip(gate.listen_port, b"second") == b""
+        assert "already relaying 1 connections" in caplog.text
+    finally:
+        held.close()
+        gate.close()
+    deadline = time.monotonic() + 5
+    while gate.relays._value != 1 and time.monotonic() < deadline:
+        time.sleep(0.05)
+    assert gate.relays._value == 1
+
+
+def test_relayed_connections_use_keepalive(echo_server):
+    gate = open_gate(echo_server.port)
+    threading.Thread(target=gate.serve, daemon=True).start()
+    seen = []
+    original = worker.tune
+
+    def recording_tune(end):
+        original(end)
+        seen.append(end.getsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE))
+    try:
+        worker.tune = recording_tune
+        assert round_trip(gate.listen_port, b"x") == b"x"
+    finally:
+        worker.tune = original
+        gate.close()
+    assert seen == [1, 1]
+
+
+def test_the_worker_exits_non_zero_when_its_gate_stops(tmp_path, fake_worker):
+    port = free_port()
+    running = RunningWorker(WorkerConfig(listen=f"127.0.0.1:{port}", allowed_clients=["127.0.0.1"],
+                                         worker_binary=str(fake_worker)))
+    running.gate.listener.shutdown(socket.SHUT_RDWR)
+    running.gate.listener.close()
+    running.thread.join(15)
+    assert running.result == worker.GATE_STOPPED_EXIT
+    assert all(process.poll() is not None for process in running.processes)
+
+
+def test_round_trip_tolerates_a_peer_that_already_hung_up():
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(64)
+    port = listener.getsockname()[1]
+
+    def reset_everyone():
+        while True:
+            try:
+                client, _ = listener.accept()
+            except OSError:
+                return
+            client.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            client.close()
+    threading.Thread(target=reset_everyone, daemon=True).start()
+    try:
+        for _ in range(RESET_ROUNDS):
+            assert round_trip(port, b"") == b""
+            time.sleep(0.005)
+    finally:
+        listener.close()
