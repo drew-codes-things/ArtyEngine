@@ -17,6 +17,7 @@ from arty_engine.worker import CACHE_VARIABLE, WorkerConfig, is_allowed, load_wo
 REPOSITORY = Path(__file__).resolve().parents[1]
 RESET_ROUNDS = 40
 UNREACHABLE_HOST = "192.0.2.1"
+DEAD_PEER_SECONDS = 120
 FAKE_WORKER = f"""#!{sys.executable}
 import json, os, socket, sys, threading
 arguments = sys.argv[1:]
@@ -333,6 +334,15 @@ def test_relayed_connections_use_keepalive(echo_server):
         worker.tune = original
         gate.close()
     assert seen == [1, 1]
+
+
+def test_relayed_connections_find_a_dead_peer_within_a_couple_of_minutes():
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as end:
+        worker.tune(end)
+        assert end.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPIDLE) == worker.KEEPALIVE_IDLE_SECONDS
+        assert end.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPINTVL) == worker.KEEPALIVE_INTERVAL_SECONDS
+        assert end.getsockopt(socket.IPPROTO_TCP, socket.TCP_KEEPCNT) == worker.KEEPALIVE_PROBES
+    assert worker.KEEPALIVE_IDLE_SECONDS + worker.KEEPALIVE_INTERVAL_SECONDS * worker.KEEPALIVE_PROBES <= DEAD_PEER_SECONDS
 
 
 def test_the_worker_exits_non_zero_when_its_gate_stops(tmp_path, fake_worker):

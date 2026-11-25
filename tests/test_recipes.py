@@ -2,6 +2,8 @@ import hashlib
 import http.client
 import json
 import os
+import stat
+import struct
 import threading
 import urllib.error
 import urllib.request
@@ -14,6 +16,8 @@ from arty_engine.store import ModelStore, blob_path
 from engine_harness import RunningEngine, error_of, http_json
 from fake_store import QWEN3, build_store
 from gguf_writer import write_gguf
+
+GGUF_START = b"GGUF" + struct.pack("<IQQ", 3, 0, 0)
 
 CHAT_REPLY = {"json": {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}]}}
 RECIPE = '''# a recipe
@@ -111,7 +115,7 @@ def test_a_blob_that_does_not_match_its_digest_is_refused(running):
 
 
 def test_an_adapter_becomes_a_lora_argument(running):
-    data = b"GGUF adapter weights"
+    data = GGUF_START + b"adapter weights"
     digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
     send_blob(running.url, data)
     http_json(f"{running.url}/api/create", {"model": "tuned", "from": "qwen3:14b", "adapters": {"a.gguf": digest}, "stream": False})
@@ -232,6 +236,28 @@ def test_a_model_can_not_be_made_from_a_blob_that_is_not_gguf(running):
         status, answer = error_of(lambda: http_json(f"{running.url}/api/create", {**body, "stream": False}))
         assert status == 400 and "not a GGUF file" in answer["error"]
     assert http_json(f"{running.url}/api/show", {"model": "keeper"}) == before
+
+
+@pytest.mark.parametrize("start", [
+    b"GGUF" + struct.pack("<IQQ", 0x61646120, 0, 0),
+    b"GGUF" + struct.pack("<IQQ", 1, 0, 0),
+    b"GGUF" + struct.pack("<IQQ", 3, 2 ** 40, 0),
+    b"GGUF" + struct.pack("<IQQ", 3, 0, 2 ** 40),
+    b"GGUF" + struct.pack("<I", 3),
+])
+def test_a_blob_with_the_gguf_magic_but_no_sound_header_is_not_a_model(running, start):
+    data = start + b" weights"
+    send_blob(running.url, data)
+    status, answer = error_of(lambda: http_json(f"{running.url}/api/create", {
+        "model": "keeper", "from": "qwen3:14b", "adapters": {"a.gguf": sha_of(data)}, "stream": False}))
+    assert status == 400 and "not a GGUF file" in answer["error"]
+
+
+def test_a_sent_blob_is_readable_like_the_rest_of_the_store(running):
+    data = GGUF_START + b"shared weights"
+    send_blob(running.url, data)
+    stored = blob_path(running.engine.store.own_root, sha_of(data))
+    assert stat.S_IMODE(stored.stat().st_mode) == 0o644
 
 
 def test_a_copy_that_would_fill_the_disk_is_refused(tmp_path, monkeypatch):

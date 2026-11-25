@@ -130,7 +130,8 @@ def check_room_for_slot_file(folder, name: str) -> None:
         return
     saved = sum(1 for path in folder.iterdir() if path.is_file()) if folder.is_dir() else 0
     if saved >= MOST_SLOT_FILES:
-        raise RelayError(409, f"{saved} slot files are saved already (at most {MOST_SLOT_FILES}); overwrite one or delete some")
+        raise RelayError(409, f"{saved} slot files are saved already (at most {MOST_SLOT_FILES}); save under one of the names "
+                              "already used to overwrite it, or remove old files from the slots folder in the engine's state_dir")
 
 
 def model_entry(model) -> dict:

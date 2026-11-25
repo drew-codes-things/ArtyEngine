@@ -33,6 +33,11 @@ CONNECT_TIMEOUT_SECONDS = 10
 ACCEPT_RETRY_SECONDS = 1
 GATE_STOPPED_EXIT = 3
 GATE_CHECK_SECONDS = 1
+KEEPALIVE_IDLE_SECONDS = 30
+KEEPALIVE_INTERVAL_SECONDS = 10
+KEEPALIVE_PROBES = 3
+KEEPALIVE_TIMING = (("TCP_KEEPIDLE", KEEPALIVE_IDLE_SECONDS), ("TCP_KEEPINTVL", KEEPALIVE_INTERVAL_SECONDS),
+                    ("TCP_KEEPCNT", KEEPALIVE_PROBES))
 OPEN_REFUSAL = (
     "the rpc worker would listen on {listen} with no allowed_clients list, so anyone who can reach that port could use "
     "it; set allowed_clients (--allow) to the engine's address, listen on 127.0.0.1, or pass --open to accept that")
@@ -173,6 +178,9 @@ def tune(end: socket.socket) -> None:
     end.settimeout(None)
     end.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
     end.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)
+    for option, value in KEEPALIVE_TIMING:
+        if hasattr(socket, option):
+            end.setsockopt(socket.IPPROTO_TCP, getattr(socket, option), value)
 
 
 def relay_pair(client: socket.socket, inner_port: int) -> None:

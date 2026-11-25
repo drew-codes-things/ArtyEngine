@@ -337,10 +337,19 @@ def test_the_readme_names_the_assets_the_kit_downloads():
         assert f"{prefix.rsplit('/', 1)[0]}/{asset}" in readme
 
 
-def test_a_runtime_with_no_pinned_digest_runs_when_the_release_listing_agrees(rig):
+def test_a_runtime_with_no_pinned_digest_is_refused_unless_allowed(rig):
     amd_with_rocm(rig)
     kit = rig.kit_with_pins({})
     finished = rig.run("--stop-after", "download", script=kit)
+    assert finished.returncode == EXIT_FAILED, finished.stdout
+    assert "pins no digest" in rig.steps()["download"] and "--allow-unpinned" in rig.steps()["download"]
+    assert "libraries" not in rig.steps()
+
+
+def test_a_runtime_with_no_pinned_digest_runs_when_allowed_and_the_release_listing_agrees(rig):
+    amd_with_rocm(rig)
+    kit = rig.kit_with_pins({})
+    finished = rig.run("--stop-after", "download", "--allow-unpinned", script=kit)
     assert finished.returncode == 0, finished.stdout
     assert rig.steps()["download"] == (f"PASS release {RELEASE}, {ROCM_KIND} build, sha256 {rig.runtime_digest} matches the "
                                        "release listing (this kit pins no digest for it yet)")
@@ -350,7 +359,7 @@ def test_a_runtime_with_no_pinned_digest_and_no_release_listing_is_not_run(rig):
     amd_with_rocm(rig)
     (rig.root / "release.json").unlink()
     kit = rig.kit_with_pins({})
-    finished = rig.run("--stop-after", "download", script=kit)
+    finished = rig.run("--stop-after", "download", "--allow-unpinned", script=kit)
     assert finished.returncode == EXIT_FAILED, finished.stdout
     assert "pins no digest" in rig.steps()["download"] and "libraries" not in rig.steps()
 

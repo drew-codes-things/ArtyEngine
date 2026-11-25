@@ -311,4 +311,4 @@ def test_saved_slot_files_are_capped(running, monkeypatch):
         (folder / name).write_bytes(b"x")
     assert http_json(f"{running.url}/slots/0?action=save", {"model": "qwen3:14b", "filename": "one.bin"})["n_saved"] == 12
     status, body = error_of(lambda: http_json(f"{running.url}/slots/0?action=save", {"model": "qwen3:14b", "filename": "three.bin"}))
-    assert status == 409 and "at most 2" in body["error"]
+    assert status == 409 and "at most 2" in body["error"] and "state_dir" in body["error"] and "delete some" not in body["error"]

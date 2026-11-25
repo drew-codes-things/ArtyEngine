@@ -29,6 +29,7 @@ STEP_ORDER="detect download config start"
 DRY_RUN=false
 KEEP=false
 INSTALL_ROCM_WHEELS=true
+ALLOW_UNPINNED=false
 BACKEND=""
 STOP_AFTER=""
 ENGINE_URL=""
@@ -52,7 +53,7 @@ RESULTS=()
 usage() {
   cat >&2 <<EOF
 usage: $0 [--dry-run] [--backend rocm|vulkan] [--stop-after detect|download|config|start]
-          [--engine-url URL] [--report FILE] [--keep] [--no-rocm-wheels]
+          [--engine-url URL] [--report FILE] [--keep] [--no-rocm-wheels] [--allow-unpinned]
   --dry-run          print the plan and change nothing
   --backend          use this backend instead of the one the card suggests
   --stop-after       stop after that step (then clean up and write the report)
@@ -60,6 +61,7 @@ usage: $0 [--dry-run] [--backend rocm|vulkan] [--stop-after detect|download|conf
   --report           where the report goes (default: ./amd-check-report.txt)
   --keep             keep the temporary folder (runtime, models, logs) for a look afterwards
   --no-rocm-wheels   do not install AMD's ROCm $ROCM_WHEEL_VERSION libraries when the system lacks them
+  --allow-unpinned   run a runtime this kit pins no digest for, trusting the release listing alone
 EOF
   exit $EXIT_USAGE
 }
@@ -70,6 +72,7 @@ parse_arguments() {
       --dry-run) DRY_RUN=true ;;
       --keep) KEEP=true ;;
       --no-rocm-wheels) INSTALL_ROCM_WHEELS=false ;;
+      --allow-unpinned) ALLOW_UNPINNED=true ;;
       --backend) [ $# -ge 2 ] || usage; BACKEND=$2; shift ;;
       --stop-after) [ $# -ge 2 ] || usage; STOP_AFTER=$2; shift ;;
       --engine-url) [ $# -ge 2 ] || usage; ENGINE_URL=${2%/}; shift ;;
@@ -224,6 +227,10 @@ download_runtime() {
   pinned=$(pinned_digest "$kind")
   if [ -n "$pinned" ] && [ "$actual" != "$pinned" ]; then
     record FAIL download "$BUILD has sha256 $actual, but this kit pins $pinned, so it will not be run"
+    return 1
+  fi
+  if [ -z "$pinned" ] && [ "$ALLOW_UNPINNED" != true ]; then
+    record FAIL download "this kit pins no digest for the $BUILD, so it will not be run; pin one, or pass --allow-unpinned to trust the release listing"
     return 1
   fi
   if ! published=$(published_digest); then

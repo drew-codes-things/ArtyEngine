@@ -113,7 +113,8 @@ or with a settings file, `--config worker.json`:
 The runtime worker has no authentication of its own: whoever can reach its port can run work on the GPU and read
 what is sent to it. With `allowed_clients` the runtime worker listens on 127.0.0.1 only and `arty-engine worker`
 stands in front of it, passing on connections from the allowed addresses and refusing the rest (at most 16 at once,
-with TCP keepalive; if it ever stops taking connections the worker exits with code 3 so its service restarts it).
+with TCP keepalive that notices a dead peer within about a minute; if it ever stops taking connections the worker
+exits with code 3 so its service restarts it).
 A network `listen` without `allowed_clients` is refused unless `open` (`--open`) is set; then the worker warns at
 start (three times on `0.0.0.0`), and the firewall is the only guard. Keep workers on the home network, never
 forwarded from the internet.

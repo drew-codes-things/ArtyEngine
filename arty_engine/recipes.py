@@ -2,12 +2,13 @@ import hashlib
 import json
 import os
 import shutil
+import struct
 import tempfile
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from pathlib import Path
 
-from .gguf import GGUF_MAGIC
+from .gguf import GGUF_MAGIC, MOST_HEADER_VALUES, MOST_KEYS
 from .store import (ADAPTER_LAYER, LICENSE_LAYER, MESSAGES_LAYER, MODEL_LAYER, PARAMS_LAYER, PARTIAL_SUFFIX, PROJECTOR_LAYER,
                     SYSTEM_LAYER, TEMPLATE_LAYER, Model, ModelNotFound, ModelStore, blob_path, engine_manifest, is_digest,
                     parse_name, write_manifest)
@@ -21,6 +22,9 @@ MESSAGE_ROLES = ("system", "user", "assistant")
 PROJECTOR_WORDS = ("mmproj", "projector")
 CHUNK_BYTES = 1024 * 1024
 GGUF_SUFFIX = ".gguf"
+GGUF_HEADER = struct.Struct("<4sIQQ")
+SUPPORTED_GGUF_VERSIONS = (2, 3)
+BLOB_MODE = 0o644
 
 
 class RecipeError(ValueError):
@@ -141,6 +145,7 @@ def recipe_of_request(request: dict) -> Recipe:
 def unique_partial(target: Path) -> Path:
     descriptor, name = tempfile.mkstemp(dir=target.parent, prefix=f"{target.name}.", suffix=PARTIAL_SUFFIX)
     os.close(descriptor)
+    os.chmod(name, BLOB_MODE)
     return Path(name)
 
 
@@ -191,7 +196,12 @@ def bring_blob(store: ModelStore, source_root: Path, digest: str, keep_free_byte
 
 def is_gguf_file(path: Path) -> bool:
     with open(path, "rb") as handle:
-        return handle.read(len(GGUF_MAGIC)) == GGUF_MAGIC
+        start = handle.read(GGUF_HEADER.size)
+    if len(start) < GGUF_HEADER.size:
+        return False
+    magic, version, tensor_count, key_count = GGUF_HEADER.unpack(start)
+    return (magic == GGUF_MAGIC and version in SUPPORTED_GGUF_VERSIONS and tensor_count <= MOST_HEADER_VALUES
+            and key_count <= MOST_KEYS)
 
 
 def owned_blob(store: ModelStore, digest, what: str) -> dict:
