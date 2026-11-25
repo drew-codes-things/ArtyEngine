@@ -170,6 +170,36 @@ class StreamEndWatcher:
         self.oversized = False
 
 
+class ErrorLineHolder:
+    def __init__(self):
+        self.held = bytearray()
+        self.holding = False
+        self.at_line_start = True
+
+    def forward(self, piece: bytes) -> bytes:
+        if self.at_line_start and piece.startswith(EVENT_DATA) and ERROR_MEMBER in piece:
+            self.holding = True
+        self.at_line_start = piece.endswith(EVENT_LINE_END)
+        if not self.holding:
+            return piece
+        self.held += piece
+        if self.at_line_start:
+            return self._let_go(event_line_scrubbed(bytes(self.held)))
+        if len(self.held) > LONGEST_CHECKED_LINE_BYTES:
+            return self._let_go(bytes(self.held))
+        return b""
+
+    def rest(self) -> bytes:
+        if not self.held:
+            return b""
+        return self._let_go(event_line_scrubbed(bytes(self.held) + EVENT_LINE_END)[:-len(EVENT_LINE_END)])
+
+    def _let_go(self, line: bytes) -> bytes:
+        self.held.clear()
+        self.holding = False
+        return line
+
+
 def cut_stream_event(failure: str) -> bytes:
     message = f"the model runner's answer stopped before its end{failure}"
     payload = {"type": "error", **openai_error(500, message)}
@@ -479,15 +509,19 @@ class CompatRoutes:
             raise RelayUnreachable(500, f"the model runner closed its answer before sending anything{failure}")
         self._start_events()
         watcher = StreamEndWatcher()
+        holder = ErrorLineHolder()
         while line:
             watcher.feed(line)
-            self._write_chunk(event_line_scrubbed(line))
+            self._write_chunk(holder.forward(line))
             line, failure = read_runner_line(response)
+        self._write_chunk(holder.rest())
         if not watcher.finished():
             self._write_chunk((b"" if watcher.at_line_start else EVENT_LINE_END) + cut_stream_event(failure))
         self._end_stream()
 
     def _write_chunk(self, chunk: bytes) -> None:
+        if not chunk:
+            return
         self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
         self.wfile.flush()
 

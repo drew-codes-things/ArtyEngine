@@ -3,7 +3,7 @@ import urllib.request
 
 import pytest
 
-from arty_engine.compat import StreamEndWatcher, ends_the_stream, event_line_scrubbed
+from arty_engine.compat import ErrorLineHolder, StreamEndWatcher, ends_the_stream, event_line_scrubbed
 from engine_harness import RunningEngine, error_of, http_json
 
 UPSTREAM_WORD = "ll" + "ama"
@@ -436,6 +436,57 @@ def test_deeply_nested_events_are_neither_an_end_nor_a_crash(levels):
     assert not ends_the_stream(b"data: " + nested + b"\n")
     error_line = b'data: {"error": ' + nested + b"}\n"
     assert event_line_scrubbed(error_line) == error_line
+
+
+def scrubbable_error_line(padding: int) -> bytes:
+    message = "x" * padding + f" {RUNTIME_FAILURE}"
+    return b"data: " + json.dumps({"error": {"message": message}}).encode() + b"\n"
+
+
+def test_an_error_event_longer_than_one_read_is_scrubbed_whole(tmp_path):
+    error_event = scrubbable_error_line(70000).decode().strip()
+    engine = failing_engine(tmp_path, {"/completion": {"sse": ['data: {"content": "h", "stop": false}', error_event]}})
+    try:
+        lines = raw_event_lines(f"{engine.url}/completion", PASS_THROUGH_REQUEST)
+    finally:
+        engine.close()
+    assert UPSTREAM_WORD not in "".join(lines) and "runtime_decode failed" in lines[-1]
+    assert "event: error" not in lines
+
+
+def test_lines_that_are_not_errors_pass_piece_by_piece_unchanged():
+    holder = ErrorLineHolder()
+    pieces = [b"data: {\"content\": \"", b"x" * 100, b"\", \"stop\": false}\n", b"event: error\n"]
+    assert [holder.forward(piece) for piece in pieces] == pieces
+    assert holder.rest() == b""
+
+
+def test_an_error_line_is_held_until_its_newline_then_scrubbed():
+    holder = ErrorLineHolder()
+    line = scrubbable_error_line(10)
+    middle = len(line) // 2
+    assert holder.forward(line[:middle]) == b""
+    forwarded = holder.forward(line[middle:])
+    assert UPSTREAM_WORD.encode() not in forwarded and forwarded.endswith(b"\n") and b"runtime_decode failed" in forwarded
+    assert holder.forward(GOING_ON_LINE) == GOING_ON_LINE
+
+
+def test_an_error_line_past_the_cap_is_let_go_as_it_is(monkeypatch):
+    monkeypatch.setattr("arty_engine.compat.LONGEST_CHECKED_LINE_BYTES", SMALL_CAP_BYTES)
+    holder = ErrorLineHolder()
+    line = scrubbable_error_line(2 * SMALL_CAP_BYTES)
+    head, tail = line[:SMALL_CAP_BYTES], line[SMALL_CAP_BYTES:]
+    assert holder.forward(head[:100]) == b""
+    assert holder.forward(head[100:] + tail[:10]) == head + tail[:10]
+    assert holder.forward(tail[10:]) == tail[10:]
+
+
+def test_an_unterminated_error_line_at_the_end_is_scrubbed():
+    holder = ErrorLineHolder()
+    line = scrubbable_error_line(10).rstrip(b"\n")
+    assert holder.forward(line) == b""
+    rest = holder.rest()
+    assert UPSTREAM_WORD.encode() not in rest and not rest.endswith(b"\n") and b"runtime_decode failed" in rest
 
 
 def test_the_runtime_release_is_the_engine_s_folder_name_or_external():
