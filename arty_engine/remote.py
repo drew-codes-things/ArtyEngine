@@ -16,6 +16,8 @@ from urllib.parse import urlsplit
 log = logging.getLogger("arty-engine")
 
 REMOTE_PREFIX = "remote/"
+END_OF_EVENTS = "[DONE]"
+LINE_END = b"\n"
 REMOTE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
 SLUG_UNSAFE = re.compile(r"[^a-z0-9._-]+")
 CONNECTION_ID = re.compile(r"^([0-9a-f]{12})/(.+)$")
@@ -185,13 +187,45 @@ def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def is_last_event(event) -> bool:
+    if not isinstance(event, dict):
+        return False
+    if event.get("stop") is True:
+        return True
+    choices = event.get("choices")
+    return isinstance(choices, list) and any(isinstance(choice, dict) and choice.get("finish_reason") for choice in choices)
+
+
+class EventStream:
+    def __init__(self, lines):
+        self.lines = lines
+        self.received = 0
+        self.ended = False
+
+    def __iter__(self):
+        for raw_line in self.lines:
+            if not raw_line.endswith(LINE_END):
+                return
+            line = raw_line.decode("utf-8", errors="replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[len("data:"):].strip()
+            if data == END_OF_EVENTS:
+                self.ended = True
+                return
+            event = json.loads(data)
+            self.received += 1
+            self.ended = is_last_event(event)
+            yield event
+
+
 def server_sent_events(lines):
     for raw_line in lines:
         line = raw_line.decode("utf-8", errors="replace").strip()
         if not line.startswith("data:"):
             continue
         data = line[len("data:"):].strip()
-        if data == "[DONE]":
+        if data == END_OF_EVENTS:
             return
         yield json.loads(data)
 

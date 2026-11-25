@@ -77,6 +77,12 @@ def event_line_scrubbed(line: bytes) -> bytes:
     return EVENT_DATA + errors_scrubbed(line[len(EVENT_DATA):].strip().decode(errors="replace")).encode() + ending
 
 
+def relay_cut(events, detail: str) -> RelayError:
+    if not events.received:
+        return RelayUnreachable(500, f"the model runner closed its answer before sending anything{detail}")
+    return RelayError(500, f"the model runner's answer stopped before its end{detail}")
+
+
 def openai_error(status: int, message: str) -> dict:
     return {"error": {"message": message, "type": ERROR_TYPES.get(status, "server_error"), "code": status}}
 
@@ -259,11 +265,17 @@ class CompatRoutes:
 
     def _runner_events(self, runner, path: str, body: dict):
         with runner_call(runner, path, body) as response:
-            for event in remote.server_sent_events(response):
-                if event.get("error"):
-                    detail = event["error"]
-                    raise RelayError(500, scrub(str(detail.get("message") if isinstance(detail, dict) else detail)))
-                yield event
+            events = remote.EventStream(response)
+            try:
+                for event in events:
+                    if event.get("error"):
+                        detail = event["error"]
+                        raise RelayError(500, scrub(str(detail.get("message") if isinstance(detail, dict) else detail)))
+                    yield event
+            except OSError as error:
+                raise relay_cut(events, f": {error}") from error
+            if not events.ended:
+                raise relay_cut(events, "")
 
     def _openai_model(self, request: dict):
         model = self.engine.model(request.get("model"))

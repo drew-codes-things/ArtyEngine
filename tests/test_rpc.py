@@ -536,6 +536,99 @@ def test_a_request_that_finds_its_runner_dead_is_answered_by_a_fresh_runner(tmp_
         running.close()
 
 
+CHAT_EVENTS = {"sse": ['data: {"choices":[{"index":0,"delta":{"role":"assistant","content":"h"}}]}',
+                       'data: {"choices":[{"index":0,"delta":{"content":"i"},"finish_reason":"stop"}]}', "data: [DONE]"]}
+FIRST_EVENT_ONLY = {"cut_sse": [CHAT_EVENTS["sse"][0]]}
+STREAM_ROUTES = ["/api/chat", "/v1/chat/completions"]
+
+
+def streamed_lines(url: str, body: dict) -> list[str]:
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST", headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        return [line.decode().strip() for line in response if line.strip()]
+
+
+def streamed_text(route: str, lines: list[str]) -> str:
+    if route == "/api/chat":
+        return "".join(json.loads(line).get("message", {}).get("content", "") for line in lines)
+    events = [json.loads(line[len("data: "):]) for line in lines if line != "data: [DONE]"]
+    return "".join(choice["delta"].get("content", "") for event in events for choice in event.get("choices", []))
+
+
+def stream_request(route: str) -> dict:
+    return {"model": "qwen3:14b", "messages": [{"role": "user", "content": "hi"}], "stream": True, "options": {"num_ctx": 1024}}
+
+
+@pytest.mark.parametrize("route", STREAM_ROUTES)
+def test_a_streamed_request_that_finds_its_runner_dead_is_answered_by_a_fresh_runner(tmp_path, route):
+    running = ApiEngine(tmp_path)
+    launched = running.launcher.launched
+
+    def closes_after_the_headers_on_the_first_runner(body):
+        if len(launched) == 1:
+            launched[0].returncode = -6
+            return {"cut_sse": []}
+        return CHAT_EVENTS
+
+    running.launcher.replies["/v1/chat/completions"] = closes_after_the_headers_on_the_first_runner
+    try:
+        lines = streamed_lines(f"{running.url}{route}", stream_request(route))
+        assert streamed_text(route, lines) == "hi" and len(launched) == 2
+    finally:
+        running.close()
+
+
+@pytest.mark.parametrize("route", STREAM_ROUTES)
+def test_a_stream_cut_after_some_events_ends_with_an_error_not_a_clean_end(tmp_path, route):
+    running = ApiEngine(tmp_path)
+    running.launcher.replies["/v1/chat/completions"] = FIRST_EVENT_ONLY
+    try:
+        lines = streamed_lines(f"{running.url}{route}", stream_request(route))
+    finally:
+        running.close()
+    assert streamed_text(route, lines[:1]) == "h" and "stopped before its end" in lines[-1]
+    assert '"done": true' not in "".join(lines) and "data: [DONE]" not in lines
+
+
+def test_a_request_that_crashes_every_runner_is_asked_twice_at_most(tmp_path, caplog):
+    caplog.set_level(logging.WARNING)
+    running = ApiEngine(tmp_path)
+    launched = running.launcher.launched
+
+    def crashes_the_runner(body):
+        launched[-1].returncode = -6
+        raise ConnectionAbortedError("the request crashed the runtime")
+
+    running.launcher.replies["/v1/chat/completions"] = crashes_the_runner
+    try:
+        status, _ = error_of(lambda: http_json(f"{running.url}/api/chat", {
+            "model": "qwen3:14b", "messages": [{"role": "user", "content": "hi"}], "stream": False, "options": {"num_ctx": 1024}}))
+    finally:
+        running.close()
+    assert status == 500 and len(launched) == 2
+    assert "asking qwen3:14b again" in caplog.text and "died too" in caplog.text
+
+
+def test_the_watcher_leaves_a_worker_alone_while_a_model_loads_over_it(tmp_path, worker):
+    answers = iter([(rpc.UP, "")])
+    launcher = FakeLauncher(loading_when=lambda arguments: True)
+    pool, store, _ = make_pool(tmp_path, budget=ROOMY_BUDGET_MB, launcher=launcher, rpc_workers=[worker.address],
+                               model_settings={"qwen3:14b": {"rpc": "always", "rpc_when_down": "fail"}})
+    pool.health.prober = lambda probed, timeout: next(answers, (rpc.UNKNOWN, "timed out: the loading runner holds it"))
+    model = store.get("qwen3:14b")
+    loading = threading.Thread(target=lambda: pytest.raises(Exception, pool.acquire, model, 1024), daemon=True)
+    loading.start()
+    deadline = time.monotonic() + LOAD_SECONDS
+    while not launcher.launched and time.monotonic() < deadline:
+        time.sleep(0.05)
+    try:
+        pool.watch_workers_once()
+        assert pool.workers_status()[0]["up"] is True
+    finally:
+        pool.shutdown()
+        loading.join(LOAD_SECONDS)
+
+
 def test_a_down_worker_in_fail_mode_answers_503(tmp_path):
     running = ApiEngine(tmp_path, rpc_workers=[closed_address()], model_settings={"qwen3:14b": {"rpc_when_down": "fail"}})
     try:

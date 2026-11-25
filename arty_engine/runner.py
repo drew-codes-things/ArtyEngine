@@ -664,7 +664,8 @@ class RunnerPool:
 
     def _attached_addresses(self) -> set[str]:
         with self.state:
-            return {worker.address for runner in self.runners.values() if runner.alive for worker in runner.plan.workers}
+            holders = [runner for runner in self.runners.values() if runner.alive] + list(self.loading.values())
+            return {worker.address for runner in holders for worker in runner.plan.workers}
 
     def _reachable_workers(self, workers: list[rpc.RpcWorker]) -> list[rpc.RpcWorker]:
         attached = self._attached_addresses()

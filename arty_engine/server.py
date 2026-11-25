@@ -174,9 +174,14 @@ class Engine:
                 try:
                     return work(runner, load_seconds)
                 except RunnerGone:
-                    if attempt == ATTEMPTS_WHEN_A_RUNNER_DIES or not self.pool.drop_if_dead(runner):
+                    dropped = self.pool.drop_if_dead(runner)
+                    if not dropped or attempt == ATTEMPTS_WHEN_A_RUNNER_DIES:
+                        if dropped:
+                            log.warning("the fresh model runner for %s died too; answering with the error rather than asking "
+                                        "a third time", model.name)
                         raise
-                    log.warning("asking %s again on a freshly loaded runner", model.name)
+                    log.warning("asking %s again on a freshly loaded runner, once only: if this request is what crashed the "
+                                "runtime, it crashes the fresh runner too and then gets the error", model.name)
                 finally:
                     self.pool.release(runner, keep_alive)
         finally:
@@ -221,11 +226,23 @@ def stream_events(url: str, body: dict, headers: dict | None = None):
     except (urllib.error.URLError, OSError) as error:
         raise RunnerUnreachable(500, f"the model runner stopped answering: {error}") from error
     with response:
-        for event in remote.server_sent_events(response):
-            if event.get("error"):
-                detail = event["error"]
-                raise ApiError(500, scrub(str(detail.get("message") if isinstance(detail, dict) else detail)))
-            yield event
+        events = remote.EventStream(response)
+        try:
+            for event in events:
+                if event.get("error"):
+                    detail = event["error"]
+                    raise ApiError(500, scrub(str(detail.get("message") if isinstance(detail, dict) else detail)))
+                yield event
+        except OSError as error:
+            raise stream_cut(events, f": {error}") from error
+        if not events.ended:
+            raise stream_cut(events, "")
+
+
+def stream_cut(events: remote.EventStream, detail: str) -> ApiError:
+    if not events.received:
+        return RunnerUnreachable(500, f"the model runner closed its answer before sending anything{detail}")
+    return ApiError(500, f"the model runner's answer stopped before its end{detail}")
 
 
 @dataclass(frozen=True)

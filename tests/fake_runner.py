@@ -25,6 +25,15 @@ class FakeRunnerServer:
                 self.end_headers()
                 self.wfile.write(data)
 
+            def _send_cut_stream(self, events: list[str]):
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Connection", "close")
+                self.end_headers()
+                self.wfile.write("".join(f"{event}\n\n" for event in events).encode())
+                self.wfile.flush()
+                self.close_connection = True
+
             def _refused(self) -> bool:
                 if not server.api_key or self.path == "/health" or self.headers.get("Authorization") == f"Bearer {server.api_key}":
                     return False
@@ -60,6 +69,8 @@ class FakeRunnerServer:
                     self._send(404, {"error": {"message": "no route"}})
                 elif "sse" in reply:
                     self._send(200, ("\n\n".join(reply["sse"]) + "\n\n").encode(), "text/event-stream")
+                elif "cut_sse" in reply:
+                    self._send_cut_stream(reply["cut_sse"])
                 elif "error" in reply:
                     self._send(reply.get("status", 400), {"error": {"message": reply["error"]}})
                 else:

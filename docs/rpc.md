@@ -50,8 +50,11 @@ on this machine when it fits (`rpc_when_down: "local"`), and otherwise the reque
 While one of the engine's own loaded models uses a worker, that worker is never probed: its health is that model
 runner's process. If the worker goes away, the runner fails its next request and exits; the engine drops it at once,
 even with requests still running, loads the model again (locally or with the worker, whichever answers) and asks once
-more, so the request that found the dead runner still gets its answer. Workers no loaded model uses are probed every
-15 seconds for `/api/workers`.
+more, so the request that found the dead runner still gets its answer. That holds for streamed requests too, as long
+as the runner closed the stream before sending anything; a stream that stops after some of the answer was sent ends
+with an error line, never with a clean end. The request is asked again once only: if the request itself is what
+crashes the runtime, it crashes the fresh runner too and then gets the error, and the engine log says so. Workers no
+loaded model uses, and no model is loading over, are probed every 15 seconds for `/api/workers`.
 
 All the named workers must answer: the layout settings below name devices by position, so a load with fewer workers
 than planned would put layers in the wrong place.
