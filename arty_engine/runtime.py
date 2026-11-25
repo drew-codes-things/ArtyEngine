@@ -6,6 +6,7 @@ import os
 import shutil
 import stat
 import sys
+import time
 import urllib.error
 import urllib.request
 import zipfile
@@ -13,13 +14,14 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 from .config import load_config
+from .scrub import CORE_WORD
 
 log = logging.getLogger("arty-engine.runtime")
 
 SERVER, WORKER = "server", "worker"
 SERVER_BINARY, WORKER_BINARY = "arty-runtime-server", "arty-runtime-worker"
 WINDOWS_SUFFIX = ".exe"
-EARLIER_WORKER_NAMES = ("ggml-rpc-server", "rpc-server")
+EARLIER_WORKER_NAMES = (f"{CORE_WORD}-rpc-server", "rpc-server")
 BINARY_NAMES = {
     SERVER: (SERVER_BINARY, SERVER_BINARY + WINDOWS_SUFFIX, SERVER),
     WORKER: (WORKER_BINARY, WORKER_BINARY + WINDOWS_SUFFIX, *EARLIER_WORKER_NAMES,
@@ -90,7 +92,7 @@ def locate_binary(configured: str, role: str) -> str:
 
 def safe_member(name: str) -> PurePosixPath:
     member = PurePosixPath(name.replace("\\", "/"))
-    if member.is_absolute() or ".." in member.parts or not member.parts or ":" in member.parts[0]:
+    if member.is_absolute() or ".." in member.parts or not member.parts or any(":" in part for part in member.parts):
         raise RuntimeInstallError(f"the runtime zip holds an unsafe path {name!r}; nothing was installed")
     return member
 
@@ -126,13 +128,17 @@ def listed_digest(text: str, asset: str) -> str:
     return ""
 
 
-def expected_digest(info: ReleaseInfo, platform: str, given: str, custom_url: str, opener=open_url) -> str:
+def expected_digest(info: ReleaseInfo, platform: str, given: str, custom_url: str, opener=open_url,
+                    allow_unpinned: bool = False) -> str:
     if given:
         return given.lower()
     if info.sha256.get(platform):
         return info.sha256[platform].lower()
     if custom_url:
         raise RuntimeInstallError("a custom runtime_url needs --sha256, the SHA-256 of that zip")
+    if not allow_unpinned:
+        raise RuntimeInstallError(f"this copy of the engine pins no SHA-256 for {asset_name(platform)}; pass --sha256 with the "
+                                  f"digest you trust, or --allow-unpinned to take the one release {info.release} lists")
     with opener(release_url(info.release, CHECKSUMS_ASSET)) as response:
         found = listed_digest(response.read().decode(errors="replace"), asset_name(platform))
     if not found:
@@ -164,8 +170,22 @@ def point_link(link: Path, target: Path) -> None:
     os.replace(temporary, link)
 
 
+def swap_in(staging: Path, folder: Path) -> None:
+    if not folder.exists():
+        staging.rename(folder)
+        return
+    retired = folder.with_name(f"{folder.name}.old-{os.getpid()}-{time.monotonic_ns()}")
+    folder.rename(retired)
+    try:
+        staging.rename(folder)
+    except OSError:
+        retired.rename(folder)
+        raise
+    shutil.rmtree(retired, ignore_errors=True)
+
+
 def install(platform: str, runtime_dir: Path, custom_url: str = "", sha256: str = "", replace: bool = False,
-            info: ReleaseInfo | None = None, opener=open_url) -> Path:
+            info: ReleaseInfo | None = None, opener=open_url, allow_unpinned: bool = False) -> Path:
     info = info or ReleaseInfo.read()
     if platform not in info.platforms:
         raise RuntimeInstallError(f"unknown platform {platform!r}; one of {', '.join(info.platforms)}")
@@ -175,7 +195,7 @@ def install(platform: str, runtime_dir: Path, custom_url: str = "", sha256: str 
     if folder.exists() and not replace:
         raise RuntimeInstallError(f"{folder} is already there; pass --replace to install it again")
     runtime_dir.mkdir(parents=True, exist_ok=True)
-    expected = expected_digest(info, platform, sha256, custom_url, opener)
+    expected = expected_digest(info, platform, sha256, custom_url, opener, allow_unpinned)
     archive = runtime_dir / f"{asset}{PARTIAL_SUFFIX}"
     found = download(url, archive, opener)
     if found != expected:
@@ -190,9 +210,7 @@ def install(platform: str, runtime_dir: Path, custom_url: str = "", sha256: str 
     if binary_in(staging, SERVER) is None:
         shutil.rmtree(staging, ignore_errors=True)
         raise RuntimeInstallError(f"{url} holds no {SERVER_BINARY}; nothing was installed")
-    if folder.exists():
-        shutil.rmtree(folder)
-    staging.rename(folder)
+    swap_in(staging, folder)
     if os.name != "nt":
         for role in (SERVER, WORKER):
             binary = binary_in(folder, role)
@@ -215,6 +233,8 @@ def main(argv: list[str]) -> int:
     installing.add_argument("--sha256", default="", help="the zip's SHA-256, needed with --url")
     installing.add_argument("--config", default=None, help="engine.json to read runtime_url from")
     installing.add_argument("--replace", action="store_true", help="install again over a folder of the same release")
+    installing.add_argument("--allow-unpinned", action="store_true",
+                            help="take the SHA-256 the release lists when this engine pins none for the platform")
     finding = actions.add_parser("find", help="print the server and worker binaries found in a runtime folder")
     finding.add_argument("--dir", type=Path, default=Path(DEFAULT_RUNTIME_DIR))
     arguments = parser.parse_args(argv)
@@ -226,7 +246,8 @@ def main(argv: list[str]) -> int:
     if not custom_url and arguments.config:
         custom_url = load_config(arguments.config).runtime_url
     try:
-        folder = install(arguments.platform, arguments.dir, custom_url, arguments.sha256, arguments.replace)
+        folder = install(arguments.platform, arguments.dir, custom_url, arguments.sha256, arguments.replace,
+                         allow_unpinned=arguments.allow_unpinned)
     except (RuntimeInstallError, OSError, zipfile.BadZipFile) as error:
         print(f"runtime not installed: {error}", file=sys.stderr)
         return 1

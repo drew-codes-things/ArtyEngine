@@ -19,14 +19,17 @@ releases (release `runtime-b12110`, tested with the CUDA 12.8 build), one per pl
 
 ```bash
 cd /srv/ai/arty-engine/src
-sudo python3 -m arty_engine runtime install --platform linux-cuda-12.8-x64
+sudo python3 -m arty_engine runtime install --platform linux-cuda-12.8-x64 --sha256 <the zip's SHA-256>
 python3 -m arty_engine runtime find
 ```
 
 `install` downloads `arty-runtime-<platform>.zip`, checks its SHA-256 against the digest pinned in
-`arty_engine/runtime_release.json` (or the release's `SHA256SUMS` while none is pinned), unpacks it into
+`arty_engine/runtime_release.json`, or the one given with `--sha256` (take it from the release's `SHA256SUMS` after
+checking it). A platform with no pin and no `--sha256` is refused; `--allow-unpinned` takes the digest the release's
+`SHA256SUMS` lists instead, which only guards against a broken download. It unpacks the zip into
 `/srv/ai/arty-engine/runtime/runtime-b12110-<platform>/` and points the `runtime/server` and `runtime/worker` links
-there, so a new release is one changed link. Platforms: `linux-x64` (CPU only), `linux-cuda-12.8-x64`,
+there, so a new release is one changed link; `--replace` moves the old folder aside before the new one goes in and
+puts it back if that fails. Platforms: `linux-x64` (CPU only), `linux-cuda-12.8-x64`,
 `linux-cuda-13.4-x64`, `linux-vulkan-x64`, `linux-rocm-10.0-x64`, `windows-x64`, `windows-cuda-12.4-x64`,
 `windows-cuda-13.4-x64`, `windows-vulkan-x64`. The CUDA builds need NVIDIA's CUDA runtime libraries; list their folder
 in `library_path`.
@@ -37,7 +40,10 @@ engine looks for `arty-runtime-server` and then `server`, and a folder unpacked 
 works as it is.
 
 `tools/package_runtime.py` builds these zips from the official build archives (it checks the archive's SHA-256, renames
-the binaries, adds the licence files and writes `SHA256SUMS`); publishing them is a separate, manual step.
+the binaries, adds the licence files and writes `SHA256SUMS`); publishing them is a separate, manual step. For Linux
+builds it ships only the libraries the two binaries load (and the backend modules the runtime opens by name, such as
+`libggml-cpu-*.so`), gives the runtime's own libraries `libarty-runtime*` names and rewrites the links to them with
+`patchelf` (`apt install patchelf`, or `--patchelf <path>`). Windows builds keep their DLLs as they are.
 
 Then write the config the service reads, starting from the shipped one:
 
