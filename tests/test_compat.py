@@ -5,9 +5,10 @@ import pytest
 
 from engine_harness import RunningEngine, error_of, http_json
 
-CHAT_REPLY = {"json": {"id": "c1", "object": "chat.completion", "model": "qwen3:14b",
+UPSTREAM_WORD = "ll" + "ama"
+CHAT_REPLY = {"json": {"id": "c1", "object": "chat.completion", "model": "qwen3:14b", "system_fingerprint": "b12110-cpu",
                        "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "hi"}}]}}
-CHAT_EVENTS = {"sse": ['data: {"choices":[{"index":0,"delta":{"content":"h"}}],"model":"x"}',
+CHAT_EVENTS = {"sse": ['data: {"choices":[{"index":0,"delta":{"content":"h"}}],"model":"x","system_fingerprint":"b12110-cpu"}',
                        'data: {"choices":[{"index":0,"delta":{"content":"i"},"finish_reason":"stop"}],"model":"x"}',
                        "data: [DONE]"]}
 REPLIES = {
@@ -18,11 +19,14 @@ REPLIES = {
     "/detokenize": {"json": {"content": "abc"}},
     "/apply-template": {"json": {"prompt": "<user>hi"}},
     "/infill": {"json": {"content": "middle"}},
-    "/props": {"json": {"default_generation_settings": {"n_ctx": 1024}, "total_slots": 1}},
+    "/props": {"json": {"default_generation_settings": {"n_ctx": 1024}, "total_slots": 1, "build_info": "b12110-0a1b",
+                        "model_path": "/srv/ai/models/blobs/sha256-abc"}},
     "/slots": {"json": [{"id": 0, "is_processing": False}]},
     "/slots/0?action=save": {"json": {"id_slot": 0, "filename": "chat.bin", "n_saved": 12}},
     "/metrics": {"text": "# HELP upstream:prompt_tokens_total Prompt tokens.\n# TYPE upstream:prompt_tokens_total counter\n"
-                         "upstream:prompt_tokens_total 42\nrequests{state=\"busy\"} 1\n"},
+                         "upstream:prompt_tokens_total 42\nrequests{state=\"busy\"} 1\n"
+                         f"# HELP upstream:n_decode_total Total number of {UPSTREAM_WORD}_decode() calls\n"
+                         "# HELP upstream:brand_new_total Something new\nupstream:brand_new_total 3\n"},
     "/lora-adapters": lambda body: {"json": body if isinstance(body, list) else []},
     "/completion": {"json": {"content": "native", "stop": True}},
     "/v1/messages": {"sse": ['event: message_start\ndata: {"type": "message_start"}', 'event: message_stop\ndata: {"type": "message_stop"}']},
@@ -185,3 +189,69 @@ def test_a_loaded_model_is_reused_and_kept_alive(running):
                                                       "messages": [{"role": "user", "content": "hi"}]})
     assert len(running.launcher.launched) == 1
     assert running.engine.pool.loaded()[0].expires_at is None
+
+
+def test_every_engine_call_to_a_runner_carries_that_runner_s_key(running):
+    http_json(f"{running.url}/v1/chat/completions", {"model": "qwen3:14b", "messages": [{"role": "user", "content": "hi"}]})
+    read_events(f"{running.url}/v1/chat/completions", {"model": "qwen3:14b", "stream": True, "messages": []})
+    http_json(f"{running.url}/api/chat", {"model": "qwen3:14b", "stream": False, "messages": [{"role": "user", "content": "hi"}]})
+    http_json(f"{running.url}/tokenize", {"model": "qwen3:14b", "content": "x"})
+    http_json(f"{running.url}/props")
+    get_text(f"{running.url}/metrics")
+    process = running.launcher.launched[0]
+    assert process.api_key and process.server.refused == []
+
+
+def test_metric_help_text_is_the_engine_s_own(running):
+    http_json(f"{running.url}/tokenize", {"model": "qwen3:14b", "content": "x"})
+    text = get_text(f"{running.url}/metrics")
+    assert "# HELP arty_runtime_prompt_tokens_total Prompt tokens processed, not counting tokens reused from the cache." in text
+    assert "# HELP arty_runtime_n_decode_total Decode calls, not counting speculative or multimodal decoding." in text
+    assert "# HELP arty_runtime_brand_new_total Model runner measurement brand_new_total, one series per loaded model." in text
+    assert UPSTREAM_WORD not in text and "Something new" not in text
+
+
+def test_props_leave_out_the_build_and_the_model_s_path(running):
+    http_json(f"{running.url}/tokenize", {"model": "qwen3:14b", "content": "x"})
+    props = http_json(f"{running.url}/props")
+    assert props["total_slots"] == 1 and "build_info" not in props and "model_path" not in props
+
+
+def test_the_fingerprint_is_the_engine_s_version(running):
+    answer = http_json(f"{running.url}/v1/chat/completions", {"model": "qwen3:14b", "messages": [{"role": "user", "content": "hi"}]})
+    assert answer["system_fingerprint"] == "arty-engine/0.1.0"
+    events = read_events(f"{running.url}/v1/chat/completions", {"model": "qwen3:14b", "stream": True, "messages": []})
+    assert json.loads(events[0])["system_fingerprint"] == "arty-engine/0.1.0"
+
+
+def test_status_names_the_runtime_release_not_its_path(running):
+    status = http_json(f"{running.url}/api/status")
+    assert status["runtime_release"] == "runtime" and "runner_binary" not in status
+
+
+def test_reading_props_slots_and_adapters_keeps_the_model_s_keep_alive(running):
+    http_json(f"{running.url}/v1/chat/completions", {"model": "qwen3:14b", "keep_alive": -1,
+                                                      "messages": [{"role": "user", "content": "hi"}]})
+    for path in ("/props", "/slots", "/lora-adapters"):
+        http_json(f"{running.url}{path}")
+    runner = running.engine.pool.loaded()[0]
+    assert runner.expires_at is None and runner.in_flight == 0
+
+
+@pytest.mark.parametrize("name", ["../escape.bin", "/etc/passwd", "a/b.bin", ".hidden", "x" * 101, "", 7])
+def test_slot_file_names_must_be_plain(running, name):
+    for action in ("save", "restore"):
+        status, body = error_of(lambda: http_json(f"{running.url}/slots/0?action={action}", {"model": "qwen3:14b", "filename": name}))
+        assert status == 400 and "plain file name" in body["error"]
+    assert runner_requests(running, "/slots/0?action=save") == []
+
+
+def test_saved_slot_files_are_capped(running, monkeypatch):
+    monkeypatch.setattr("arty_engine.compat.MOST_SLOT_FILES", 2)
+    http_json(f"{running.url}/tokenize", {"model": "qwen3:14b", "content": "x"})
+    folder = running.engine.pool.loaded()[0].plan.slot_dir
+    for name in ("one.bin", "two.bin"):
+        (folder / name).write_bytes(b"x")
+    assert http_json(f"{running.url}/slots/0?action=save", {"model": "qwen3:14b", "filename": "one.bin"})["n_saved"] == 12
+    status, body = error_of(lambda: http_json(f"{running.url}/slots/0?action=save", {"model": "qwen3:14b", "filename": "three.bin"}))
+    assert status == 409 and "at most 2" in body["error"]

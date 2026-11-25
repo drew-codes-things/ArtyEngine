@@ -13,15 +13,15 @@
 | `POST /api/pull` | Hugging Face names (`hf.co/<owner>/<repo>:<quant>`) and the short names in `arty_engine/short_names.json`, or a short name with its own `source`, with progress; one pull at a time (more below) |
 | `POST /api/create` | A model made from an installed model, a sent blob or sent files, with a recipe ([below](#making-models)) |
 | `POST /api/copy` | A second name for a model |
-| `HEAD /api/blobs/sha256:<hex>`, `POST /api/blobs/sha256:<hex>` | Whether the store has a blob (200 or 404); send one (201 when new, 200 when already there) |
+| `HEAD /api/blobs/sha256:<hex>`, `POST /api/blobs/sha256:<hex>` | Whether the store has a blob (200 or 404); send one with a `Content-Length` or chunked (201 when new, 200 when already there; 507 when it would leave less than `pull_keep_free_mb` free) |
 | `DELETE /api/delete` | Models in the engine's own store. Models read in place from `model_roots` answer 405, internal models and deletes during a pull answer 409 |
 | `GET /api/workers`, `GET /api/status` | RPC workers and their health; the engine's state in one answer ([rpc.md](rpc.md)) |
 | `GET /v1/models`, `GET /v1/models/<name>` | The models, the OpenAI way |
 | `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings` | Passed to the model's runtime with the model's own parameters as defaults; streamed as server-sent events; remote models answer chats |
 | `POST /v1/rerank`, `POST /rerank` | Reranking with a reranking model (pooling type rank) |
 | `POST /tokenize`, `/detokenize`, `/apply-template`, `/infill` | The runtime's own tools, for the model named in `model` |
-| `GET /props`, `GET /slots`, `POST /slots/<n>?action=save\|restore\|erase`, `GET`/`POST /lora-adapters` | The runtime's state for a model named by `?model=` or the body; when exactly one model is loaded it may be left out |
-| `GET /metrics` | Prometheus text: every loaded runtime's metrics, named `arty_runtime_<name>` with a `model` label, plus the engine's own (`arty_engine_loaded_models`, `arty_engine_rpc_worker_up`) |
+| `GET /props`, `GET /slots`, `POST /slots/<n>?action=save\|restore\|erase`, `GET`/`POST /lora-adapters` | The runtime's state for a model named by `?model=` or the body; when exactly one model is loaded it may be left out. Reading these never changes a loaded model's keep-alive; `/props` leaves out the build and the model's path. A slot `filename` is a plain name (letters, digits, `.`, `-`, `_`, at most 100) and each model keeps at most 64 slot files |
+| `GET /metrics` | Prometheus text: every loaded runtime's metrics, named `arty_runtime_<name>` with a `model` label and the engine's own help text, plus the engine's own (`arty_engine_loaded_models`, `arty_engine_rpc_worker_up`) |
 | `GET /health` | `{"status": "ok"}` |
 | `POST /api/push` | **501**: there is no registry to push to |
 | `POST /api/generate` raw with images, or with a `template` | **501** |
@@ -143,8 +143,10 @@ MESSAGE assistant "Arty."
 
 `FROM`, `PARAMETER`, `TEMPLATE`, `SYSTEM`, `LICENSE`, `ADAPTER` (a digest) and `MESSAGE` are read; fields given beside
 the recipe win over it. The new model shares its blobs with the one it is made from (a hard link when the stores share
-a disk). `quantize` answers 501, a path on the engine's machine as `from` answers 400, and remote and internal names
-answer 409. A create runs only while no pull runs. A loaded model of the same name is unloaded so the next request uses
+a disk; a copy otherwise, refused with 507 when it would leave less than `pull_keep_free_mb` free, as `/api/copy` is).
+Every model, projector and adapter blob must be a GGUF file, or the create answers 400 and an existing model of that
+name stays as it was. `quantize` answers 501, a path on the engine's machine as `from` answers 400, and remote and
+internal names answer 409. A create runs only while no pull runs. A loaded model of the same name is unloaded so the next request uses
 the new one. `/api/copy` (`source`, `destination`) writes a second manifest for the same blobs.
 
 Note: a template given to `/api/create` is stored and shown, but the runtime renders chats with the template inside

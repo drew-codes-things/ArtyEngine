@@ -9,6 +9,7 @@ from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 from . import remote, translate
 from .runner import is_reranker
+from .scrub import scrub
 
 OPENAI_PREFIX = "/v1/"
 RUNNER_TIMEOUT_SECONDS = 3600
@@ -16,11 +17,34 @@ SLOT_ACTIONS = ("save", "restore", "erase")
 SAMPLE_LINE = re.compile(r"^([A-Za-z_:][A-Za-z0-9_:]*)(\{[^}]*\})?(\s.*)$")
 DESCRIBED_LINE = re.compile(r"^# (HELP|TYPE) (\S+)(.*)$")
 RUNTIME_METRIC_PREFIX = "arty_runtime_"
+RUNTIME_METRIC_HELP = {
+    "prompt_tokens_total": "Prompt tokens processed, not counting tokens reused from the cache.",
+    "prompt_tokens_cached_total": "Prompt tokens reused from the cache.",
+    "prompt_seconds_total": "Seconds spent processing prompts.",
+    "tokens_predicted_total": "Tokens generated.",
+    "tokens_predicted_seconds_total": "Seconds spent generating tokens.",
+    "n_decode_total": "Decode calls, not counting speculative or multimodal decoding.",
+    "n_tokens_max": "Longest sequence seen so far (prompt and generation).",
+    "n_busy_slots_per_decode": "Average number of busy slots per decode call.",
+    "prompt_tokens_seconds": "Average prompt speed in tokens per second.",
+    "predicted_tokens_seconds": "Average generation speed in tokens per second.",
+    "requests_processing": "Requests being answered right now.",
+    "requests_deferred": "Requests waiting for a free slot.",
+    "spec_decode_num_drafts_total": "Speculative drafts made.",
+    "spec_decode_num_draft_tokens_total": "Tokens drafted by speculative decoding.",
+    "spec_decode_num_accepted_tokens_total": "Drafted tokens that were accepted.",
+    "spec_decode_num_accepted_tokens_per_pos_total": "Accepted drafted tokens per draft position.",
+}
+GENERIC_METRIC_HELP = "Model runner measurement {name}, one series per loaded model."
 ERROR_TYPES = {400: "invalid_request_error", 401: "authentication_error", 403: "permission_error", 404: "not_found_error",
                429: "rate_limit_error", 501: "not_supported_error", 503: "unavailable_error"}
 OWNER = "arty-engine"
 EVENT_STREAM = "text/event-stream"
 PASS_THROUGH_CHUNK_BYTES = 65536
+PRIVATE_PROPS = ("build_info", "model_path")
+LONGEST_SLOT_FILE_NAME = 100
+SLOT_FILE_NAME = re.compile(rf"[A-Za-z0-9][A-Za-z0-9._-]{{0,{LONGEST_SLOT_FILE_NAME - 1}}}")
+MOST_SLOT_FILES = 64
 
 
 class RelayError(Exception):
@@ -45,21 +69,21 @@ def runner_message(error: urllib.error.HTTPError) -> str:
     return str(detail or payload)
 
 
-def runner_call(url: str, body=None, method: str | None = None):
+def runner_call(runner, path: str, body=None, method: str | None = None):
     data = json.dumps(body).encode() if body is not None else None
-    request = urllib.request.Request(url, data=data, method=method or ("POST" if data is not None else "GET"),
-                                     headers={"Content-Type": "application/json"})
+    request = urllib.request.Request(f"{runner.base_url}{path}", data=data, method=method or ("POST" if data is not None else "GET"),
+                                     headers=runner.headers)
     try:
         return urllib.request.urlopen(request, timeout=RUNNER_TIMEOUT_SECONDS)
     except urllib.error.HTTPError as error:
         raise RelayError(error.code if error.code < 500 or error.code == HTTPStatus.NOT_IMPLEMENTED else 500,
-                         runner_message(error)) from error
+                         scrub(runner_message(error))) from error
     except (urllib.error.URLError, OSError) as error:
         raise RelayError(500, f"the model runner stopped answering: {error}") from error
 
 
-def runner_json(url: str, body=None, method: str | None = None):
-    with runner_call(url, body, method) as response:
+def runner_json(runner, path: str, body=None, method: str | None = None):
+    with runner_call(runner, path, body, method) as response:
         raw = response.read()
     try:
         return json.loads(raw) if raw else {}
@@ -67,9 +91,23 @@ def runner_json(url: str, body=None, method: str | None = None):
         raise RelayError(500, "the model runner answered with something other than JSON") from error
 
 
-def runner_text(url: str) -> str:
-    with runner_call(url) as response:
+def runner_text(runner, path: str) -> str:
+    with runner_call(runner, path) as response:
         return response.read().decode(errors="replace")
+
+
+def check_slot_file_name(name) -> None:
+    if not isinstance(name, str) or not SLOT_FILE_NAME.fullmatch(name) or ".." in name:
+        raise RelayError(400, "filename must be a plain file name of letters, digits, dots, dashes and underscores "
+                              f"(at most {LONGEST_SLOT_FILE_NAME} characters)")
+
+
+def check_room_for_slot_file(folder, name: str) -> None:
+    if folder is None or (folder / name).exists():
+        return
+    saved = sum(1 for path in folder.iterdir() if path.is_file()) if folder.is_dir() else 0
+    if saved >= MOST_SLOT_FILES:
+        raise RelayError(409, f"{saved} slot files are saved already (at most {MOST_SLOT_FILES}); overwrite one or delete some")
 
 
 def model_entry(model) -> dict:
@@ -104,6 +142,17 @@ def runtime_metric_name(name: str) -> str:
     return RUNTIME_METRIC_PREFIX + name.rsplit(":", 1)[-1]
 
 
+def runtime_metric_help(name: str) -> str:
+    suffix = name.rsplit(":", 1)[-1]
+    return RUNTIME_METRIC_HELP.get(suffix) or GENERIC_METRIC_HELP.format(name=suffix)
+
+
+def described_line(kind: str, name: str, rest: str) -> str:
+    if kind == "HELP":
+        return f"# HELP {runtime_metric_name(name)} {runtime_metric_help(name)}"
+    return f"# TYPE {runtime_metric_name(name)}{rest}"
+
+
 def labelled_samples(text: str, model_name: str, seen: set) -> list[str]:
     label = 'model="' + model_name.replace("\\", "\\\\").replace('"', '\\"') + '"'
     lines = []
@@ -111,7 +160,7 @@ def labelled_samples(text: str, model_name: str, seen: set) -> list[str]:
         described = DESCRIBED_LINE.match(line)
         if described:
             kind, name, rest = described.groups()
-            renamed = f"# {kind} {runtime_metric_name(name)}{rest}"
+            renamed = described_line(kind, name, rest)
             if renamed not in seen:
                 seen.add(renamed)
                 lines.append(renamed)
@@ -175,12 +224,17 @@ class CompatRoutes:
         first = next(events, None)
         self._start_events()
         for event in itertools.chain([first] if first is not None else [], events):
-            self._event({**event, "model": rename} if rename and "model" in event else event)
+            self._event(self._engine_shaped({**event, "model": rename} if rename and "model" in event else event))
         self._event("[DONE]")
         self._end_stream()
 
-    def _runner_events(self, url: str, body: dict):
-        with runner_call(url, body) as response:
+    def _engine_shaped(self, payload):
+        if isinstance(payload, dict) and "system_fingerprint" in payload:
+            return {**payload, "system_fingerprint": self.server_version}
+        return payload
+
+    def _runner_events(self, runner, path: str, body: dict):
+        with runner_call(runner, path, body) as response:
             for event in remote.server_sent_events(response):
                 if event.get("error"):
                     detail = event["error"]
@@ -197,13 +251,21 @@ class CompatRoutes:
         options = translate.merged_options(model.params, request.get("options"))
         return self.engine.with_runner(model, options, keep_alive, work, prefer_loaded=request.get("options") is None)
 
+    def _with_loaded(self, model, work):
+        runner = self.engine.pool.borrow(model.name)
+        if runner is None:
+            return self._with_local(model, {}, self.engine.keep_alive({}), lambda runner, load_seconds: work(runner))
+        try:
+            return work(runner)
+        finally:
+            self.engine.pool.give_back(runner)
+
     def _relay(self, model, request: dict, keep_alive, path: str, body: dict) -> None:
         def run(runner, load_seconds):
-            url = f"{runner.base_url}{path}"
             if body.get("stream"):
-                self._relay_events(self._runner_events(url, body))
+                self._relay_events(self._runner_events(runner, path, body))
                 return
-            self._send_json(200, runner_json(url, body))
+            self._send_json(200, self._engine_shaped(runner_json(runner, path, body)))
         self._with_local(model, request, keep_alive, run)
 
     def v1_models(self):
@@ -222,7 +284,7 @@ class CompatRoutes:
             if request.get("stream"):
                 self._relay_events(chat.stream(request), rename=model.name)
             else:
-                self._send_json(200, {**chat.post(request), "model": model.name})
+                self._send_json(200, self._engine_shaped({**chat.post(request), "model": model.name}))
             return
         if model.is_embedding:
             raise RelayError(400, f'"{model.name}" does not support chat')
@@ -274,7 +336,7 @@ class CompatRoutes:
         body = {**{key: value for key, value in request.items() if key not in ("keep_alive", "options")}, "model": model.name}
 
         def run(runner, load_seconds):
-            with runner_call(f"{runner.base_url}{path}", body) as response:
+            with runner_call(runner, path, body) as response:
                 content_type = response.headers.get("Content-Type") or "application/json"
                 if not content_type.startswith(EVENT_STREAM):
                     self._send_text(200, response.read().decode(errors="replace"), content_type)
@@ -325,17 +387,18 @@ class CompatRoutes:
             return loaded[0].plan.model
         raise RelayError(400, "name the model with ?model=<name> (it is needed when not exactly one model is loaded)")
 
-    def _runner_get(self, path: str) -> None:
+    def _runner_get(self, path: str, without: tuple = ()) -> None:
         model = self._named_model()
         self._refuse_remote(model)
-        keep_alive = self.engine.keep_alive({})
         result = {}
-        self._with_local(model, {}, keep_alive, lambda runner, load_seconds: result.update(
-            payload=runner_json(f"{runner.base_url}{path}")))
-        self._send_json(200, result["payload"])
+        self._with_loaded(model, lambda runner: result.update(payload=runner_json(runner, path)))
+        payload = result["payload"]
+        if isinstance(payload, dict):
+            payload = {key: value for key, value in payload.items() if key not in without}
+        self._send_json(200, payload)
 
     def props(self):
-        self._runner_get("/props")
+        self._runner_get("/props", without=PRIVATE_PROPS)
 
     def slots(self):
         self._runner_get("/slots")
@@ -349,9 +412,15 @@ class CompatRoutes:
         model = self._named_model(request)
         self._refuse_remote(model)
         body = {key: value for key, value in request.items() if key != "model"}
+        if action != "erase":
+            check_slot_file_name(body.get("filename"))
         result = {}
-        self._with_local(model, {}, self.engine.keep_alive({}), lambda runner, load_seconds: result.update(
-            payload=runner_json(f"{runner.base_url}/slots/{slot}?{urlencode({'action': action})}", body)))
+
+        def run(runner, load_seconds):
+            if action == "save":
+                check_room_for_slot_file(runner.plan.slot_dir, body["filename"])
+            result.update(payload=runner_json(runner, f"/slots/{slot}?{urlencode({'action': action})}", body))
+        self._with_local(model, {}, self.engine.keep_alive({}), run)
         self._send_json(200, result["payload"])
 
     def lora_adapters(self):
@@ -366,7 +435,7 @@ class CompatRoutes:
             raise RelayError(400, "adapters must be a list of {id, scale} objects")
         result = {}
         self._with_local(model, {}, self.engine.keep_alive({}), lambda runner, load_seconds: result.update(
-            payload=runner_json(f"{runner.base_url}/lora-adapters", adapters)))
+            payload=runner_json(runner, "/lora-adapters", adapters)))
         self._send_json(200, result["payload"])
 
     def metrics(self):
@@ -374,7 +443,7 @@ class CompatRoutes:
         lines = engine_samples(len(self.engine.pool.loaded()), self.engine.pool.workers_status())
         for runner in self.engine.pool.loaded():
             try:
-                lines += labelled_samples(runner_text(f"{runner.base_url}/metrics"), runner.name, seen)
+                lines += labelled_samples(runner_text(runner, "/metrics"), runner.name, seen)
             except RelayError:
                 continue
         self._send_text(200, "\n".join(lines) + "\n", "text/plain; version=0.0.4")

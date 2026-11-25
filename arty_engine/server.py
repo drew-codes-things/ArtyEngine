@@ -13,15 +13,18 @@ from collections import Counter
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dataclasses import dataclass
+from pathlib import Path
 from urllib.parse import urlsplit
 
 from . import gpu, recipes, remote, translate
+from .chunked import ChunkedBody, ChunkedBodyError
 from .backend import Backend, resolve_backend
 from .compat import CompatRoutes, RelayError, openai_error
 from .config import Config, load_config
 from .gguf import GgufError
 from .pull import HF_NAME_FORM, Puller, PullError
 from .runner import LoadError, Runner, RunnerPool, WorkersDown, parse_keep_alive
+from .scrub import scrub
 from .store import ModelNotFound, ModelStore, NotOwned, iso_time, parse_name, roots_in_older_layout
 
 log = logging.getLogger("arty-engine")
@@ -33,6 +36,7 @@ TRAINER_DONE_TIMEOUT_SECONDS = 5
 MAX_BODY_BYTES = 256 * 1024 * 1024
 FAR_FUTURE = "2318-08-18T00:00:00Z"
 BLOBS_PREFIX = "/api/blobs/"
+NOT_IMPLEMENTED = 501
 LOCAL_HOSTNAMES = ("localhost", "127.0.0.1", "::1")
 
 
@@ -80,8 +84,9 @@ class Engine:
         self.store = store or ModelStore(config.roots)
         self.pool = pool or RunnerPool(config, self.store, backend=backend)
         self.trainer = TrainerClient(config.trainer_url)
-        self.puller = Puller(config.roots[0], config.pull_rate_bytes, store=self.store,
-                             keep_free_bytes=config.pull_keep_free_mb * 1024 * 1024, engine_listen=config.listen)
+        self.keep_free_bytes = config.pull_keep_free_mb * gpu.MIB
+        self.puller = Puller(config.roots[0], config.pull_rate_bytes, store=self.store, keep_free_bytes=self.keep_free_bytes,
+                             engine_listen=config.listen)
         self.pull_lock = threading.Lock()
         self.leak_lock = threading.Lock()
         self.replies_with_leaks: Counter[str] = Counter()
@@ -162,15 +167,20 @@ class Engine:
                 self.trainer.done(request_id)
 
 
-def post_json(url: str, body: dict, timeout: int = UPSTREAM_TIMEOUT_SECONDS) -> dict:
-    request = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"}, method="POST")
+def post_json(url: str, body: dict, timeout: int = UPSTREAM_TIMEOUT_SECONDS, headers: dict | None = None) -> dict:
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers or {"Content-Type": "application/json"},
+                                     method="POST")
     try:
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return json.loads(response.read())
     except urllib.error.HTTPError as error:
-        raise ApiError(error.code if error.code < 500 else 500, upstream_message(error)) from error
+        raise ApiError(runner_status(error.code), scrub(upstream_message(error))) from error
     except (urllib.error.URLError, OSError) as error:
         raise ApiError(500, f"the model runner stopped answering: {error}") from error
+
+
+def runner_status(code: int) -> int:
+    return code if code < 500 or code == NOT_IMPLEMENTED else 500
 
 
 def upstream_message(error: urllib.error.HTTPError) -> str:
@@ -184,12 +194,13 @@ def upstream_message(error: urllib.error.HTTPError) -> str:
     return str(detail or payload)
 
 
-def stream_events(url: str, body: dict):
-    request = urllib.request.Request(url, data=json.dumps(body).encode(), headers={"Content-Type": "application/json"}, method="POST")
+def stream_events(url: str, body: dict, headers: dict | None = None):
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers or {"Content-Type": "application/json"},
+                                     method="POST")
     try:
         response = urllib.request.urlopen(request, timeout=UPSTREAM_TIMEOUT_SECONDS)
     except urllib.error.HTTPError as error:
-        raise ApiError(error.code if error.code < 500 else 500, upstream_message(error)) from error
+        raise ApiError(runner_status(error.code), scrub(upstream_message(error))) from error
     except (urllib.error.URLError, OSError) as error:
         raise ApiError(500, f"the model runner stopped answering: {error}") from error
     with response:
@@ -203,16 +214,21 @@ def stream_events(url: str, body: dict):
 @dataclass(frozen=True)
 class RunnerChat:
     base_url: str
+    headers: dict | None = None
 
     @property
     def url(self) -> str:
         return f"{self.base_url}/v1/chat/completions"
 
     def post(self, body: dict) -> dict:
-        return post_json(self.url, body)
+        return post_json(self.url, body, headers=self.headers)
 
     def stream(self, body: dict):
-        return stream_events(self.url, body)
+        return stream_events(self.url, body, self.headers)
+
+
+def runtime_release_name(binary: str) -> str:
+    return scrub(Path(binary).resolve().parent.name)
 
 
 def ps_entry(runner: Runner) -> dict:
@@ -392,8 +408,14 @@ def make_handler(engine: Engine):
         def do_HEAD(self):
             self.close_connection = True
             path = urlsplit(self.path).path
-            found = not path.startswith(BLOBS_PREFIX) or recipes.has_blob(engine.store, path[len(BLOBS_PREFIX):])
-            self.send_response(200 if found else 404)
+            refusal = refusal_for(engine.config, self.headers.get("Host"), self.headers.get("Origin"))
+            if refusal:
+                log.warning("refused HEAD %s: %s", path, refusal)
+                status = 403
+            else:
+                found = not path.startswith(BLOBS_PREFIX) or recipes.has_blob(engine.store, path[len(BLOBS_PREFIX):])
+                status = 200 if found else 404
+            self.send_response(status)
             self.send_header("Connection", "close")
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -435,7 +457,8 @@ def make_handler(engine: Engine):
 
         def status(self):
             backend = engine.pool.backend
-            self._send_json(200, {"version": VERSION, "gpu_backend": backend.name, "runner_binary": engine.pool.config.runner_binary,
+            self._send_json(200, {"version": VERSION, "gpu_backend": backend.name,
+                                  "runtime_release": runtime_release_name(engine.pool.config.runner_binary),
                                   "vram_budget_mb": engine.config.vram_budget_mb, "card": card_status(engine.pool.memory()),
                                   "loaded": loaded_list_entries(engine.pool.loaded()), "workers": engine.pool.workers_status()})
 
@@ -499,14 +522,14 @@ def make_handler(engine: Engine):
             try:
                 if stream:
                     lines = []
-                    made = recipes.create(engine.store, request, lines.append)
+                    made = recipes.create(engine.store, request, lines.append, engine.keep_free_bytes)
                     self._start_stream()
                     for line in lines:
                         self._stream_line(line)
                     self._stream_line({"status": "success"})
                     self._end_stream()
                 else:
-                    made = recipes.create(engine.store, request, lambda update: None)
+                    made = recipes.create(engine.store, request, lambda update: None, engine.keep_free_bytes)
                     self._send_json(200, {"status": "success"})
             finally:
                 engine.pull_lock.release()
@@ -522,22 +545,30 @@ def make_handler(engine: Engine):
             if remote.is_remote_name(request.get("source")):
                 raise ApiError(400, "a remote model can't be copied")
             try:
-                made = recipes.copy(engine.store, request.get("source"), destination)
+                made = recipes.copy(engine.store, request.get("source"), destination, engine.keep_free_bytes)
             except ModelNotFound as error:
                 raise ApiError(404, f"model '{request.get('source')}' not found") from error
             engine.pool.unload(made)
             self._send_json(200, {"status": "success"})
 
-        def blob(self):
-            digest = urlsplit(self.path).path[len(BLOBS_PREFIX):]
+        def _blob_body(self):
+            if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
+                return ChunkedBody(self.rfile), None
             try:
                 length = int(self.headers.get("Content-Length") or -1)
             except ValueError as error:
                 raise ApiError(400, "Content-Length must be a number") from error
             if length < 0:
-                raise ApiError(411, "send the blob with a Content-Length")
-            created = recipes.receive_blob(engine.store, digest, self.rfile, length,
-                                           engine.config.pull_keep_free_mb * 1024 * 1024)
+                raise ApiError(411, "send the blob with a Content-Length or chunked")
+            return self.rfile, length
+
+        def blob(self):
+            digest = urlsplit(self.path).path[len(BLOBS_PREFIX):]
+            source, length = self._blob_body()
+            try:
+                created = recipes.receive_blob(engine.store, digest, source, length, engine.keep_free_bytes)
+            except ChunkedBodyError as error:
+                raise ApiError(400, str(error)) from error
             self.send_response(201 if created else 200)
             self.send_header("Connection", "close")
             self.send_header("Content-Length", "0")
@@ -578,8 +609,8 @@ def make_handler(engine: Engine):
             refuse_remote(model, "a remote server's prompt template isn't known, so it can't be rendered")
             body = translate.render_body(request, model)
             options = translate.merged_options(model.params, request.get("options"))
-            rendered = engine.with_runner(model, options, keep_alive,
-                                          lambda runner, load_seconds: post_json(f"{runner.base_url}/apply-template", body))
+            rendered = engine.with_runner(model, options, keep_alive, lambda runner, load_seconds: post_json(
+                f"{runner.base_url}/apply-template", body, headers=runner.headers))
             info = {"rendered_template": rendered.get("prompt", "")}
             images = translate.image_count(request.get("messages"))
             if images:
@@ -628,9 +659,10 @@ def make_handler(engine: Engine):
             def run(runner: Runner, load_seconds: float):
                 url = f"{runner.base_url}{'/infill' if fill_in else '/completion'}"
                 if not stream:
-                    self._send_json(200, translate.raw_reply(model.name, post_json(url, body), load_seconds, started))
+                    self._send_json(200, translate.raw_reply(model.name, post_json(url, body, headers=runner.headers), load_seconds,
+                                                             started))
                     return
-                events = stream_events(url, body)
+                events = stream_events(url, body, runner.headers)
                 first = next(events, None)
                 self._start_stream()
                 finished = False
@@ -693,7 +725,7 @@ def make_handler(engine: Engine):
             def run(runner: Runner, load_seconds: float):
                 splitter = (translate.LeakSplitter(named_leaker=runner.plan.named_thinking_leaker)
                             if runner.plan.may_leak_thinking else None)
-                answer_within_context(RunnerChat(runner.base_url), load_seconds, splitter)
+                answer_within_context(RunnerChat(runner.base_url, runner.headers), load_seconds, splitter)
 
             engine.with_runner(model, options, keep_alive, run)
 
@@ -716,7 +748,8 @@ def make_handler(engine: Engine):
             result = {}
 
             def run(runner: Runner, load_seconds: float):
-                result["reply"] = post_json(f"{runner.base_url}/v1/embeddings", {"input": inputs, "model": model.name})
+                result["reply"] = post_json(f"{runner.base_url}/v1/embeddings", {"input": inputs, "model": model.name},
+                                            headers=runner.headers)
                 result["load"] = load_seconds
 
             started = time.monotonic()

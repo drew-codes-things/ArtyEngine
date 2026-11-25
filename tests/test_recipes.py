@@ -1,13 +1,18 @@
 import hashlib
+import http.client
 import json
+import os
+import threading
 import urllib.error
 import urllib.request
 
 import pytest
 
+from arty_engine import recipes
 from arty_engine.recipes import RecipeError, parse_recipe
+from arty_engine.store import ModelStore, blob_path
 from engine_harness import RunningEngine, error_of, http_json
-from fake_store import QWEN3
+from fake_store import QWEN3, build_store
 from gguf_writer import write_gguf
 
 CHAT_REPLY = {"json": {"choices": [{"finish_reason": "stop", "message": {"role": "assistant", "content": "ok"}}]}}
@@ -106,7 +111,7 @@ def test_a_blob_that_does_not_match_its_digest_is_refused(running):
 
 
 def test_an_adapter_becomes_a_lora_argument(running):
-    data = b"adapter weights"
+    data = b"GGUF adapter weights"
     digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
     send_blob(running.url, data)
     http_json(f"{running.url}/api/create", {"model": "tuned", "from": "qwen3:14b", "adapters": {"a.gguf": digest}, "stream": False})
@@ -140,3 +145,112 @@ def test_a_copy_is_a_new_name_for_the_same_model(running):
 def test_push_is_still_not_offered(running):
     status, body = error_of(lambda: http_json(f"{running.url}/api/push", {"model": "qwen3:14b"}))
     assert status == 501 and "no registry" in body["error"]
+
+
+def sha_of(data: bytes) -> str:
+    return f"sha256:{hashlib.sha256(data).hexdigest()}"
+
+
+def send_chunked(url, data: bytes, digest: str, pieces: int = 3) -> tuple[int, bytes]:
+    host, port = url.split("//", 1)[1].split(":")
+    connection = http.client.HTTPConnection(host, int(port), timeout=30)
+    size = max(1, len(data) // pieces)
+    connection.request("POST", f"/api/blobs/{digest}", body=iter([data[start:start + size] for start in range(0, len(data), size)]),
+                       encode_chunked=True)
+    response = connection.getresponse()
+    answer = (response.status, response.read())
+    connection.close()
+    return answer
+
+
+def test_a_blob_can_be_sent_chunked(running):
+    data = os.urandom(300_000)
+    status, _ = send_chunked(running.url, data, sha_of(data))
+    assert status == 201 and blob_known(running.url, sha_of(data)) == 200
+    assert blob_path(running.engine.store.own_root, sha_of(data)).read_bytes() == data
+
+
+def test_a_chunked_blob_that_does_not_match_is_refused(running):
+    status, body = send_chunked(running.url, b"abc" * 1000, "sha256:" + "0" * 64)
+    assert status == 400 and b"does not match" in body
+
+
+class PausingSource:
+    def __init__(self, data: bytes, at_second_read):
+        self.data = data
+        self.position = 0
+        self.reads = 0
+        self.at_second_read = at_second_read
+
+    def read(self, size: int) -> bytes:
+        self.reads += 1
+        if self.reads == 2:
+            self.at_second_read()
+        chunk = self.data[self.position:self.position + size]
+        self.position += len(chunk)
+        return chunk
+
+
+class PlainSource(PausingSource):
+    def __init__(self, data: bytes):
+        super().__init__(data, lambda: None)
+
+
+def test_two_uploads_of_the_same_blob_at_once_both_land_intact(tmp_path):
+    store = ModelStore([tmp_path / "own"])
+    data = os.urandom(recipes.CHUNK_BYTES * 2 + 12345)
+    digest = sha_of(data)
+    outcomes = []
+
+    def second_upload():
+        outcomes.append(recipes.receive_blob(store, digest, PlainSource(data), len(data), 0))
+    first = recipes.receive_blob(store, digest, PausingSource(data, second_upload), len(data), 0)
+    assert outcomes == [True] and first is True
+    assert hashlib.sha256(blob_path(store.own_root, digest).read_bytes()).hexdigest() == digest.split(":", 1)[1]
+    assert not [path for path in blob_path(store.own_root, digest).parent.iterdir() if path.name.endswith(".partial")]
+
+
+def test_parallel_uploads_over_http_all_succeed(running):
+    data = os.urandom(recipes.CHUNK_BYTES * 3)
+    results = []
+    threads = [threading.Thread(target=lambda: results.append(send_blob(running.url, data))) for _ in range(4)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+    assert sorted(results)[-1] == 201 and set(results) <= {200, 201} and len(results) == 4
+    assert blob_path(running.engine.store.own_root, sha_of(data)).read_bytes() == data
+
+
+def test_a_model_can_not_be_made_from_a_blob_that_is_not_gguf(running):
+    data = b"this is not a model"
+    send_blob(running.url, data)
+    http_json(f"{running.url}/api/create", {"model": "keeper", "from": "qwen3:14b", "stream": False})
+    before = http_json(f"{running.url}/api/show", {"model": "keeper"})
+    for body in ({"model": "keeper", "files": {"m.gguf": sha_of(data)}}, {"model": "keeper", "from": sha_of(data)},
+                 {"model": "keeper", "from": "qwen3:14b", "adapters": {"a.gguf": sha_of(data)}}):
+        status, answer = error_of(lambda: http_json(f"{running.url}/api/create", {**body, "stream": False}))
+        assert status == 400 and "not a GGUF file" in answer["error"]
+    assert http_json(f"{running.url}/api/show", {"model": "keeper"}) == before
+
+
+def test_a_copy_that_would_fill_the_disk_is_refused(tmp_path, monkeypatch):
+    other = tmp_path / "other"
+    build_store(other)
+    store = ModelStore([tmp_path / "own", other])
+    monkeypatch.setattr(os, "link", lambda source, target: (_ for _ in ()).throw(OSError("cross-device link")))
+    with pytest.raises(RecipeError) as raised:
+        recipes.copy(store, "qwen3:14b", "mine", keep_free_bytes=10 ** 18)
+    assert raised.value.status == 507 and "pull_keep_free_mb" in str(raised.value)
+    with pytest.raises(RecipeError) as raised:
+        recipes.create(store, {"model": "mine", "from": "qwen3:14b"}, lambda update: None, keep_free_bytes=10 ** 18)
+    assert raised.value.status == 507
+    assert not (tmp_path / "own" / "manifests").exists() or not list((tmp_path / "own" / "manifests").rglob("mine"))
+
+
+def test_head_refuses_a_foreign_web_page_like_get_does(running):
+    request = urllib.request.Request(f"{running.url}/api/blobs/sha256:{'0' * 64}", method="HEAD",
+                                     headers={"Origin": "https://evil.example"})
+    with pytest.raises(urllib.error.HTTPError) as raised:
+        urllib.request.urlopen(request, timeout=30)
+    assert raised.value.code == 403

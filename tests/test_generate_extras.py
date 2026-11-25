@@ -89,3 +89,15 @@ def test_a_template_override_is_refused_clearly(running):
     status, body = error_of(lambda: http_json(f"{running.url}/api/generate", {"model": "qwen3:14b", "prompt": "x",
                                                                                "template": "{{ .Prompt }}"}))
     assert status == 501 and "raw: true" in body["error"]
+
+
+def test_a_suffix_for_a_model_without_fill_in_tokens_answers_501(tmp_path):
+    engine = RunningEngine(tmp_path, {"/infill": {"error": "Infill is not supported by this model", "status": 501}},
+                           vram_budget_mb=100000)
+    try:
+        for stream in (False, True):
+            status, body = error_of(lambda: http_json(f"{engine.url}/api/generate", {
+                "model": "qwen3:14b", "prompt": "a", "suffix": "c", "stream": stream}))
+            assert status == 501 and "not supported" in body["error"]
+    finally:
+        engine.close()

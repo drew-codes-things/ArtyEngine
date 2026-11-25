@@ -2,10 +2,12 @@ import hashlib
 import json
 import os
 import shutil
+import tempfile
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from pathlib import Path
 
+from .gguf import GGUF_MAGIC
 from .store import (ADAPTER_LAYER, LICENSE_LAYER, MESSAGES_LAYER, MODEL_LAYER, PARAMS_LAYER, PARTIAL_SUFFIX, PROJECTOR_LAYER,
                     SYSTEM_LAYER, TEMPLATE_LAYER, Model, ModelNotFound, ModelStore, blob_path, engine_manifest, is_digest,
                     parse_name, write_manifest)
@@ -136,15 +138,24 @@ def recipe_of_request(request: dict) -> Recipe:
     return recipe
 
 
+def unique_partial(target: Path) -> Path:
+    descriptor, name = tempfile.mkstemp(dir=target.parent, prefix=f"{target.name}.", suffix=PARTIAL_SUFFIX)
+    os.close(descriptor)
+    return Path(name)
+
+
 def text_blob(root: Path, text: str) -> tuple[str, int]:
     data = text.encode()
     digest = f"sha256:{hashlib.sha256(data).hexdigest()}"
     target = blob_path(root, digest)
     if not target.is_file():
         target.parent.mkdir(parents=True, exist_ok=True)
-        partial = target.with_name(target.name + PARTIAL_SUFFIX)
-        partial.write_bytes(data)
-        partial.replace(target)
+        partial = unique_partial(target)
+        try:
+            partial.write_bytes(data)
+            partial.replace(target)
+        finally:
+            partial.unlink(missing_ok=True)
     return digest, len(data)
 
 
@@ -153,18 +164,34 @@ def text_layer(root: Path, media_type: str, text: str) -> dict:
     return {"mediaType": media_type, "digest": digest, "size": size}
 
 
-def bring_blob(store: ModelStore, source_root: Path, digest: str) -> None:
+def check_room(folder: Path, size: int, keep_free_bytes: int) -> None:
+    if shutil.disk_usage(folder).free - size < keep_free_bytes:
+        raise RecipeError("the blob would leave less than pull_keep_free_mb free on the store's disk",
+                          HTTPStatus.INSUFFICIENT_STORAGE)
+
+
+def bring_blob(store: ModelStore, source_root: Path, digest: str, keep_free_bytes: int) -> None:
     target = blob_path(store.own_root, digest)
     if target.is_file():
         return
     source = blob_path(source_root, digest)
     target.parent.mkdir(parents=True, exist_ok=True)
-    partial = target.with_name(target.name + PARTIAL_SUFFIX)
+    partial = unique_partial(target)
     try:
-        os.link(source, partial)
-    except OSError:
-        shutil.copyfile(source, partial)
-    partial.replace(target)
+        partial.unlink()
+        try:
+            os.link(source, partial)
+        except OSError:
+            check_room(target.parent, source.stat().st_size, keep_free_bytes)
+            shutil.copyfile(source, partial)
+        partial.replace(target)
+    finally:
+        partial.unlink(missing_ok=True)
+
+
+def is_gguf_file(path: Path) -> bool:
+    with open(path, "rb") as handle:
+        return handle.read(len(GGUF_MAGIC)) == GGUF_MAGIC
 
 
 def owned_blob(store: ModelStore, digest, what: str) -> dict:
@@ -173,13 +200,15 @@ def owned_blob(store: ModelStore, digest, what: str) -> dict:
     path = blob_path(store.own_root, digest)
     if not path.is_file():
         raise RecipeError(f"{what} {digest} is not in the store; send it to /api/blobs/{digest} first")
+    if not is_gguf_file(path):
+        raise RecipeError(f"{what} {digest} is not a GGUF file")
     return {"digest": digest, "size": path.stat().st_size}
 
 
-def base_layers(store: ModelStore, model: Model) -> list[dict]:
+def base_layers(store: ModelStore, model: Model, keep_free_bytes: int) -> list[dict]:
     layers = [dict(layer) for layer in model.manifest.get("layers", []) if layer.get("mediaType") in CARRIED_LAYERS]
     for layer in layers:
-        bring_blob(store, model.root, layer["digest"])
+        bring_blob(store, model.root, layer["digest"], keep_free_bytes)
     return layers
 
 
@@ -196,7 +225,7 @@ def file_layers(store: ModelStore, files) -> list[dict]:
     return layers
 
 
-def starting_layers(store: ModelStore, recipe: Recipe, files) -> list[dict]:
+def starting_layers(store: ModelStore, recipe: Recipe, files, keep_free_bytes: int) -> list[dict]:
     if files:
         return file_layers(store, files)
     if not recipe.base:
@@ -206,7 +235,7 @@ def starting_layers(store: ModelStore, recipe: Recipe, files) -> list[dict]:
     if recipe.base.startswith(("/", ".", "~")) or "\\" in recipe.base:
         raise RecipeError("from can't be a path on the engine's machine; send the file to /api/blobs and use its digest")
     try:
-        return base_layers(store, store.get(recipe.base))
+        return base_layers(store, store.get(recipe.base), keep_free_bytes)
     except ModelNotFound as error:
         raise RecipeError(f"from: model '{recipe.base}' not found", HTTPStatus.NOT_FOUND) from error
 
@@ -240,7 +269,7 @@ def stored_json(root: Path, layer: dict) -> dict:
     return value if isinstance(value, dict) else {}
 
 
-def create(store: ModelStore, request: dict, progress) -> str:
+def create(store: ModelStore, request: dict, progress, keep_free_bytes: int) -> str:
     name = request.get("model") or request.get("name")
     if not isinstance(name, str) or not name:
         raise RecipeError("model is required")
@@ -250,7 +279,7 @@ def create(store: ModelStore, request: dict, progress) -> str:
                           HTTPStatus.NOT_IMPLEMENTED)
     progress({"status": "reading the recipe"})
     recipe = recipe_of_request(request)
-    layers = starting_layers(store, recipe, request.get("files"))
+    layers = starting_layers(store, recipe, request.get("files"), keep_free_bytes)
     layers = recipe_layers(store, recipe, layers)
     progress({"status": "writing manifest"})
     manifest = engine_manifest(layers)
@@ -260,15 +289,15 @@ def create(store: ModelStore, request: dict, progress) -> str:
     return target.display
 
 
-def copy(store: ModelStore, source: str, destination: str) -> str:
+def copy(store: ModelStore, source: str, destination: str, keep_free_bytes: int) -> str:
     if not isinstance(source, str) or not source or not isinstance(destination, str) or not destination:
         raise RecipeError("source and destination are required")
     target = parse_name(destination)
     model = store.get(source)
-    layers = base_layers(store, model)
+    layers = base_layers(store, model, keep_free_bytes)
     config = model.manifest.get("config")
     if config:
-        bring_blob(store, model.root, config["digest"])
+        bring_blob(store, model.root, config["digest"], keep_free_bytes)
     manifest = {**engine_manifest(layers, config), **{key: value for key, value in model.manifest.items()
                                                       if key not in ("layers", "config", "schemaVersion", "mediaType")}}
     write_manifest(store.own_root, target, manifest)
@@ -279,16 +308,32 @@ def has_blob(store: ModelStore, digest: str) -> bool:
     return is_digest(digest) and blob_path(store.own_root, digest).is_file()
 
 
-def drain(source, length: int) -> None:
+def drain(source, length: int | None) -> None:
     left = length
-    while left > 0:
-        chunk = source.read(min(CHUNK_BYTES, left))
+    while left is None or left > 0:
+        chunk = source.read(CHUNK_BYTES if left is None else min(CHUNK_BYTES, left))
         if not chunk:
             return
-        left -= len(chunk)
+        if left is not None:
+            left -= len(chunk)
 
 
-def receive_blob(store: ModelStore, digest: str, source, length: int, keep_free_bytes: int) -> bool:
+def write_hashed(source, output, length: int | None, folder: Path, keep_free_bytes: int) -> tuple[str, int]:
+    hasher = hashlib.sha256()
+    written = 0
+    while length is None or written < length:
+        chunk = source.read(CHUNK_BYTES if length is None else min(CHUNK_BYTES, length - written))
+        if not chunk:
+            break
+        if length is None:
+            check_room(folder, len(chunk), keep_free_bytes)
+        hasher.update(chunk)
+        output.write(chunk)
+        written += len(chunk)
+    return f"sha256:{hasher.hexdigest()}", written
+
+
+def receive_blob(store: ModelStore, digest: str, source, length: int | None, keep_free_bytes: int) -> bool:
     if not is_digest(digest):
         raise RecipeError(f"{digest!r} is not a sha256 digest")
     target = blob_path(store.own_root, digest)
@@ -296,22 +341,16 @@ def receive_blob(store: ModelStore, digest: str, source, length: int, keep_free_
         drain(source, length)
         return False
     target.parent.mkdir(parents=True, exist_ok=True)
-    if shutil.disk_usage(target.parent).free - length < keep_free_bytes:
-        raise RecipeError("the blob would leave less than pull_keep_free_mb free on the store's disk",
-                          HTTPStatus.INSUFFICIENT_STORAGE)
-    partial = target.with_name(target.name + PARTIAL_SUFFIX)
-    hasher = hashlib.sha256()
-    left = length
-    with open(partial, "wb") as output:
-        while left > 0:
-            chunk = source.read(min(CHUNK_BYTES, left))
-            if not chunk:
-                break
-            hasher.update(chunk)
-            output.write(chunk)
-            left -= len(chunk)
-    if left or f"sha256:{hasher.hexdigest()}" != digest:
+    check_room(target.parent, length or 0, keep_free_bytes)
+    partial = unique_partial(target)
+    try:
+        with open(partial, "wb") as output:
+            received, written = write_hashed(source, output, length, target.parent, keep_free_bytes)
+        if length is not None and written < length:
+            raise RecipeError("the blob ended early")
+        if received != digest:
+            raise RecipeError(f"the blob sent does not match {digest}")
+        partial.replace(target)
+    finally:
         partial.unlink(missing_ok=True)
-        raise RecipeError(f"the blob sent does not match {digest}" if not left else "the blob ended early")
-    partial.replace(target)
     return True
