@@ -58,8 +58,9 @@ than planned would put layers in the wrong place.
 
 `GET /api/workers` lists each worker with `label`, `address`, `memory_mb`, `up` (`true`, `false`, or `null` when the
 last check timed out), `in_use` (a loaded model holds it), `checked_at`, `latency_ms`, `error` and `models` (the
-loaded models using it). `GET /api/status` has the same list next to the loaded models, the runtime release, the
-backend and the card. `/api/ps` shows `rpc_workers` for each model, and `/metrics` has `arty_engine_rpc_worker_up`.
+loaded models using it). `GET /api/status` has the same list next to the loaded models, the runtime release (the
+folder name `runtime install` gave it, or `external` for a runtime it did not install), the backend and the card.
+`/api/ps` shows `rpc_workers` for each model, and `/metrics` has `arty_engine_rpc_worker_up`.
 
 ## Placing a model's layers
 

@@ -9,7 +9,7 @@ from urllib.parse import parse_qs, unquote, urlencode, urlsplit
 
 from . import remote, translate
 from .runner import RunnerGone, is_reranker
-from .scrub import scrub
+from .scrub import scrub, scrub_strings
 
 OPENAI_PREFIX = "/v1/"
 RUNNER_TIMEOUT_SECONDS = 3600
@@ -41,6 +41,8 @@ ERROR_TYPES = {400: "invalid_request_error", 401: "authentication_error", 403: "
 OWNER = "arty-engine"
 EVENT_STREAM = "text/event-stream"
 PASS_THROUGH_CHUNK_BYTES = 65536
+EVENT_DATA = b"data: "
+ERROR_MEMBER = b"\"error\""
 PRIVATE_PROPS = ("build_info", "model_path")
 LONGEST_SLOT_FILE_NAME = 100
 SLOT_FILE_NAME = re.compile(rf"[A-Za-z0-9][A-Za-z0-9._-]{{0,{LONGEST_SLOT_FILE_NAME - 1}}}")
@@ -56,6 +58,23 @@ class RelayError(Exception):
 
 class RelayUnreachable(RelayError, RunnerGone):
     pass
+
+
+def errors_scrubbed(text: str) -> str:
+    try:
+        payload = json.loads(text)
+    except ValueError:
+        return text
+    if not isinstance(payload, dict) or "error" not in payload:
+        return text
+    return json.dumps({**payload, "error": scrub_strings(payload["error"])})
+
+
+def event_line_scrubbed(line: bytes) -> bytes:
+    if not line.startswith(EVENT_DATA) or ERROR_MEMBER not in line:
+        return line
+    ending = line[len(line.rstrip(b"\r\n")):]
+    return EVENT_DATA + errors_scrubbed(line[len(EVENT_DATA):].strip().decode(errors="replace")).encode() + ending
 
 
 def openai_error(status: int, message: str) -> dict:
@@ -242,7 +261,7 @@ class CompatRoutes:
             for event in remote.server_sent_events(response):
                 if event.get("error"):
                     detail = event["error"]
-                    raise RelayError(500, str(detail.get("message") if isinstance(detail, dict) else detail))
+                    raise RelayError(500, scrub(str(detail.get("message") if isinstance(detail, dict) else detail)))
                 yield event
 
     def _openai_model(self, request: dict):
@@ -343,10 +362,11 @@ class CompatRoutes:
             with runner_call(runner, path, body) as response:
                 content_type = response.headers.get("Content-Type") or "application/json"
                 if not content_type.startswith(EVENT_STREAM):
-                    self._send_text(200, response.read().decode(errors="replace"), content_type)
+                    self._send_text(200, errors_scrubbed(response.read().decode(errors="replace")), content_type)
                     return
                 self._start_events()
-                while chunk := response.read1(PASS_THROUGH_CHUNK_BYTES):
+                for line in iter(lambda: response.readline(PASS_THROUGH_CHUNK_BYTES), b""):
+                    chunk = event_line_scrubbed(line)
                     self.wfile.write(f"{len(chunk):x}\r\n".encode() + chunk + b"\r\n")
                     self.wfile.flush()
                 self._end_stream()

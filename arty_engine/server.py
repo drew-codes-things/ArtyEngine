@@ -2,6 +2,7 @@ import argparse
 import itertools
 import json
 import logging
+import re
 import signal
 import sys
 import threading
@@ -38,6 +39,8 @@ FAR_FUTURE = "2318-08-18T00:00:00Z"
 BLOBS_PREFIX = "/api/blobs/"
 NOT_IMPLEMENTED = 501
 ATTEMPTS_WHEN_A_RUNNER_DIES = 2
+ENGINE_RELEASE_FOLDER = re.compile(r"runtime-[A-Za-z0-9.]+-(?:linux|windows)-[A-Za-z0-9.-]+")
+EXTERNAL_RUNTIME = "external"
 LOCAL_HOSTNAMES = ("localhost", "127.0.0.1", "::1")
 
 
@@ -221,7 +224,7 @@ def stream_events(url: str, body: dict, headers: dict | None = None):
         for event in remote.server_sent_events(response):
             if event.get("error"):
                 detail = event["error"]
-                raise ApiError(500, str(detail.get("message") if isinstance(detail, dict) else detail))
+                raise ApiError(500, scrub(str(detail.get("message") if isinstance(detail, dict) else detail)))
             yield event
 
 
@@ -242,7 +245,8 @@ class RunnerChat:
 
 
 def runtime_release_name(binary: str) -> str:
-    return scrub(Path(binary).resolve().parent.name)
+    folder = Path(binary).resolve().parent.name
+    return folder if ENGINE_RELEASE_FOLDER.fullmatch(folder) else EXTERNAL_RUNTIME
 
 
 def ps_entry(runner: Runner) -> dict:

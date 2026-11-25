@@ -226,7 +226,64 @@ def test_the_fingerprint_is_the_engine_s_version(running):
 
 def test_status_names_the_runtime_release_not_its_path(running):
     status = http_json(f"{running.url}/api/status")
-    assert status["runtime_release"] == "runtime" and "runner_binary" not in status
+    assert status["runtime_release"] == "external" and "runner_binary" not in status
+
+
+RUNTIME_FAILURE = f"lib{UPSTREAM_WORD}.so: {UPSTREAM_WORD}_decode failed in {UPSTREAM_WORD}-context.cpp"
+FAILING_MID_STREAM = {"sse": ['data: {"choices":[{"index":0,"delta":{"content":"h"}}],"model":"x"}',
+                              'data: {"error": {"message": "%s", "code": 500}}' % RUNTIME_FAILURE]}
+
+
+def failing_engine(tmp_path, replies):
+    return RunningEngine(tmp_path, replies, vram_budget_mb=100000)
+
+
+def test_an_error_in_the_middle_of_a_relayed_stream_is_scrubbed(tmp_path):
+    engine = failing_engine(tmp_path, {"/v1/chat/completions": FAILING_MID_STREAM})
+    try:
+        events = read_events(f"{engine.url}/v1/chat/completions", {"model": "qwen3:14b", "stream": True, "messages": []})
+    finally:
+        engine.close()
+    errors = [event for event in events if "error" in event]
+    assert errors and UPSTREAM_WORD not in "".join(events) and "runtime_decode failed" in errors[0]
+
+
+def test_an_error_in_the_middle_of_a_raw_generate_stream_is_scrubbed(tmp_path):
+    native_failure = {"sse": ['data: {"content":"h","stop":false}', 'data: {"error": {"message": "%s"}}' % RUNTIME_FAILURE]}
+    engine = failing_engine(tmp_path, {"/completion": native_failure})
+    try:
+        request = urllib.request.Request(f"{engine.url}/api/generate", method="POST", headers={"Content-Type": "application/json"},
+                                         data=json.dumps({"model": "qwen3:14b", "prompt": "hi", "raw": True}).encode())
+        with urllib.request.urlopen(request, timeout=30) as response:
+            lines = [json.loads(line) for line in response if line.strip()]
+    finally:
+        engine.close()
+    assert lines[-1]["error"] and UPSTREAM_WORD not in json.dumps(lines) and "runtime_decode failed" in lines[-1]["error"]
+
+
+def test_errors_in_passed_through_bodies_and_streams_are_scrubbed_but_answers_are_not(tmp_path):
+    engine = failing_engine(tmp_path, {
+        "/completion": {"json": {"content": f"a {UPSTREAM_WORD} grazes", "error": {"message": RUNTIME_FAILURE}}},
+        "/v1/messages": {"sse": ['event: message_start\ndata: {"type": "message_start"}',
+                                 'event: error\ndata: {"type": "error", "error": {"message": "%s"}}' % RUNTIME_FAILURE]},
+    })
+    try:
+        native = http_json(f"{engine.url}/completion", {"model": "qwen3:14b", "prompt": "x"})
+        events = read_events(f"{engine.url}/v1/messages", {"model": "qwen3:14b", "messages": [], "stream": True})
+    finally:
+        engine.close()
+    assert native["content"] == f"a {UPSTREAM_WORD} grazes" and UPSTREAM_WORD not in json.dumps(native["error"])
+    error_events = [event for event in events if "error" in event]
+    assert error_events and UPSTREAM_WORD not in "".join(error_events)
+
+
+def test_the_runtime_release_is_the_engine_s_folder_name_or_external():
+    from arty_engine.server import runtime_release_name
+    upstream = "ll" + "ama"
+    assert runtime_release_name("/srv/runtime/runtime-b12110-linux-cuda-12.8-x64/arty-runtime-server") == \
+        "runtime-b12110-linux-cuda-12.8-x64"
+    assert runtime_release_name(f"/srv/{upstream}-b12110-bin-ubuntu-x64/{upstream}-server") == "external"
+    assert runtime_release_name(f"/srv/{upstream}-b12110/server") == "external"
 
 
 def test_reading_props_slots_and_adapters_keeps_the_model_s_keep_alive(running):
