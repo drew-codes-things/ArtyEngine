@@ -159,6 +159,7 @@ class RemoteModel:
     capabilities: list
     params: dict = field(default_factory=dict)
     system: str = ""
+    messages: list = field(default_factory=list)
     runnable: bool = True
     unrunnable_reason: str = ""
     is_embedding: bool = False

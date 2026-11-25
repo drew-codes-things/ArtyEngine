@@ -105,10 +105,7 @@ def test_the_brains_empty_reply_replay_gets_what_the_model_wrote(engine):
     assert len(engine.launcher.launched) == 1
 
 
-def test_suffix_and_raw_images_are_still_refused_clearly(engine):
-    status, body = error_of(lambda: http_json(f"{engine.url}/api/generate", {"model": "qwen3:14b", "prompt": "def f(", "suffix": "return 1",
-                                                                               "stream": False}))
-    assert status == 501 and "suffix" in body["error"]
+def test_raw_images_are_still_refused_clearly(engine):
     status, body = error_of(lambda: http_json(f"{engine.url}/api/generate", {"model": "mimo:9b", "prompt": "x", "raw": True,
                                                                                "images": ["iVBORw0KGgo="], "stream": False}))
     assert status == 501 and "images" in body["error"]

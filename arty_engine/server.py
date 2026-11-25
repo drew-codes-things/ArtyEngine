@@ -15,8 +15,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-from . import gpu, remote, translate
+from . import gpu, recipes, remote, translate
 from .backend import Backend, resolve_backend
+from .compat import CompatRoutes, RelayError, openai_error
 from .config import Config, load_config
 from .gguf import GgufError
 from .pull import HF_NAME_FORM, Puller, PullError
@@ -31,6 +32,7 @@ TRAINER_BUSY_TIMEOUT_SECONDS = 180
 TRAINER_DONE_TIMEOUT_SECONDS = 5
 MAX_BODY_BYTES = 256 * 1024 * 1024
 FAR_FUTURE = "2318-08-18T00:00:00Z"
+BLOBS_PREFIX = "/api/blobs/"
 LOCAL_HOSTNAMES = ("localhost", "127.0.0.1", "::1")
 
 
@@ -136,15 +138,17 @@ class Engine:
         except ValueError as error:
             raise ApiError(400, str(error)) from error
 
-    def with_runner(self, model, options: dict, keep_alive, work):
+    def with_runner(self, model, options: dict, keep_alive, work, prefer_loaded: bool = False):
         cpu_only = options.get("num_gpu") == 0
         load_options = translate.load_settings(options)
         request_id = uuid.uuid4().hex
         if not cpu_only:
             self.trainer.busy(request_id)
         try:
+            borrowed = self.pool.borrow(model.name) if prefer_loaded else None
             try:
-                runner, load_seconds = self.pool.acquire(model, options.get("num_ctx"), cpu_only, load_options)
+                runner, load_seconds = (borrowed, 0.0) if borrowed else self.pool.acquire(model, options.get("num_ctx"), cpu_only,
+                                                                                          load_options)
             except WorkersDown as error:
                 raise ApiError(503, str(error)) from error
             except LoadError as error:
@@ -276,9 +280,10 @@ def refusal_for(config: Config, host: str | None, origin: str | None) -> str:
 
 
 def make_handler(engine: Engine):
-    class Handler(BaseHTTPRequestHandler):
+    class Handler(CompatRoutes, BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
         server_version = f"arty-engine/{VERSION}"
+        engine = None
 
         def log_message(self, format, *args):
             log.debug("%s", format % args)
@@ -333,9 +338,10 @@ def make_handler(engine: Engine):
 
         def _dispatch(self, routes: dict) -> None:
             self._streaming = False
+            self._events = False
             self.close_connection = True
             path = urlsplit(self.path).path.rstrip("/") or "/"
-            handler = routes.get(path)
+            handler = routes.get(path) or prefix_route(routes, path)
             try:
                 refusal = refusal_for(engine.config, self.headers.get("Host"), self.headers.get("Origin"))
                 if refusal:
@@ -347,6 +353,10 @@ def make_handler(engine: Engine):
             except ApiError as error:
                 self._fail(error.status, error.message)
             except translate.RequestError as error:
+                self._fail(400, str(error))
+            except (RelayError, recipes.RecipeError) as error:
+                self._fail(error.status, str(error))
+            except ModelNotFound as error:
                 self._fail(400, str(error))
             except remote.RemoteError as error:
                 log.warning("%s %s: %s", self.command, path, error.message)
@@ -360,23 +370,30 @@ def make_handler(engine: Engine):
         def _fail(self, status: int, message: str) -> None:
             if self._streaming:
                 try:
-                    self._stream_line({"error": message})
+                    if self._events:
+                        self._event(openai_error(status, message))
+                    else:
+                        self._stream_line({"error": message})
                     self._end_stream()
                 except OSError:
                     pass
                 return
             try:
-                self._send_json(status, {"error": message})
+                self._send_json(status, openai_error(status, message) if self._wants_openai_errors() else {"error": message})
             except (BrokenPipeError, ConnectionResetError):
                 log.info("client went away before the %d answer to %s %s", status, self.command, self.path)
 
         def do_GET(self):
             self._dispatch({"/": self.root, "/api/tags": self.tags, "/api/ps": self.ps, "/api/version": self.version,
-                            "/api/workers": self.workers, "/api/status": self.status})
+                            "/api/workers": self.workers, "/api/status": self.status, "/v1/models": self.v1_models,
+                            "/v1/models/": self.v1_model, "/props": self.props, "/slots": self.slots, "/metrics": self.metrics,
+                            "/lora-adapters": self.lora_adapters, "/health": self.health})
 
         def do_HEAD(self):
             self.close_connection = True
-            self.send_response(200)
+            path = urlsplit(self.path).path
+            found = not path.startswith(BLOBS_PREFIX) or recipes.has_blob(engine.store, path[len(BLOBS_PREFIX):])
+            self.send_response(200 if found else 404)
             self.send_header("Connection", "close")
             self.send_header("Content-Length", "0")
             self.end_headers()
@@ -384,7 +401,13 @@ def make_handler(engine: Engine):
         def do_POST(self):
             self._dispatch({"/api/chat": self.chat, "/api/generate": self.generate, "/api/show": self.show, "/api/embed": self.embed,
                             "/api/embeddings": self.embeddings, "/api/pull": self.pull, "/api/tags": self.tags, "/api/ps": self.ps,
-                            "/api/create": self.not_in_engine, "/api/copy": self.not_in_engine, "/api/push": self.not_in_engine})
+                            "/api/create": self.create, "/api/copy": self.copy, "/api/push": self.not_in_engine,
+                            BLOBS_PREFIX: self.blob, "/v1/chat/completions": self.v1_chat, "/v1/completions": self.v1_completions,
+                            "/v1/embeddings": self.v1_embeddings, "/v1/rerank": self.rerank, "/rerank": self.rerank,
+                            "/tokenize": self.tokenize, "/detokenize": self.detokenize, "/apply-template": self.apply_template,
+                            "/infill": self.infill, "/slots/": self.slot_action, "/lora-adapters": self.lora_adapters,
+                            "/completion": self.native_completion, "/v1/responses": self.v1_responses, "/v1/messages": self.v1_messages,
+                            "/v1/messages/count_tokens": self.v1_count_tokens})
 
         def do_DELETE(self):
             self._dispatch({"/api/delete": self.delete})
@@ -406,6 +429,15 @@ def make_handler(engine: Engine):
 
         def ps(self):
             self._send_json(200, {"models": loaded_list_entries(engine.pool.loaded())})
+
+        def workers(self):
+            self._send_json(200, {"workers": engine.pool.workers_status()})
+
+        def status(self):
+            backend = engine.pool.backend
+            self._send_json(200, {"version": VERSION, "gpu_backend": backend.name, "runner_binary": engine.pool.config.runner_binary,
+                                  "vram_budget_mb": engine.config.vram_budget_mb, "card": card_status(engine.pool.memory()),
+                                  "loaded": loaded_list_entries(engine.pool.loaded()), "workers": engine.pool.workers_status()})
 
         def show(self):
             request = self._body()
@@ -452,18 +484,64 @@ def make_handler(engine: Engine):
             self.send_header("Content-Length", "0")
             self.end_headers()
 
-        def workers(self):
-            self._send_json(200, {"workers": engine.pool.workers_status()})
-
-        def status(self):
-            backend = engine.pool.backend
-            self._send_json(200, {"version": VERSION, "gpu_backend": backend.name, "runner_binary": engine.pool.config.runner_binary,
-                                  "vram_budget_mb": engine.config.vram_budget_mb, "card": card_status(engine.pool.memory()),
-                                  "loaded": loaded_list_entries(engine.pool.loaded()), "workers": engine.pool.workers_status()})
-
         def not_in_engine(self):
-            raise ApiError(501, f"the engine doesn't do {urlsplit(self.path).path}: it pulls models from Hugging Face and "
-                                "deletes its own, and does not create, copy or push models")
+            raise ApiError(501, f"the engine doesn't do {urlsplit(self.path).path}: it has no registry to push to; models come "
+                                "from Hugging Face pulls, /api/create and /api/copy")
+
+        def create(self):
+            request = self._body()
+            name = request.get("model") or request.get("name")
+            if isinstance(name, str) and (remote.is_remote_name(name) or self._pull_target(name) in engine.internal_names):
+                raise ApiError(409, f"{name} can't be made here: remote and internal names are kept for the engine")
+            stream = request.get("stream", True) is not False
+            if not engine.pull_lock.acquire(blocking=False):
+                raise ApiError(409, "a pull is running; create when it is done")
+            try:
+                if stream:
+                    lines = []
+                    made = recipes.create(engine.store, request, lines.append)
+                    self._start_stream()
+                    for line in lines:
+                        self._stream_line(line)
+                    self._stream_line({"status": "success"})
+                    self._end_stream()
+                else:
+                    made = recipes.create(engine.store, request, lambda update: None)
+                    self._send_json(200, {"status": "success"})
+            finally:
+                engine.pull_lock.release()
+            engine.pool.unload(made)
+            log.info("made %s from %s", made, request.get("from") or "a recipe")
+
+        def copy(self):
+            request = self._body()
+            destination = request.get("destination")
+            if isinstance(destination, str) and (remote.is_remote_name(destination)
+                                                 or self._pull_target(destination) in engine.internal_names):
+                raise ApiError(409, f"{destination} can't be written: remote and internal names are kept for the engine")
+            if remote.is_remote_name(request.get("source")):
+                raise ApiError(400, "a remote model can't be copied")
+            try:
+                made = recipes.copy(engine.store, request.get("source"), destination)
+            except ModelNotFound as error:
+                raise ApiError(404, f"model '{request.get('source')}' not found") from error
+            engine.pool.unload(made)
+            self._send_json(200, {"status": "success"})
+
+        def blob(self):
+            digest = urlsplit(self.path).path[len(BLOBS_PREFIX):]
+            try:
+                length = int(self.headers.get("Content-Length") or -1)
+            except ValueError as error:
+                raise ApiError(400, "Content-Length must be a number") from error
+            if length < 0:
+                raise ApiError(411, "send the blob with a Content-Length")
+            created = recipes.receive_blob(engine.store, digest, self.rfile, length,
+                                           engine.config.pull_keep_free_mb * 1024 * 1024)
+            self.send_response(201 if created else 200)
+            self.send_header("Connection", "close")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
 
         def _load_or_unload(self, request: dict, model, keep_alive, generate: bool) -> bool:
             if request.get("messages") or request.get("prompt"):
@@ -527,9 +605,10 @@ def make_handler(engine: Engine):
             keep_alive = engine.keep_alive(request)
             if not request.get("prompt") and self._load_or_unload_checked(request, model, keep_alive, generate=True):
                 return
-            if request.get("suffix"):
-                raise ApiError(501, "suffix (fill in the middle) isn't supported by the engine yet")
-            if request.get("raw"):
+            if request.get("template"):
+                raise ApiError(501, "a template override isn't supported: the engine renders with the model's own chat "
+                                    "template; send raw: true with a prompt you have rendered yourself instead")
+            if request.get("suffix") or request.get("raw"):
                 self._run_raw(request, model, keep_alive)
                 return
             chat_request = {**request, "messages": translate.generate_messages(request, model)}
@@ -537,16 +616,17 @@ def make_handler(engine: Engine):
 
         def _run_raw(self, request: dict, model, keep_alive):
             self._check_chat_model(model)
-            refuse_remote(model, "raw prompts need the model's own template, which a remote server doesn't share")
-            if request.get("images") or request.get("format"):
-                raise ApiError(501, "raw prompts with images or a format aren't supported by the engine yet")
+            refuse_remote(model, "raw and fill-in-the-middle prompts need the model itself, which a remote server doesn't share")
+            if request.get("images"):
+                raise ApiError(501, "raw prompts with images aren't supported: send the images through /api/chat instead")
             stream = request.get("stream", True) is not False
-            body = translate.raw_completion_body(request, model, stream)
+            fill_in = bool(request.get("suffix"))
+            body = translate.infill_body(request, model, stream) if fill_in else translate.raw_completion_body(request, model, stream)
             options = translate.merged_options(model.params, request.get("options"))
             started = time.monotonic()
 
             def run(runner: Runner, load_seconds: float):
-                url = f"{runner.base_url}/completion"
+                url = f"{runner.base_url}{'/infill' if fill_in else '/completion'}"
                 if not stream:
                     self._send_json(200, translate.raw_reply(model.name, post_json(url, body), load_seconds, started))
                     return
@@ -572,6 +652,20 @@ def make_handler(engine: Engine):
             started = time.monotonic()
             shape = translate.generate_reply_from_chat if generate else (lambda reply: reply)
             keep_thinking = request.get("think") is not False
+            truncate = request.get("truncate", True) is not False
+
+            def answer_within_context(upstream, load_seconds: float, splitter):
+                while True:
+                    try:
+                        return answer(upstream, load_seconds, splitter)
+                    except ApiError as error:
+                        shorter = (translate.without_oldest_turn(body["messages"])
+                                   if truncate and not self._streaming and translate.is_context_overflow(str(error)) else None)
+                        if shorter is None:
+                            raise
+                        log.info("%s: the chat is longer than the context; dropped its oldest turn (%d messages left)",
+                                 model.name, len(shorter))
+                        body["messages"] = shorter
 
             def answer(upstream, load_seconds: float, splitter):
                 if not stream:
@@ -599,7 +693,7 @@ def make_handler(engine: Engine):
             def run(runner: Runner, load_seconds: float):
                 splitter = (translate.LeakSplitter(named_leaker=runner.plan.named_thinking_leaker)
                             if runner.plan.may_leak_thinking else None)
-                answer(RunnerChat(runner.base_url), load_seconds, splitter)
+                answer_within_context(RunnerChat(runner.base_url), load_seconds, splitter)
 
             engine.with_runner(model, options, keep_alive, run)
 
@@ -696,13 +790,14 @@ def make_handler(engine: Engine):
             if engine.pool.holds(display):
                 engine.refresh_loaded_record(display)
 
+    Handler.engine = engine
     return Handler
 
 
-def card_status(memory: gpu.GpuMemory | None) -> dict | None:
-    if memory is None:
-        return None
-    return {"free_mb": memory.free_mb, "total_mb": memory.total_mb, "source": memory.source}
+def prefix_route(routes: dict, path: str):
+    prefixes = [prefix for prefix in routes if len(prefix) > 1 and prefix.endswith("/") and path.startswith(prefix)
+                and len(path) > len(prefix)]
+    return routes[max(prefixes, key=len)] if prefixes else None
 
 
 def refuse_remote(model, reason: str) -> None:
@@ -722,6 +817,12 @@ def report_late_signs(model_name: str, splitter: translate.LeakSplitter) -> None
 def recorded_source(model) -> dict:
     source = model.manifest.get("source") if isinstance(model.manifest, dict) else None
     return {"source": source} if isinstance(source, dict) else {}
+
+
+def card_status(memory: gpu.GpuMemory | None) -> dict | None:
+    if memory is None:
+        return None
+    return {"free_mb": memory.free_mb, "total_mb": memory.total_mb, "source": memory.source}
 
 
 def describe_memory(memory: gpu.GpuMemory | None) -> str:

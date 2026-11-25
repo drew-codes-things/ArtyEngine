@@ -3,6 +3,7 @@ import math
 import time
 from datetime import datetime, timezone
 
+CONTEXT_OVERFLOW = "exceeds the available context size"
 OPTION_FIELDS = {
     "temperature": "temperature", "top_p": "top_p", "top_k": "top_k", "min_p": "min_p", "typical_p": "typical_p",
     "repeat_penalty": "repeat_penalty", "repeat_last_n": "repeat_last_n", "presence_penalty": "presence_penalty",
@@ -163,6 +164,13 @@ def _arguments_text(arguments) -> str:
     return json.dumps(arguments if arguments is not None else {}, ensure_ascii=False)
 
 
+def with_recipe_messages(messages: list, recipe_messages: list) -> list:
+    if not recipe_messages:
+        return messages
+    leading = [message for message in messages[:1] if isinstance(message, dict) and message.get("role") == "system"]
+    return leading + list(recipe_messages) + messages[len(leading):]
+
+
 def convert_messages(messages, default_system: str = "") -> list[dict]:
     if not isinstance(messages, list):
         raise RequestError("messages must be a list")
@@ -269,7 +277,8 @@ def chat_body(request: dict, model, stream: bool) -> dict:
         raise RequestError(f"{model.name} does not support images")
     if request.get("think") and "thinking" not in capabilities:
         raise RequestError(f'"{model.name}" does not support thinking')
-    body = {"model": model.name, "messages": convert_messages(messages, model.system), "stream": stream,
+    body = {"model": model.name, "messages": convert_messages(with_recipe_messages(messages, model.messages), model.system),
+            "stream": stream,
             **sampling_fields(options), **thinking_fields(request.get("think"), "thinking" in capabilities)}
     if tools:
         body["tools"] = tools
@@ -612,7 +621,41 @@ def raw_completion_body(request: dict, model, stream: bool) -> dict:
     prompt = request.get("prompt") or ""
     if not isinstance(prompt, str):
         raise RequestError("prompt must be a string")
-    return {"prompt": prompt, "stream": stream, **sampling_fields(merged_options(model.params, request.get("options")))}
+    return {"prompt": prompt, "stream": stream, **sampling_fields(merged_options(model.params, request.get("options"))),
+            **completion_format(request.get("format"))}
+
+
+def infill_body(request: dict, model, stream: bool) -> dict:
+    prefix, suffix = request.get("prompt") or "", request.get("suffix") or ""
+    if not isinstance(prefix, str) or not isinstance(suffix, str):
+        raise RequestError("prompt and suffix must be strings")
+    return {"input_prefix": prefix, "input_suffix": suffix, "prompt": "", "stream": stream,
+            **sampling_fields(merged_options(model.params, request.get("options"))), **completion_format(request.get("format"))}
+
+
+def completion_format(format_value) -> dict:
+    if format_value in (None, ""):
+        return {}
+    if format_value == "json":
+        return {"json_schema": {"type": "object"}}
+    if isinstance(format_value, dict):
+        return {"json_schema": format_value}
+    raise RequestError('format must be "json" or a JSON schema object')
+
+
+def is_context_overflow(message: str) -> bool:
+    return CONTEXT_OVERFLOW in message
+
+
+def without_oldest_turn(messages: list) -> list | None:
+    leading = 0
+    while leading < len(messages) and messages[leading].get("role") == "system":
+        leading += 1
+    turns = messages[leading:]
+    if len([message for message in turns if message.get("role") == "user"]) < 2:
+        return None
+    following = next(index for index, message in enumerate(turns) if index > 0 and message.get("role") == "user")
+    return messages[:leading] + turns[following:]
 
 
 def raw_reply(model_name: str, completion: dict, load_seconds: float, started: float) -> dict:

@@ -7,17 +7,30 @@
 | `GET /api/tags` | Every model in the store and in `model_roots`, minus `internal_models`, then the `remote/` models of `remote_models` |
 | `GET /api/ps` | Loaded models, their context and VRAM |
 | `POST /api/show` | Details, parameters, template, capabilities, model info, and `runnable` |
-| `POST /api/chat` | Streamed or not; tools; `think` (true, false, unset, a level); `format` (`"json"`, a schema); images; `keep_alive`; sampling; `num_ctx`; `num_gpu: 0`; `_debug_render_only` |
-| `POST /api/generate` | Prompts, streamed and not; an empty prompt loads a model, and with `keep_alive: 0` unloads it; `raw` prompts |
+| `POST /api/chat` | Streamed or not; tools; `think` (true, false, unset, a level); `format` (`"json"`, a schema); images; `keep_alive`; sampling; `num_ctx`; `num_gpu`; `truncate` ([below](#chats-longer-than-the-context)); `_debug_render_only` |
+| `POST /api/generate` | Prompts, streamed and not; an empty prompt loads a model, and with `keep_alive: 0` unloads it; `raw` prompts, with a `format` too; `suffix` fills in the middle |
 | `POST /api/embed`, `POST /api/embeddings` | Embeddings |
 | `POST /api/pull` | Hugging Face names (`hf.co/<owner>/<repo>:<quant>`) and the short names in `arty_engine/short_names.json`, or a short name with its own `source`, with progress; one pull at a time (more below) |
+| `POST /api/create` | A model made from an installed model, a sent blob or sent files, with a recipe ([below](#making-models)) |
+| `POST /api/copy` | A second name for a model |
+| `HEAD /api/blobs/sha256:<hex>`, `POST /api/blobs/sha256:<hex>` | Whether the store has a blob (200 or 404); send one (201 when new, 200 when already there) |
 | `DELETE /api/delete` | Models in the engine's own store. Models read in place from `model_roots` answer 405, internal models and deletes during a pull answer 409 |
-| `POST /api/generate` with `suffix` | **501** |
-| `POST /api/generate` raw with images or a `format` | **501** |
-| `POST /api/create`, `/api/copy`, `/api/push` | **501** |
+| `GET /api/workers`, `GET /api/status` | RPC workers and their health; the engine's state in one answer ([rpc.md](rpc.md)) |
+| `GET /v1/models`, `GET /v1/models/<name>` | The models, the OpenAI way |
+| `POST /v1/chat/completions`, `POST /v1/completions`, `POST /v1/embeddings` | Passed to the model's runtime with the model's own parameters as defaults; streamed as server-sent events; remote models answer chats |
+| `POST /v1/rerank`, `POST /rerank` | Reranking with a reranking model (pooling type rank) |
+| `POST /tokenize`, `/detokenize`, `/apply-template`, `/infill` | The runtime's own tools, for the model named in `model` |
+| `GET /props`, `GET /slots`, `POST /slots/<n>?action=save\|restore\|erase`, `GET`/`POST /lora-adapters` | The runtime's state for a model named by `?model=` or the body; when exactly one model is loaded it may be left out |
+| `GET /metrics` | Prometheus text: every loaded runtime's metrics, named `arty_runtime_<name>` with a `model` label, plus the engine's own (`arty_engine_loaded_models`, `arty_engine_rpc_worker_up`) |
+| `GET /health` | `{"status": "ok"}` |
+| `POST /api/push` | **501**: there is no registry to push to |
+| `POST /api/generate` raw with images, or with a `template` | **501** |
 | Models whose file keeps the vision weights inside it (such as `qwen2.5vl:7b`) | Listed, but chats answer **501**: not supported, pull a build with a separate projector file instead |
 | Split GGUF files on Hugging Face | Refused by `/api/pull` |
-| Anything else (`/api/blobs`, the `/v1` OpenAI-style routes) | 404 |
+| Anything else | 404 |
+
+Errors on the `/v1` routes have the OpenAI shape, `{"error": {"message", "type", "code"}}`; the others keep
+`{"error": "<message>"}`. [parity.md](parity.md) lists what the engine covers of the common local-model protocols.
 
 Every answer carries `Server: arty-engine/<version>`.
 
@@ -103,3 +116,36 @@ model's recorded source (`name` and `revision`) when it has one. Projector rules
 apply as for any pull, and a source that matches a short name's catalogue entry, in any of the spellings above, keeps
 its sha256 pins. `source` must be a Hugging Face name (400 otherwise), only a short name or that same Hugging Face
 name can take it (400), and an internal model's name answers 409.
+
+## Chats longer than the context
+
+When a chat no longer fits the model's context, the runtime refuses it. Unless the request says `"truncate": false`,
+the engine then drops the oldest turn (a user message and everything after it up to the next user message, so tool
+results stay with their call) and tries again, keeping system messages and the last turn. A single turn that is too
+long still answers the runtime's error. A streamed chat is trimmed before its first line is sent. Each drop is logged.
+
+## Making models
+
+`/api/create` takes `model` (the new name) and any of: `from` (an installed model, or the digest of a blob sent to
+`/api/blobs`), `files` (file name to digest, one `.gguf` model and at most one projector, whose name holds `mmproj` or
+`projector`), `adapters` (file name to digest, each becoming a LoRA adapter the runtime loads), `template`, `system`,
+`license`, `parameters` (an object), `messages` (a list of `{role, content}` that goes before every chat) and
+`modelfile`, a recipe in the common format:
+
+```
+FROM qwen3:14b
+PARAMETER temperature 0.2
+PARAMETER stop "<|im_end|>"
+SYSTEM """You are Arty."""
+MESSAGE user "Who are you?"
+MESSAGE assistant "Arty."
+```
+
+`FROM`, `PARAMETER`, `TEMPLATE`, `SYSTEM`, `LICENSE`, `ADAPTER` (a digest) and `MESSAGE` are read; fields given beside
+the recipe win over it. The new model shares its blobs with the one it is made from (a hard link when the stores share
+a disk). `quantize` answers 501, a path on the engine's machine as `from` answers 400, and remote and internal names
+answer 409. A create runs only while no pull runs. A loaded model of the same name is unloaded so the next request uses
+the new one. `/api/copy` (`source`, `destination`) writes a second manifest for the same blobs.
+
+Note: a template given to `/api/create` is stored and shown, but the runtime renders chats with the template inside
+the model file, as it does for pulled models.

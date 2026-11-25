@@ -31,7 +31,9 @@ from Hugging Face and runs speculative decoding, behind one HTTP API.**
 |---|---|
 | [docs/install.md](docs/install.md) | The full install, running in a terminal, upgrading from before 14 Nov 2026 |
 | [docs/configuration.md](docs/configuration.md) | Every `engine.json` key, the shipped config, how the GPU backend is chosen |
-| [docs/api.md](docs/api.md) | Every endpoint, unreadable models, leaked thinking, pulls and `source` |
+| [docs/api.md](docs/api.md) | Every endpoint, unreadable models, leaked thinking, pulls and `source`, making models |
+| [docs/parity.md](docs/parity.md) | What the engine covers of the common `/api` and `/v1` local-model protocols, and what it leaves out |
+| [docs/rpc.md](docs/rpc.md) | Spreading a model over another machine's GPU, per-model layer placement, the worker on Linux and Windows |
 | [docs/security.md](docs/security.md) | Loopback, `Origin` and `Host` checks, proxies |
 | [docs/store-migration.md](docs/store-migration.md) | Converting and undoing a store in the older layout, unused blobs |
 | [docs/amd.md](docs/amd.md) | AMD setup: ROCm, Vulkan, supported cards, container devices |
@@ -72,10 +74,10 @@ Python standard library only (see [License](#license)).
 - **Answers the way Arty expects.** Thinking comes back as `message.thinking`, tool call arguments come back as
   objects, tool definitions are written into the prompt compactly, and `/api/generate` with an empty prompt loads or
   unloads a model.
-- **Optional trainer hand-off.** With `trainer_url` set, the engine tells a GPU-sharing controller `/busy` before a
-  request and `/done` after it, so something else (such as a training job) can use the card while the engine is idle.
 - **Other machines' GPUs.** A model too big for the card can be spread over RPC workers on the network, which the
   engine health-checks before every load and falls back from at once ([docs/rpc.md](docs/rpc.md)).
+- **Optional trainer hand-off.** With `trainer_url` set, the engine tells a GPU-sharing controller `/busy` before a
+  request and `/done` after it, so something else (such as a training job) can use the card while the engine is idle.
 
 The engine is Python standard library only. It reads the card's free memory with `nvidia-smi` on an NVIDIA card, and
 with `amd-smi`, `rocm-smi` or the amdgpu driver's own files on an AMD card ([untested](#amd-gpus-untested)).
@@ -136,7 +138,11 @@ Upgrading an install from before 14 Nov 2026: [docs/install.md](docs/install.md#
 | `POST /api/chat`, `POST /api/generate` | Streamed or not; tools, `think`, `format`, images, `keep_alive`, `num_ctx`, `num_gpu: 0` |
 | `POST /api/embed`, `POST /api/embeddings` | Embeddings |
 | `POST /api/show`, `POST /api/pull`, `DELETE /api/delete` | Model details; Hugging Face pulls; deletes from the engine's own store |
-| `POST /api/create`, `/api/copy`, `/api/push` | **501** |
+| `POST /api/create`, `/api/copy`, `/api/blobs/<digest>` | Models made from a recipe, a model or sent files; second names; blob uploads |
+| `/v1/models`, `/v1/chat/completions`, `/v1/completions`, `/v1/embeddings`, `/v1/rerank` | The OpenAI-style protocol, streamed as server-sent events |
+| `/tokenize`, `/detokenize`, `/apply-template`, `/infill`, `/props`, `/slots`, `/metrics`, `/lora-adapters` | The model runtime's own routes, per model |
+| `GET /api/workers`, `GET /api/status` | RPC workers and the engine's state |
+| `POST /api/push` | **501** |
 
 Every answer carries `Server: arty-engine/<version>`. All endpoints, the cases that answer 501, 404 or 409, how leaked
 thinking is handled and how pulls work are in [docs/api.md](docs/api.md).

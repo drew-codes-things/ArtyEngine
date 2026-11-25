@@ -30,6 +30,8 @@ TEMPLATE_LAYER = f"{MEDIA_PREFIX}template"
 SYSTEM_LAYER = f"{MEDIA_PREFIX}system"
 PARAMS_LAYER = f"{MEDIA_PREFIX}params"
 LICENSE_LAYER = f"{MEDIA_PREFIX}license"
+MESSAGES_LAYER = f"{MEDIA_PREFIX}messages"
+ADAPTER_LAYER = f"{MEDIA_PREFIX}adapter"
 SOURCE_FIELD = "source"
 EMBEDDING_ARCHITECTURES = {"bert", "nomic-bert", "nomic-bert-moe", "jina-bert-v2", "jina-bert-v3", "modern-bert", "neo-bert"}
 UNSUPPORTED_ARCHITECTURES = {"qwen25vl"}
@@ -108,6 +110,8 @@ class Model:
     license: str = ""
     stored_template: str = ""
     stored_config: dict = field(default_factory=dict)
+    messages: list = field(default_factory=list)
+    adapter_paths: list = field(default_factory=list)
 
     @property
     def load_digest(self) -> str:
@@ -283,6 +287,9 @@ class ModelStore:
         model.license = self._layer_text(root, layers.get(LICENSE_LAYER))
         model.stored_template = self._layer_text(root, layers.get(TEMPLATE_LAYER))
         model.stored_config = self._config_json(root, config)
+        model.messages = self._layer_list(root, layers.get(MESSAGES_LAYER))
+        model.adapter_paths = [blob_path(root, layer["digest"]) for layer in manifest["layers"]
+                               if layer["mediaType"] == ADAPTER_LAYER]
         return model
 
     @staticmethod
@@ -299,6 +306,15 @@ class ModelStore:
         except (ValueError, RecursionError):
             return {}
         return value if isinstance(value, dict) else {}
+
+    @classmethod
+    def _layer_list(cls, root: Path, layer: dict | None) -> list:
+        text = cls._layer_text(root, layer)
+        try:
+            value = json.loads(text) if text else []
+        except (ValueError, RecursionError):
+            return []
+        return [item for item in value if isinstance(item, dict)] if isinstance(value, list) else []
 
     @classmethod
     def _config_json(cls, root: Path, config: dict | None) -> dict:

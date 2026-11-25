@@ -93,10 +93,9 @@ def test_a_loaded_model_is_unloaded_before_it_is_deleted(engine):
     assert http_json(f"{engine.url}/api/ps")["models"] == []
 
 
-@pytest.mark.parametrize("path", ["/api/create", "/api/copy", "/api/push"])
-def test_store_writes_the_engine_does_not_do_say_so(engine, path):
-    status, body = error_of(lambda: http_json(f"{engine.url}{path}", {"model": "x", "source": HF_NAME, "destination": "y"}))
-    assert status == 501 and "does not create, copy or push" in body["error"]
+def test_push_says_there_is_no_registry(engine):
+    status, body = error_of(lambda: http_json(f"{engine.url}/api/push", {"model": HF_NAME}))
+    assert status == 501 and "no registry" in body["error"]
 
 
 def test_refusing_a_model_read_in_place_leaves_it_loaded(engine):

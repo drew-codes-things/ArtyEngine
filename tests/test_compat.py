@@ -1,0 +1,187 @@
+import json
+import urllib.request
+
+import pytest
+
+from engine_harness import RunningEngine, error_of, http_json
+
+CHAT_REPLY = {"json": {"id": "c1", "object": "chat.completion", "model": "qwen3:14b",
+                       "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "hi"}}]}}
+CHAT_EVENTS = {"sse": ['data: {"choices":[{"index":0,"delta":{"content":"h"}}],"model":"x"}',
+                       'data: {"choices":[{"index":0,"delta":{"content":"i"},"finish_reason":"stop"}],"model":"x"}',
+                       "data: [DONE]"]}
+REPLIES = {
+    "/v1/chat/completions": lambda body: CHAT_EVENTS if body.get("stream") else CHAT_REPLY,
+    "/v1/completions": {"json": {"object": "text_completion", "choices": [{"text": " world", "index": 0}]}},
+    "/v1/embeddings": {"json": {"object": "list", "data": [{"object": "embedding", "index": 0, "embedding": [0.1, 0.2]}]}},
+    "/tokenize": {"json": {"tokens": [1, 2, 3]}},
+    "/detokenize": {"json": {"content": "abc"}},
+    "/apply-template": {"json": {"prompt": "<user>hi"}},
+    "/infill": {"json": {"content": "middle"}},
+    "/props": {"json": {"default_generation_settings": {"n_ctx": 1024}, "total_slots": 1}},
+    "/slots": {"json": [{"id": 0, "is_processing": False}]},
+    "/slots/0?action=save": {"json": {"id_slot": 0, "filename": "chat.bin", "n_saved": 12}},
+    "/metrics": {"text": "# HELP upstream:prompt_tokens_total Prompt tokens.\n# TYPE upstream:prompt_tokens_total counter\n"
+                         "upstream:prompt_tokens_total 42\nrequests{state=\"busy\"} 1\n"},
+    "/lora-adapters": lambda body: {"json": body if isinstance(body, list) else []},
+    "/completion": {"json": {"content": "native", "stop": True}},
+    "/v1/messages": {"sse": ['event: message_start\ndata: {"type": "message_start"}', 'event: message_stop\ndata: {"type": "message_stop"}']},
+}
+
+
+@pytest.fixture
+def running(tmp_path):
+    engine = RunningEngine(tmp_path, REPLIES, vram_budget_mb=100000)
+    yield engine
+    engine.close()
+
+
+def runner_requests(running, path):
+    return [request["body"] for request in running.upstream_requests() if request["path"] == path]
+
+
+def read_events(url, body):
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), method="POST",
+                                     headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(request, timeout=30) as response:
+        assert response.headers["Content-Type"] == "text/event-stream"
+        return [line.decode().strip()[len("data: "):] for line in response if line.strip()]
+
+
+def get_text(url):
+    with urllib.request.urlopen(url, timeout=30) as response:
+        return response.read().decode()
+
+
+def test_models_are_listed_the_openai_way(running):
+    listed = http_json(f"{running.url}/v1/models")
+    names = {entry["id"] for entry in listed["data"]}
+    assert listed["object"] == "list" and {"qwen3:14b", "nomic-embed-text:latest"} <= names
+    assert http_json(f"{running.url}/v1/models/qwen3:14b")["owned_by"] == "arty-engine"
+
+
+def test_an_unknown_model_answers_an_openai_error(running):
+    status, body = error_of(lambda: http_json(f"{running.url}/v1/chat/completions", {"model": "nope", "messages": []}))
+    assert status == 404 and body["error"]["type"] == "not_found_error" and "nope" in body["error"]["message"]
+
+
+def test_chat_completions_carry_the_model_defaults(running):
+    answer = http_json(f"{running.url}/v1/chat/completions", {"model": "qwen3:14b", "messages": [{"role": "user", "content": "hi"}]})
+    assert answer["choices"][0]["message"]["content"] == "hi"
+    sent = runner_requests(running, "/v1/chat/completions")[0]
+    assert sent["temperature"] == 0.6 and sent["stop"] == ["<|im_end|>"] and sent["model"] == "qwen3:14b"
+
+
+def test_the_caller_wins_over_the_model_defaults(running):
+    http_json(f"{running.url}/v1/chat/completions", {"model": "qwen3:14b", "temperature": 0.1,
+                                                      "messages": [{"role": "user", "content": "hi"}]})
+    assert runner_requests(running, "/v1/chat/completions")[0]["temperature"] == 0.1
+
+
+def test_chat_completions_stream_as_server_sent_events(running):
+    events = read_events(f"{running.url}/v1/chat/completions", {"model": "qwen3:14b", "stream": True,
+                                                                 "messages": [{"role": "user", "content": "hi"}]})
+    assert events[-1] == "[DONE]"
+    assert "".join(json.loads(event)["choices"][0]["delta"]["content"] for event in events[:-1]) == "hi"
+
+
+def test_a_system_prompt_from_the_model_goes_first(running):
+    http_json(f"{running.url}/api/create", {"model": "helper", "from": "qwen3:14b", "system": "Be brief.", "stream": False})
+    http_json(f"{running.url}/v1/chat/completions", {"model": "helper", "messages": [{"role": "user", "content": "hi"}]})
+    sent = runner_requests(running, "/v1/chat/completions")[0]["messages"]
+    assert sent == [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "hi"}]
+
+
+def test_completions_and_embeddings_reach_the_runner(running):
+    assert http_json(f"{running.url}/v1/completions", {"model": "qwen3:14b", "prompt": "hello"})["choices"][0]["text"] == " world"
+    vectors = http_json(f"{running.url}/v1/embeddings", {"model": "nomic-embed-text", "input": "hello"})
+    assert vectors["data"][0]["embedding"] == [0.1, 0.2]
+    assert runner_requests(running, "/v1/embeddings")[0]["model"] == "nomic-embed-text:latest"
+
+
+def test_embeddings_refuse_a_chat_model(running):
+    status, body = error_of(lambda: http_json(f"{running.url}/v1/embeddings", {"model": "qwen3:14b", "input": "x"}))
+    assert status == 400 and "does not support embeddings" in body["error"]["message"]
+
+
+def test_rerank_needs_a_reranking_model(running):
+    status, body = error_of(lambda: http_json(f"{running.url}/v1/rerank", {"model": "nomic-embed-text", "query": "q",
+                                                                            "documents": ["a"]}))
+    assert status == 400 and "not a reranking model" in body["error"]["message"]
+
+
+@pytest.mark.parametrize("path, body, expected", [
+    ("/tokenize", {"content": "abc"}, {"tokens": [1, 2, 3]}),
+    ("/detokenize", {"tokens": [1, 2, 3]}, {"content": "abc"}),
+    ("/infill", {"input_prefix": "a", "input_suffix": "c"}, {"content": "middle"}),
+])
+def test_runner_tools_are_passed_through(running, path, body, expected):
+    assert http_json(f"{running.url}{path}", {"model": "qwen3:14b", **body}) == expected
+    assert "model" not in runner_requests(running, path)[0]
+
+
+def test_apply_template_sees_the_model_messages(running):
+    http_json(f"{running.url}/api/create", {"model": "primed", "from": "qwen3:14b", "stream": False,
+                                            "modelfile": 'MESSAGE user "Who are you?"\nMESSAGE assistant "Arty."'})
+    assert http_json(f"{running.url}/apply-template", {"model": "primed", "messages": [{"role": "user", "content": "hi"}]}) \
+        == {"prompt": "<user>hi"}
+    assert [message["content"] for message in runner_requests(running, "/apply-template")[0]["messages"]] \
+        == ["Who are you?", "Arty.", "hi"]
+
+
+def test_props_and_slots_use_the_one_loaded_model(running):
+    status, body = error_of(lambda: http_json(f"{running.url}/props"))
+    assert status == 400 and "?model=" in body["error"]
+    http_json(f"{running.url}/tokenize", {"model": "qwen3:14b", "content": "x"})
+    assert http_json(f"{running.url}/props")["total_slots"] == 1
+    assert http_json(f"{running.url}/slots?model=qwen3:14b")[0]["id"] == 0
+    assert len(running.launcher.launched) == 1
+
+
+def test_a_slot_can_be_saved_and_a_bad_action_is_refused(running):
+    saved = http_json(f"{running.url}/slots/0?action=save", {"model": "qwen3:14b", "filename": "chat.bin"})
+    assert saved["n_saved"] == 12 and runner_requests(running, "/slots/0?action=save") == [{"filename": "chat.bin"}]
+    status, _ = error_of(lambda: http_json(f"{running.url}/slots/0?action=wipe", {"model": "qwen3:14b"}))
+    assert status == 400
+    assert "--slot-save-path" in running.launcher.launched[0].arguments
+
+
+def test_lora_adapters_can_be_read_and_set(running):
+    assert http_json(f"{running.url}/lora-adapters?model=qwen3:14b") == []
+    assert http_json(f"{running.url}/lora-adapters", {"model": "qwen3:14b", "adapters": [{"id": 0, "scale": 0.5}]}) \
+        == [{"id": 0, "scale": 0.5}]
+
+
+def test_metrics_label_each_runner_and_add_the_engine_counts(running):
+    http_json(f"{running.url}/tokenize", {"model": "qwen3:14b", "content": "x"})
+    text = get_text(f"{running.url}/metrics")
+    assert 'arty_runtime_prompt_tokens_total{model="qwen3:14b"} 42' in text
+    assert 'arty_runtime_requests{model="qwen3:14b",state="busy"} 1' in text
+    assert "arty_engine_loaded_models 1" in text and text.count("# TYPE arty_runtime_prompt_tokens_total counter") == 1
+    assert "upstream" not in text
+
+
+def test_health_answers_ok(running):
+    assert http_json(f"{running.url}/health") == {"status": "ok"}
+
+
+def test_the_native_completion_route_passes_through(running):
+    assert http_json(f"{running.url}/completion", {"model": "qwen3:14b", "prompt": "x"})["content"] == "native"
+    assert runner_requests(running, "/completion")[0]["model"] == "qwen3:14b"
+
+
+def test_other_event_streams_pass_through_unchanged(running):
+    request = urllib.request.Request(f"{running.url}/v1/messages", method="POST", headers={"Content-Type": "application/json"},
+                                     data=json.dumps({"model": "qwen3:14b", "stream": True, "messages": []}).encode())
+    with urllib.request.urlopen(request, timeout=30) as response:
+        text = response.read().decode()
+    assert text == 'event: message_start\ndata: {"type": "message_start"}\n\nevent: message_stop\ndata: {"type": "message_stop"}\n\n'
+
+
+def test_a_loaded_model_is_reused_and_kept_alive(running):
+    http_json(f"{running.url}/api/chat", {"model": "qwen3:14b", "stream": False, "keep_alive": "1m", "options": {"num_ctx": 2048},
+                                          "messages": [{"role": "user", "content": "hi"}]})
+    http_json(f"{running.url}/v1/chat/completions", {"model": "qwen3:14b", "keep_alive": -1,
+                                                      "messages": [{"role": "user", "content": "hi"}]})
+    assert len(running.launcher.launched) == 1
+    assert running.engine.pool.loaded()[0].expires_at is None

@@ -231,6 +231,8 @@ def build_arguments(config: Config, plan: LaunchPlan, port: int) -> list[str]:
                   "-ub", str(run.get("ubatch", config.ubatch)), "--cache-ram", str(config.cache_ram_mb)]
     if model.projector_path:
         arguments += ["--mmproj", str(model.projector_path)]
+    for adapter in model.adapter_paths:
+        arguments += ["--lora", str(adapter)]
     if plan.template_file:
         arguments += ["--chat-template-file", str(plan.template_file)]
     arguments += speculative_arguments(config, plan, kv_cache_type)
@@ -419,6 +421,14 @@ class RunnerPool:
             self.state.notify_all()
         if stop_now:
             self.unload(runner.name)
+
+    def borrow(self, name: str) -> Runner | None:
+        with self.state:
+            runner = self.runners.get(name)
+            if not runner or not runner.alive:
+                return None
+            runner.in_flight += 1
+            return runner
 
     def touch(self, model: Model, keep_alive: float | None) -> bool:
         with self.state:
