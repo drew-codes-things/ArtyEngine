@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from http import HTTPStatus
 from pathlib import Path
 
-from .gguf import GGUF_MAGIC, MOST_HEADER_VALUES, MOST_KEYS
+from .gguf import GGUF_MAGIC, MOST_HEADER_VALUES, MOST_KEYS, TENSOR_TYPE_AND_OFFSET_BYTES
 from .store import (ADAPTER_LAYER, LICENSE_LAYER, MESSAGES_LAYER, MODEL_LAYER, PARAMS_LAYER, PARTIAL_SUFFIX, PROJECTOR_LAYER,
                     SYSTEM_LAYER, TEMPLATE_LAYER, Model, ModelNotFound, ModelStore, blob_path, engine_manifest, is_digest,
                     parse_name, write_manifest)
@@ -24,6 +24,15 @@ CHUNK_BYTES = 1024 * 1024
 GGUF_SUFFIX = ".gguf"
 GGUF_HEADER = struct.Struct("<4sIQQ")
 SUPPORTED_GGUF_VERSIONS = (2, 3)
+LENGTH_BYTES = 8
+SHORTEST_NAME_BYTES = 1
+VALUE_TYPE_BYTES = 4
+SMALLEST_VALUE_BYTES = 1
+DIMENSION_COUNT_BYTES = 4
+DIMENSION_BYTES = 8
+SMALLEST_KEY_VALUE_BYTES = LENGTH_BYTES + SHORTEST_NAME_BYTES + VALUE_TYPE_BYTES + SMALLEST_VALUE_BYTES
+SMALLEST_TENSOR_INFO_BYTES = (LENGTH_BYTES + SHORTEST_NAME_BYTES + DIMENSION_COUNT_BYTES + DIMENSION_BYTES
+                              + TENSOR_TYPE_AND_OFFSET_BYTES)
 BLOB_MODE = 0o644
 
 
@@ -194,14 +203,19 @@ def bring_blob(store: ModelStore, source_root: Path, digest: str, keep_free_byte
         partial.unlink(missing_ok=True)
 
 
+def smallest_gguf_size(tensor_count: int, key_count: int) -> int:
+    return GGUF_HEADER.size + key_count * SMALLEST_KEY_VALUE_BYTES + tensor_count * SMALLEST_TENSOR_INFO_BYTES
+
+
 def is_gguf_file(path: Path) -> bool:
     with open(path, "rb") as handle:
         start = handle.read(GGUF_HEADER.size)
+        size = os.fstat(handle.fileno()).st_size
     if len(start) < GGUF_HEADER.size:
         return False
     magic, version, tensor_count, key_count = GGUF_HEADER.unpack(start)
     return (magic == GGUF_MAGIC and version in SUPPORTED_GGUF_VERSIONS and tensor_count <= MOST_HEADER_VALUES
-            and key_count <= MOST_KEYS)
+            and key_count <= MOST_KEYS and size >= smallest_gguf_size(tensor_count, key_count))
 
 
 def owned_blob(store: ModelStore, digest, what: str) -> dict:

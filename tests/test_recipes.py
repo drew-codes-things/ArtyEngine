@@ -244,6 +244,7 @@ def test_a_model_can_not_be_made_from_a_blob_that_is_not_gguf(running):
     b"GGUF" + struct.pack("<IQQ", 3, 2 ** 40, 0),
     b"GGUF" + struct.pack("<IQQ", 3, 0, 2 ** 40),
     b"GGUF" + struct.pack("<I", 3),
+    b"GGUF" + struct.pack("<IQQ", 3, 3, 5),
 ])
 def test_a_blob_with_the_gguf_magic_but_no_sound_header_is_not_a_model(running, start):
     data = start + b" weights"
