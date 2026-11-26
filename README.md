@@ -52,7 +52,8 @@ request to, through the engine's HTTP API (`/api/chat`, `/api/generate`, `/api/e
 **Who it is for.** People who run Arty, and noncommercial self-hosters who want a model server for one GPU that is
 Python standard library only (see [License](#license)).
 
-**Version.** 0.1.0, as `GET /api/version` reports it. There are no tagged releases yet.
+**Version.** 0.1.0, as `GET /api/version` reports it. The engine itself has no tagged release yet; the model runtime
+is published as release `runtime-b12110`.
 
 - **Its own model store.** Every model has one manifest in the store's `catalog` folder, naming its weights and
   extras (projector, template, parameters, system prompt, license) by sha256; the files themselves sit once each in
@@ -178,8 +179,7 @@ linux-rocm-10.0-x64` or `linux-vulkan-x64`):
 - ROCm: https://github.com/drew-codes-things/ArtyEngine/releases/download/runtime-b12110/arty-runtime-linux-rocm-10.0-x64.zip
 - Vulkan: https://github.com/drew-codes-things/ArtyEngine/releases/download/runtime-b12110/arty-runtime-linux-vulkan-x64.zip
 
-Their SHA-256 digests are pinned in `arty_engine/runtime_release.json` once the zips are published, and listed in the
-release's `SHA256SUMS`.
+Their SHA-256 digests are pinned in `arty_engine/runtime_release.json` and listed in the release's `SHA256SUMS`.
 
 The build carries GPU code for gfx908, gfx90a, gfx942, gfx950, gfx1010 to gfx1012,
 gfx1030 to gfx1036, gfx1100 to gfx1103, gfx1150 to gfx1152, gfx1200 and gfx1201.

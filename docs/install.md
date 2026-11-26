@@ -19,7 +19,7 @@ releases (release `runtime-b12110`, tested with the CUDA 12.8 build), one per pl
 
 ```bash
 cd /srv/ai/arty-engine/src
-sudo python3 -m arty_engine runtime install --platform linux-cuda-12.8-x64 --sha256 <the zip's SHA-256>
+sudo python3 -m arty_engine runtime install --platform linux-cuda-12.8-x64
 python3 -m arty_engine runtime find
 ```
 

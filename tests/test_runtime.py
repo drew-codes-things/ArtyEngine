@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -96,8 +97,10 @@ def test_the_runtime_command_offers_the_unpinned_choice():
     assert finished.returncode == 0 and "--allow-unpinned" in finished.stdout
 
 
-def test_the_shipped_release_pins_nothing_it_has_not_checked():
-    assert ReleaseInfo.read().sha256 == {}
+def test_the_shipped_release_pins_a_full_digest_for_every_platform():
+    shipped = ReleaseInfo.read()
+    assert sorted(shipped.sha256) == sorted(shipped.platforms)
+    assert all(re.fullmatch(r"[0-9a-f]{64}", digest) for digest in shipped.sha256.values())
 
 
 def test_a_zip_whose_digest_differs_installs_nothing(tmp_path):

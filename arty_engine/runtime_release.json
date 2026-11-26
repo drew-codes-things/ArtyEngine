@@ -11,5 +11,15 @@
     "windows-cuda-13.4-x64",
     "windows-vulkan-x64"
   ],
-  "sha256": {}
+  "sha256": {
+    "linux-x64": "b03a4facb755948ae1e08fcd9a23800b11b8601aa14b6ff73b7d183e2ae58ad1",
+    "linux-cuda-12.8-x64": "759e886d82608b71c5ceb28a5bed8c9ebd8f19eba118889e89b04841ac960eb5",
+    "linux-cuda-13.4-x64": "b7545833ae09f154abb9bdfd24e7a00357fabf5acd0e7b283fc109a02c42b5d1",
+    "linux-vulkan-x64": "3106d9bfbdc6bb183f4151dc88687ab7e1c604e3587e1c09a7699c3806d777b5",
+    "linux-rocm-10.0-x64": "9eacee1a6107e4e15dee99093329aed2ff74caf543412bb2c6b98bf27d63754f",
+    "windows-x64": "4126a50224a7582128d9e308b972a578dc4e14e8859ab625467b0756df87c955",
+    "windows-cuda-12.4-x64": "eb6c43f5da0ebc4e21ce4d35f6ba489a919f2cf57585dd26f2821ff5637fe536",
+    "windows-cuda-13.4-x64": "43df59354467dcd46b93a46b3b629d106363ab457d78b3b419a7a6d64a84e407",
+    "windows-vulkan-x64": "0baf8f28774b8e453de46681ec0e860c0a3a65d268646c5bf26a916ed3a72944"
+  }
 }
