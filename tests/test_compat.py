@@ -1,5 +1,6 @@
 import json
 import threading
+import time
 import urllib.request
 
 import pytest
@@ -185,12 +186,23 @@ def test_other_event_streams_pass_through_unchanged(running):
     assert text == 'event: message_start\ndata: {"type": "message_start"}\n\nevent: message_stop\ndata: {"type": "message_stop"}\n\n'
 
 
+RELEASE_DEADLINE_SECONDS = 30
+
+
+def wait_until_released(pool):
+    deadline = time.monotonic() + RELEASE_DEADLINE_SECONDS
+    while any(runner.in_flight for runner in pool.loaded()):
+        assert time.monotonic() < deadline, "a runner was never released"
+        time.sleep(0.01)
+
+
 def test_a_loaded_model_is_reused_and_kept_alive(running):
     http_json(f"{running.url}/api/chat", {"model": "qwen3:14b", "stream": False, "keep_alive": "1m", "options": {"num_ctx": 2048},
                                           "messages": [{"role": "user", "content": "hi"}]})
     http_json(f"{running.url}/v1/chat/completions", {"model": "qwen3:14b", "keep_alive": -1,
                                                       "messages": [{"role": "user", "content": "hi"}]})
     assert len(running.launcher.launched) == 1
+    wait_until_released(running.engine.pool)
     assert running.engine.pool.loaded()[0].expires_at is None
 
 
