@@ -41,7 +41,8 @@ ERROR_TYPES = {400: "invalid_request_error", 401: "authentication_error", 403: "
 OWNER = "arty-engine"
 EVENT_STREAM = "text/event-stream"
 PASS_THROUGH_CHUNK_BYTES = 65536
-EVENT_DATA = b"data: "
+EVENT_DATA_FIELD = b"data:"
+EVENT_DATA_SPACE = b" "
 ERROR_MEMBER = b"\"error\""
 EVENT_LINE_END = b"\n"
 END_OF_EVENTS = b"[DONE]"
@@ -85,18 +86,40 @@ def errors_scrubbed(text: str) -> str:
     return text if scrubbed is None else scrubbed
 
 
+def event_data_start(line: bytes) -> int:
+    if not line.startswith(EVENT_DATA_FIELD):
+        return 0
+    return len(EVENT_DATA_FIELD) + line[len(EVENT_DATA_FIELD):].startswith(EVENT_DATA_SPACE)
+
+
 def event_line_scrubbed(line: bytes) -> bytes:
-    if not line.startswith(EVENT_DATA) or ERROR_MEMBER not in line or not line.endswith(EVENT_LINE_END):
+    data_start = event_data_start(line)
+    if not data_start or ERROR_MEMBER not in line or not line.endswith(EVENT_LINE_END):
         return line
     try:
-        text = line[len(EVENT_DATA):].decode("utf-8")
+        text = line[data_start:].decode("utf-8")
     except UnicodeDecodeError:
         return line
     scrubbed = with_error_scrubbed(text)
     if scrubbed is None:
         return line
     ending = line[len(line.rstrip(b"\r\n")):]
-    return EVENT_DATA + scrubbed.encode() + ending
+    return line[:data_start] + scrubbed.encode() + ending
+
+
+def holds_complete_json(line: bytes) -> bool:
+    try:
+        json.loads(line[event_data_start(line):])
+    except (ValueError, RecursionError):
+        return False
+    return True
+
+
+def unterminated_line_scrubbed(line: bytes) -> bytes:
+    scrubbed = event_line_scrubbed(line + EVENT_LINE_END)[:-len(EVENT_LINE_END)]
+    if scrubbed != line or holds_complete_json(line):
+        return scrubbed
+    return scrub(line.decode("utf-8", errors="replace")).encode()
 
 
 def relay_cut(events, detail: str) -> RelayError:
@@ -121,9 +144,9 @@ def read_runner_line(response) -> tuple[bytes, str]:
 
 def ends_the_stream(line: bytes) -> bool:
     text = line.strip()
-    if not text.startswith(EVENT_DATA.strip()):
+    if not text.startswith(EVENT_DATA_FIELD):
         return False
-    data = text[len(EVENT_DATA.strip()):].strip()
+    data = text[len(EVENT_DATA_FIELD):].strip()
     if data == END_OF_EVENTS:
         return True
     try:
@@ -177,7 +200,7 @@ class ErrorLineHolder:
         self.at_line_start = True
 
     def forward(self, piece: bytes) -> bytes:
-        if self.at_line_start and piece.startswith(EVENT_DATA) and ERROR_MEMBER in piece:
+        if self.at_line_start and event_data_start(piece) and ERROR_MEMBER in piece:
             self.holding = True
         self.at_line_start = piece.endswith(EVENT_LINE_END)
         if not self.holding:
@@ -192,7 +215,7 @@ class ErrorLineHolder:
     def rest(self) -> bytes:
         if not self.held:
             return b""
-        return self._let_go(event_line_scrubbed(bytes(self.held) + EVENT_LINE_END)[:-len(EVENT_LINE_END)])
+        return self._let_go(unterminated_line_scrubbed(bytes(self.held)))
 
     def _let_go(self, line: bytes) -> bytes:
         self.held.clear()

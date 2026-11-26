@@ -39,8 +39,10 @@ sending anything the request is asked again on a fresh runner. [parity.md](parit
 the common local-model protocols.
 
 The engine reads each line of a passed-through stream whole, up to 8 MB a line; a longer line is passed on but not
-read. An error event is held back until its newline so it can be rewritten whole, and its `error` member has to start
-in the first 64 KB of the line. Two by-design edges follow from the 8 MB limit: a stream cut right after a complete
+read. An error event, `data:` with or without the space, is held back until its newline so it can be rewritten whole. The
+whole `"error"` token has to be inside the first read of the line (the first 64 KB), and only a top-level `error`
+member is rewritten. An error line the runtime cut off in the middle of its JSON has its text cleaned of the runtime's
+names as it stands. Two by-design edges follow from the 8 MB limit: a stream cut right after a complete
 line over 8 MB gets no `event: error`, because that line may have been the end; and a real end over 8 MB that is
 followed by anything else, such as a keepalive, or that arrives without its newline, gets a false `event: error`.
 

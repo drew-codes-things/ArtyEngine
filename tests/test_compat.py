@@ -583,6 +583,64 @@ def test_an_unterminated_error_line_at_the_end_is_scrubbed():
     assert UPSTREAM_WORD.encode() not in rest and not rest.endswith(b"\n") and b"runtime_decode failed" in rest
 
 
+def test_a_data_piece_that_starts_mid_line_is_not_held_as_an_error_line():
+    holder = ErrorLineHolder()
+    first = b'data: {"content": "a'
+    second = b'data: {"error": "inside the generated text'
+    assert holder.forward(first) == first
+    assert holder.forward(second) == second
+
+
+def test_after_an_over_cap_error_line_the_rest_of_the_line_passes_unheld(monkeypatch):
+    monkeypatch.setattr("arty_engine.compat.LONGEST_CHECKED_LINE_BYTES", SMALL_CAP_BYTES)
+    holder = ErrorLineHolder()
+    line = scrubbable_error_line(2 * SMALL_CAP_BYTES)
+    assert holder.forward(line[:SMALL_CAP_BYTES + 10]) == line[:SMALL_CAP_BYTES + 10]
+    assert holder.forward(b"more of the same line") == b"more of the same line"
+    assert holder.rest() == b""
+
+
+ERROR_PASS_THROUGH_PATHS = sorted(COMPLETE_PASS_THROUGH_STREAMS)
+RUNTIME_ERROR_BODY = '{"error": {"message": "%s", "code": 500}}' % RUNTIME_FAILURE
+GOING_ON_EVENT = 'data: {"content": "h", "stop": false}'
+
+
+def error_stream_lines(tmp_path, path, raw_stream):
+    engine = failing_engine(tmp_path, {path: {"raw_sse": raw_stream}})
+    try:
+        return raw_event_lines(f"{engine.url}{path}", PASS_THROUGH_REQUEST)
+    finally:
+        engine.close()
+
+
+@pytest.mark.parametrize("path", ERROR_PASS_THROUGH_PATHS)
+def test_an_error_event_without_its_newline_at_the_end_is_still_sent_and_scrubbed(tmp_path, path):
+    lines = error_stream_lines(tmp_path, path, f"{GOING_ON_EVENT}\n\ndata: {RUNTIME_ERROR_BODY}")
+    assert UPSTREAM_WORD not in "".join(lines) and "runtime_decode failed" in lines[-1]
+
+
+@pytest.mark.parametrize("path", ERROR_PASS_THROUGH_PATHS)
+def test_an_error_event_cut_in_the_middle_of_its_json_carries_no_runtime_names(tmp_path, path):
+    cut_body = RUNTIME_ERROR_BODY[:RUNTIME_ERROR_BODY.index("decode") + len("dec")]
+    lines = error_stream_lines(tmp_path, path, f"{GOING_ON_EVENT}\n\ndata: {cut_body}")
+    assert UPSTREAM_WORD not in "".join(lines) and "runtime_dec" in "".join(lines)
+    assert "event: error" in lines
+
+
+@pytest.mark.parametrize("path", ERROR_PASS_THROUGH_PATHS)
+def test_an_error_event_with_no_space_after_data_is_scrubbed(tmp_path, path):
+    lines = error_stream_lines(tmp_path, path, f"{GOING_ON_EVENT}\n\ndata:{RUNTIME_ERROR_BODY}\n\n")
+    assert UPSTREAM_WORD not in "".join(lines) and lines[-1].startswith("data:{") and "runtime_decode failed" in lines[-1]
+
+
+def test_an_unterminated_cut_error_line_is_scrubbed_whole():
+    holder = ErrorLineHolder()
+    cut = b'data: {"error": {"message": "' + RUNTIME_FAILURE.encode()
+    assert holder.forward(cut) == b""
+    rest = holder.rest()
+    assert UPSTREAM_WORD.encode() not in rest and b"runtime_decode failed" in rest and rest.startswith(b'data: {"error"')
+
+
 def test_the_runtime_release_is_the_engine_s_folder_name_or_external():
     from arty_engine.server import runtime_release_name
     upstream = "ll" + "ama"
