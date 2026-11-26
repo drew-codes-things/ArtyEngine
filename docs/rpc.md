@@ -8,7 +8,7 @@ engine lists its workers in `engine.json` and decides per model whether to use t
 
 ```json
 "rpc_workers": [
-  {"address": "192.168.1.196:50052", "label": "pc-1060", "memory_mb": 5800}
+  {"address": "192.0.2.196:50052", "label": "pc-1060", "memory_mb": 5800}
 ],
 "model_settings": {
   "hf.co/unsloth/Qwen3.6-35B-A3B-GGUF:UD-IQ4_XS": {"rpc": "always", "rpc_when_down": "fail"}
@@ -92,13 +92,13 @@ message naming them.
 ## The worker side
 
 ```
-python3 -m arty_engine worker --allow 192.168.1.16 --devices CUDA0,CPU --cache-dir /var/cache/arty-engine-worker
+python3 -m arty_engine worker --allow 192.0.2.16 --devices CUDA0,CPU --cache-dir /var/cache/arty-engine-worker
 ```
 
 or with a settings file, `--config worker.json`:
 
 ```json
-{"listen": "0.0.0.0:50052", "allowed_clients": ["192.168.1.16"], "devices": ["CUDA0", "CPU"],
+{"listen": "0.0.0.0:50052", "allowed_clients": ["192.0.2.16"], "devices": ["CUDA0", "CPU"],
  "cache_dir": "/var/cache/arty-engine-worker", "worker_binary": "/opt/arty-engine/runtime"}
 ```
 
@@ -106,7 +106,7 @@ or with a settings file, `--config worker.json`:
 |---|---|---|
 | `listen` | `--listen` | `host:port` to serve on; default `0.0.0.0:50052` |
 | `open` | `--open` | Allow a network `listen` with no `allowed_clients`; without it the worker refuses to start that way |
-| `allowed_clients` | `--allow` (repeat) | Addresses or networks (`192.168.1.0/24`) allowed in; others are refused and logged |
+| `allowed_clients` | `--allow` (repeat) | Addresses or networks (`192.0.2.0/24`) allowed in; others are refused and logged |
 | `devices` | `--devices` | Devices to share; all of them when left out |
 | `cache_dir` | `--cache-dir` | Keeps the model weights sent to it on disk, so a reload sends far less |
 | `worker_binary` | `--worker-binary` | The runtime worker, or the runtime folder; `python3 -m arty_engine runtime find` shows what is found |
@@ -131,7 +131,7 @@ engine ([install.md](install.md)), put the settings in `/etc/arty-engine/worker.
 sudo cp deploy/arty-engine-worker.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now arty-engine-worker
-sudo ufw allow from 192.168.1.16 to any port 50052 proto tcp
+sudo ufw allow from 192.0.2.16 to any port 50052 proto tcp
 ```
 
 ### Windows
@@ -154,7 +154,7 @@ $action = New-ScheduledTaskAction -Execute "D:\arty-engine\start-worker.cmd"
 $trigger = New-ScheduledTaskTrigger -AtStartup
 $settings = New-ScheduledTaskSettingsSet -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1) -ExecutionTimeLimit 0
 Register-ScheduledTask -TaskName "arty-engine-worker" -Action $action -Trigger $trigger -Settings $settings -User "SYSTEM" -RunLevel Highest
-New-NetFirewallRule -DisplayName "arty-engine-worker" -Direction Inbound -Protocol TCP -LocalPort 50052 -RemoteAddress 192.168.1.16 -Action Allow
+New-NetFirewallRule -DisplayName "arty-engine-worker" -Direction Inbound -Protocol TCP -LocalPort 50052 -RemoteAddress 192.0.2.16 -Action Allow
 ```
 
 `Unregister-ScheduledTask -TaskName "arty-engine-worker"` and `Remove-NetFirewallRule -DisplayName "arty-engine-worker"`

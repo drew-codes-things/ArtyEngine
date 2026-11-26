@@ -66,7 +66,7 @@ def value_after(arguments: list[str], flag: str) -> str:
 
 
 @pytest.mark.parametrize("workers, problem", [
-    ("192.168.1.196:50052", "must be a list"),
+    ("192.0.2.196:50052", "must be a list"),
     (["no-port"], "host:port"),
     (["host:99999"], "outside 1 to 65535"),
     (["a b:1"], "no spaces or commas"),

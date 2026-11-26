@@ -92,7 +92,7 @@ class WorkerConfig:
 
 def networks(entries) -> list:
     if not isinstance(entries, list):
-        raise ValueError("allowed_clients must be a list of addresses or networks such as 192.168.1.16 or 192.168.1.0/24")
+        raise ValueError("allowed_clients must be a list of addresses or networks such as 192.0.2.16 or 192.0.2.0/24")
     try:
         return [ipaddress.ip_network(entry, strict=False) for entry in entries]
     except (TypeError, ValueError) as error:

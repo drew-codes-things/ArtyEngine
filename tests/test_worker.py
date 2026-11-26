@@ -121,7 +121,7 @@ def test_an_allowed_client_reaches_the_worker_through_the_gate(tmp_path, fake_wo
 def test_a_client_outside_the_list_is_refused(tmp_path, fake_worker, caplog):
     port = free_port()
     with caplog.at_level(logging.WARNING):
-        running = RunningWorker(WorkerConfig(listen=f"127.0.0.1:{port}", allowed_clients=["192.168.1.16"],
+        running = RunningWorker(WorkerConfig(listen=f"127.0.0.1:{port}", allowed_clients=["192.0.2.16"],
                                              worker_binary=str(fake_worker)))
         try:
             assert round_trip(port, b"hello") == b""
@@ -160,23 +160,23 @@ def test_an_open_worker_with_no_list_warns_loudly(caplog):
 
 def test_a_private_address_with_no_list_still_warns(caplog):
     with caplog.at_level(logging.WARNING):
-        worker.warn_when_open(WorkerConfig(listen="192.168.1.196:50052"))
-        worker.warn_when_open(WorkerConfig(listen="0.0.0.0:50052", allowed_clients=["192.168.1.16"]))
+        worker.warn_when_open(WorkerConfig(listen="192.0.2.196:50052"))
+        worker.warn_when_open(WorkerConfig(listen="0.0.0.0:50052", allowed_clients=["192.0.2.16"]))
         worker.warn_when_open(WorkerConfig(listen="127.0.0.1:50052"))
     assert len([record for record in caplog.records if "has no authentication" in record.message]) == 1
 
 
 @pytest.mark.parametrize("address, allowed", [
-    ("192.168.1.16", True), ("192.168.1.17", False), ("10.0.0.5", True), ("::ffff:192.168.1.16", True), ("fe80::1%eth0", False),
+    ("192.0.2.16", True), ("192.0.2.17", False), ("10.0.0.5", True), ("::ffff:192.0.2.16", True), ("fe80::1%eth0", False),
     ("not an address", False),
 ])
 def test_allowed_clients_take_addresses_and_networks(address, allowed):
-    assert is_allowed(address, networks(["192.168.1.16", "10.0.0.0/8"])) is allowed
+    assert is_allowed(address, networks(["192.0.2.16", "10.0.0.0/8"])) is allowed
 
 
 @pytest.mark.parametrize("settings, problem", [
     ({"listen": "0.0.0.0"}, "host:port"),
-    ({"allowed_clients": ["192.168.1.300"]}, "allowed_clients"),
+    ({"allowed_clients": ["192.0.2.300"]}, "allowed_clients"),
     ({"devices": "CUDA0"}, "devices"),
     ({"threads": -1}, "threads"),
 ])
@@ -187,9 +187,9 @@ def test_bad_worker_settings_are_refused(settings, problem):
 
 def test_the_worker_config_file_and_flags_combine(tmp_path):
     path = tmp_path / "worker.json"
-    path.write_text(json.dumps({"listen": "0.0.0.0:50052", "allowed_clients": ["192.168.1.16"], "devices": ["CUDA0"]}))
+    path.write_text(json.dumps({"listen": "0.0.0.0:50052", "allowed_clients": ["192.0.2.16"], "devices": ["CUDA0"]}))
     config = load_worker_config(str(path))
-    assert config.allowed_clients == ["192.168.1.16"]
+    assert config.allowed_clients == ["192.0.2.16"]
     path.write_text(json.dumps({"listen": "0.0.0.0:50052", "password": "x"}))
     with pytest.raises(ValueError, match="unknown settings password"):
         load_worker_config(str(path))
@@ -273,7 +273,7 @@ def test_a_worker_on_a_network_address_without_a_list_is_refused_unless_open(tmp
     with pytest.raises(RuntimeError, match="--open"):
         worker.refuse_unless_meant(WorkerConfig(listen="0.0.0.0:50052"))
     worker.refuse_unless_meant(WorkerConfig(listen="0.0.0.0:50052", open=True))
-    worker.refuse_unless_meant(WorkerConfig(listen="0.0.0.0:50052", allowed_clients=["192.168.1.16"]))
+    worker.refuse_unless_meant(WorkerConfig(listen="0.0.0.0:50052", allowed_clients=["192.0.2.16"]))
     worker.refuse_unless_meant(WorkerConfig(listen="127.0.0.1:50052"))
     assert not (tmp_path / "worker-log.json").exists()
 
