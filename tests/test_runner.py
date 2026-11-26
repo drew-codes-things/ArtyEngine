@@ -60,6 +60,31 @@ def test_keep_alive_zero_unloads_after_the_request(tmp_path):
     assert pool.loaded() == [] and launcher.launched[0].returncode == -15
 
 
+def hold_an_info_read_beside_a_finished_request(pool, store, keep_alive):
+    runner, _ = pool.acquire(store.get("qwen3:14b"), None)
+    info_read = pool.borrow("qwen3:14b")
+    pool.note_keep_alive(runner, keep_alive)
+    pool.release(runner, keep_alive)
+    return runner, info_read
+
+
+def test_keep_alive_zero_unloads_when_the_last_info_read_lets_go(tmp_path):
+    pool, store, launcher = make_pool(tmp_path)
+    runner, info_read = hold_an_info_read_beside_a_finished_request(pool, store, 0)
+    assert pool.loaded() == [runner]
+    pool.give_back(info_read)
+    assert pool.loaded() == [] and launcher.launched[0].returncode == -15
+
+
+def test_the_last_info_read_letting_go_counts_the_keep_alive_from_that_moment(tmp_path):
+    pool, store, _ = make_pool(tmp_path)
+    runner, info_read = hold_an_info_read_beside_a_finished_request(pool, store, 30)
+    runner.last_used = time.monotonic() - 1000
+    pool.give_back(info_read)
+    assert runner.expires_at > time.monotonic() + 25
+    pool.shutdown()
+
+
 def test_expired_keep_alive_is_reaped(tmp_path):
     pool, store, launcher = make_pool(tmp_path)
     runner, _ = pool.acquire(store.get("qwen3:14b"), None)

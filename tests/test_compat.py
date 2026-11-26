@@ -641,6 +641,21 @@ def test_an_unterminated_cut_error_line_is_scrubbed_whole():
     assert UPSTREAM_WORD.encode() not in rest and b"runtime_decode failed" in rest and rest.startswith(b'data: {"error"')
 
 
+def test_a_complete_last_line_without_its_newline_goes_out_unchanged():
+    holder = ErrorLineHolder()
+    line = b'data: {"error": null, "content": "a %s grazes"}' % UPSTREAM_WORD.encode()
+    assert holder.forward(line) == b""
+    assert holder.rest() == line
+
+
+@pytest.mark.parametrize("prefix", [b"data: ", b"data:"])
+def test_a_rewritten_error_line_keeps_the_prefix_it_arrived_with(prefix):
+    holder = ErrorLineHolder()
+    line = prefix + b'{"error": {"message": "' + RUNTIME_FAILURE.encode() + b'"}}\n'
+    forwarded = holder.forward(line)
+    assert forwarded.startswith(prefix + b'{"error"') and b"runtime_decode failed" in forwarded
+
+
 def test_the_runtime_release_is_the_engine_s_folder_name_or_external():
     from arty_engine.server import runtime_release_name
     upstream = "ll" + "ama"
