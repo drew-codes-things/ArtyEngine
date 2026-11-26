@@ -187,13 +187,25 @@ def test_other_event_streams_pass_through_unchanged(running):
 
 
 RELEASE_DEADLINE_SECONDS = 30
+UNFORCED_CHAT_ROUNDS = 100
+
+
+def wait_until_in_flight(pool, count):
+    deadline = time.monotonic() + RELEASE_DEADLINE_SECONDS
+    while sum(runner.in_flight for runner in pool.loaded()) != count:
+        assert time.monotonic() < deadline, "the runner was never released"
+        time.sleep(0.01)
+
+
+def wait_until_keep_alive_applied(pool):
+    deadline = time.monotonic() + RELEASE_DEADLINE_SECONDS
+    while pool.loaded()[0].latest_keep_alive_noted:
+        assert time.monotonic() < deadline, "the keep-alive was never applied"
+        time.sleep(0.001)
 
 
 def wait_until_released(pool):
-    deadline = time.monotonic() + RELEASE_DEADLINE_SECONDS
-    while any(runner.in_flight for runner in pool.loaded()):
-        assert time.monotonic() < deadline, "a runner was never released"
-        time.sleep(0.01)
+    wait_until_in_flight(pool, 0)
 
 
 def test_a_loaded_model_is_reused_and_kept_alive(running):
@@ -228,6 +240,50 @@ def test_the_latest_keep_alive_wins_when_an_earlier_request_lets_go_last(running
     second_answered.set()
     assert first_released.wait(30)
     assert pool.loaded()[0].expires_at is None
+
+
+@pytest.mark.parametrize("options", [{"num_ctx": 2048}, None], ids=["fresh_take", "borrowed"])
+@pytest.mark.parametrize("keep_alive,expected_expiry_is_none", [("30s", False), (-1, True)])
+def test_a_request_finishing_before_an_info_read_still_applies_its_keep_alive(running, options, keep_alive, expected_expiry_is_none):
+    pool = running.engine.pool
+    http_json(f"{running.url}/api/chat", {"model": "qwen3:14b", "stream": False, "keep_alive": "1m", "options": {"num_ctx": 2048},
+                                          "messages": [{"role": "user", "content": "hi"}]})
+    wait_until_released(pool)
+    info_read = pool.borrow("qwen3:14b")
+    body = {"model": "qwen3:14b", "keep_alive": keep_alive, "messages": [{"role": "user", "content": "hi"}]}
+    if options:
+        body["options"] = options
+    http_json(f"{running.url}/v1/chat/completions", body)
+    wait_until_in_flight(pool, 1)
+    pool.give_back(info_read)
+    runner = pool.loaded()[0]
+    assert (runner.expires_at is None) is expected_expiry_is_none
+    assert runner.latest_keep_alive_noted is False
+
+
+def test_an_info_read_open_beside_chats_never_pins_the_model(running):
+    pool = running.engine.pool
+    body = {"model": "qwen3:14b", "keep_alive": "30s", "options": {"num_ctx": 2048}, "messages": [{"role": "user", "content": "hi"}]}
+    http_json(f"{running.url}/v1/chat/completions", body)
+    stop_polling = threading.Event()
+
+    def poll_props():
+        while not stop_polling.is_set():
+            http_json(f"{running.url}/props?model=qwen3:14b")
+
+    poller = threading.Thread(target=poll_props)
+    poller.start()
+    pinned = 0
+    try:
+        for _ in range(UNFORCED_CHAT_ROUNDS):
+            http_json(f"{running.url}/v1/chat/completions", body)
+            wait_until_keep_alive_applied(pool)
+            if pool.loaded()[0].expires_at is None:
+                pinned += 1
+    finally:
+        stop_polling.set()
+        poller.join()
+    assert pinned == 0
 
 
 def test_every_engine_call_to_a_runner_carries_that_runner_s_key(running):

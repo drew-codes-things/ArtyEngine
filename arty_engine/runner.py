@@ -494,21 +494,24 @@ class RunnerPool:
             runner.latest_keep_alive = keep_alive
             runner.latest_keep_alive_noted = True
 
+    def _settle_expiry(self, runner: Runner, keep_alive: float | None) -> bool:
+        if runner.latest_keep_alive_noted:
+            keep_alive = runner.latest_keep_alive
+            runner.latest_keep_alive_noted = False
+        if keep_alive is FOREVER:
+            runner.expires_at = runner.expires_wall = None
+        else:
+            runner.expires_at = runner.last_used + keep_alive
+            runner.expires_wall = time.time() + keep_alive
+        return keep_alive == 0 or runner.unload_requested
+
     def release(self, runner: Runner, keep_alive: float | None) -> None:
         stop_now = False
         with self.state:
             runner.in_flight -= 1
             runner.last_used = time.monotonic()
             if runner.in_flight == 0:
-                if runner.latest_keep_alive_noted:
-                    keep_alive = runner.latest_keep_alive
-                    runner.latest_keep_alive_noted = False
-                if keep_alive is FOREVER:
-                    runner.expires_at = runner.expires_wall = None
-                else:
-                    runner.expires_at = runner.last_used + keep_alive
-                    runner.expires_wall = time.time() + keep_alive
-                stop_now = keep_alive == 0 or runner.unload_requested
+                stop_now = self._settle_expiry(runner, keep_alive)
             self.state.notify_all()
         if stop_now:
             self.unload_runner(runner)
@@ -524,7 +527,12 @@ class RunnerPool:
     def give_back(self, runner: Runner) -> None:
         with self.state:
             runner.in_flight -= 1
-            stop_now = runner.in_flight == 0 and runner.unload_requested
+            stop_now = False
+            if runner.in_flight == 0 and runner.latest_keep_alive_noted:
+                runner.last_used = time.monotonic()
+                stop_now = self._settle_expiry(runner, None)
+            elif runner.in_flight == 0:
+                stop_now = runner.unload_requested
             self.state.notify_all()
         if stop_now:
             self.unload_runner(runner)
