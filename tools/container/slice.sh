@@ -7,7 +7,7 @@ ENGINE_PORT=${SLICE_ENGINE_PORT:-11438}
 RELOAD_PORT=${SLICE_RELOAD_PORT:-$ENGINE_PORT}
 CONTROLLER=${SLICE_CONTROLLER:-${ARTY_CONTROLLER_URL:-}}
 WORK_DIR=${SLICE_WORK_DIR:-/srv/ai/arty-engine/src}
-MAIN_MODEL=${ARTY_MAIN_MODEL:-qwen3:14b}
+MAIN_MODEL=${ARTY_MAIN_MODEL:-}
 BENCH_UNIT=arty-engine-test
 SLICE_ID="slice-$(date +%s)-$$"
 CONTROLLER_REFUSED=4
@@ -43,8 +43,12 @@ release() {
   unload $ENGINE_PORT
   if systemctl is-active --quiet $BENCH_UNIT; then systemctl stop $BENCH_UNIT; fi
   sleep 2
-  curl -s -m 600 localhost:$RELOAD_PORT/api/generate -d "{\"model\":\"$MAIN_MODEL\"}" > /dev/null
-  echo "reloaded on $RELOAD_PORT: $(curl -s localhost:$RELOAD_PORT/api/ps | head -c 300)"
+  if [ -n "$MAIN_MODEL" ]; then
+    curl -s -m 600 localhost:$RELOAD_PORT/api/generate -d "{\"model\":\"$MAIN_MODEL\"}" > /dev/null
+    echo "reloaded on $RELOAD_PORT: $(curl -s localhost:$RELOAD_PORT/api/ps | head -c 300)"
+  else
+    echo "no ARTY_MAIN_MODEL in $SITE, so no model was reloaded; Arty's next request loads its own main model"
+  fi
   echo "trainer controller /done: $(tell_controller done)"
   drop_lock
   echo "released at $(date +%s)"

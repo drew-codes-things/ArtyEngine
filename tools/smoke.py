@@ -60,7 +60,7 @@ def main() -> int:
     parser.add_argument("base")
     parser.add_argument("output")
     parser.add_argument("--model", default="qwen3:14b")
-    parser.add_argument("--vision-model", default="mimo-v2.6:9b")
+    parser.add_argument("--vision-model", default="qwen2.5vl:7b")
     parser.add_argument("--embed-model", default="nomic-embed-text")
     parser.add_argument("--image", required=True)
     parser.add_argument("--only", default="")

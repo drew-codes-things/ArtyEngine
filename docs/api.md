@@ -65,10 +65,10 @@ number JSON can't hold (not a number, infinity) and a long list inside a short o
 
 ## Thinking that leaks into the answer
 
-Thinking that leaks into the answer: some models (seen with `mimo-v2.6:9b`) write their reasoning and a closing
+Thinking that leaks into the answer: some models (first seen with `mimo-v2.6:9b`, since retired) write their reasoning and a closing
 `</think>` into the reply even with `think` false. Whether a model can leak is decided once when it loads: a thinking
 model can when it is named in `thinking_leakers` or its chat template does not read `enable_thinking`. `mimo-v2.6:9b`
-needs naming: its template does read the switch, yet the model still writes its reasoning into the answer. Any other
+needed naming: its template read the switch, yet the model still wrote its reasoning into the answer. Any other
 model (such as `qwen3:14b`) streams its content at once and exactly as written, think tags included. For a model that
 can leak, chat and generate replies (not raw ones) are read the same way streamed and not streamed, so both give the
 same answer. Until the first closing tag, reasoning from the model or the end of the reply, content is held back, so a

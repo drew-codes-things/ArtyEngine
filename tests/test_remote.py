@@ -15,9 +15,9 @@ from fake_openai_server import (BROKEN_MODEL, ECHO_KEY_MODEL, FORBIDDEN_MODEL, G
                                 REDIRECT_MODEL, SLOW_MODEL, FakeOpenAiServer)
 
 REPO = Path(__file__).resolve().parents[1]
-QWEN = "remote/friend/qwen3-14b-q4_k_m"
-BIG = "remote/friend/friend-big-model-q8"
-KEY_ENV = "ARTY_TEST_FRIEND_KEY"
+QWEN = "remote/remote/qwen3-14b-q4_k_m"
+BIG = "remote/remote/remote-a-model-q8"
+KEY_ENV = "ARTY_TEST_REMOTE_KEY"
 
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def upstream():
     server.close()
 
 
-def key_file(tmp_path, key=GOOD_KEY, mode=0o600, file_name="friend.key") -> str:
+def key_file(tmp_path, key=GOOD_KEY, mode=0o600, file_name="remote.key") -> str:
     path = tmp_path / file_name
     path.write_text(key + "\n")
     path.chmod(mode)
@@ -35,7 +35,7 @@ def key_file(tmp_path, key=GOOD_KEY, mode=0o600, file_name="friend.key") -> str:
 
 
 def remote_settings(upstream, tmp_path, **extra) -> dict:
-    return {"friend": {"url": upstream.url, "key_file": key_file(tmp_path), **extra}}
+    return {"remote": {"url": upstream.url, "key_file": key_file(tmp_path), **extra}}
 
 
 @pytest.fixture
@@ -113,21 +113,21 @@ def test_loading_or_unloading_a_remote_model_starts_nothing_and_answers(engine, 
 def test_show_gives_capabilities_and_never_the_key_or_the_address(engine, upstream):
     shown = http_json(f"{engine.url}/api/show", {"model": QWEN})
     assert shown["capabilities"] == ["completion", "tools"]
-    assert shown["remote"] == {"name": "friend", "model": "Qwen3-14B-Q4_K_M"}
+    assert shown["remote"] == {"name": "remote", "model": "Qwen3-14B-Q4_K_M"}
     text = json.dumps(shown)
     assert GOOD_KEY not in text and upstream.url not in text
 
 
 def test_a_wrong_key_is_a_readable_refusal_without_the_key(tmp_path, upstream):
     wrong = "sf_wrong_key_value"
-    running = make_engine(tmp_path, {"friend": {"url": upstream.url, "key_file": key_file(tmp_path, wrong),
+    running = make_engine(tmp_path, {"remote": {"url": upstream.url, "key_file": key_file(tmp_path, wrong),
                                                 "models": ["Qwen3-14B-Q4_K_M"]}})
     try:
         status, payload = error_of(lambda: chat(running, QWEN))
     finally:
         running.close()
     assert status == 502
-    assert "refused the key (HTTP 401)" in payload["error"] and "friend.key" in payload["error"]
+    assert "refused the key (HTTP 401)" in payload["error"] and "remote.key" in payload["error"]
     assert wrong not in payload["error"]
 
 
@@ -139,7 +139,7 @@ def test_a_wrong_key_is_a_readable_refusal_without_the_key(tmp_path, upstream):
 def test_remote_refusals_become_readable_errors(tmp_path, upstream, model, status, words):
     running = make_engine(tmp_path, remote_settings(upstream, tmp_path, models=[model]))
     try:
-        got_status, payload = error_of(lambda: chat(running, f"remote/friend/{model}"))
+        got_status, payload = error_of(lambda: chat(running, f"remote/remote/{model}"))
     finally:
         running.close()
     assert got_status == status and words in payload["error"]
@@ -148,7 +148,7 @@ def test_remote_refusals_become_readable_errors(tmp_path, upstream, model, statu
 def test_a_key_echoed_back_by_the_remote_server_is_hidden(tmp_path, upstream):
     running = make_engine(tmp_path, remote_settings(upstream, tmp_path, models=[ECHO_KEY_MODEL]))
     try:
-        status, payload = error_of(lambda: chat(running, f"remote/friend/{ECHO_KEY_MODEL}"))
+        status, payload = error_of(lambda: chat(running, f"remote/remote/{ECHO_KEY_MODEL}"))
     finally:
         running.close()
     assert status == 502 and GOOD_KEY not in payload["error"] and "[key hidden]" in payload["error"]
@@ -157,7 +157,7 @@ def test_a_key_echoed_back_by_the_remote_server_is_hidden(tmp_path, upstream):
 def test_a_redirect_is_not_followed_so_the_key_goes_nowhere_else(tmp_path, upstream):
     running = make_engine(tmp_path, remote_settings(upstream, tmp_path, models=[REDIRECT_MODEL]))
     try:
-        status, payload = error_of(lambda: chat(running, f"remote/friend/{REDIRECT_MODEL}"))
+        status, payload = error_of(lambda: chat(running, f"remote/remote/{REDIRECT_MODEL}"))
     finally:
         running.close()
     assert status == 502 and "redirect (HTTP 302)" in payload["error"]
@@ -168,7 +168,7 @@ def test_a_remote_server_that_does_not_answer_in_time_is_a_504(tmp_path, upstrea
     running = make_engine(tmp_path, remote_settings(upstream, tmp_path, models=[SLOW_MODEL], timeout_seconds=1))
     started = time.monotonic()
     try:
-        status, payload = error_of(lambda: chat(running, f"remote/friend/{SLOW_MODEL}"))
+        status, payload = error_of(lambda: chat(running, f"remote/remote/{SLOW_MODEL}"))
     finally:
         running.close()
     assert status == 504 and "did not answer within 1 s" in payload["error"]
@@ -178,7 +178,7 @@ def test_a_remote_server_that_does_not_answer_in_time_is_a_504(tmp_path, upstrea
 def test_an_unreachable_remote_server_is_left_out_of_the_list_and_a_chat_says_why(tmp_path, upstream):
     address = upstream.url
     upstream.close()
-    running = make_engine(tmp_path, {"friend": {"url": address, "key_file": key_file(tmp_path)}})
+    running = make_engine(tmp_path, {"remote": {"url": address, "key_file": key_file(tmp_path)}})
     try:
         names = [model["name"] for model in http_json(f"{running.url}/api/tags")["models"]]
         status, payload = error_of(lambda: chat(running, QWEN))
@@ -189,7 +189,7 @@ def test_an_unreachable_remote_server_is_left_out_of_the_list_and_a_chat_says_wh
 
 
 def test_a_key_file_other_users_can_read_is_refused(tmp_path, upstream):
-    running = make_engine(tmp_path, {"friend": {"url": upstream.url, "key_file": key_file(tmp_path, mode=0o644),
+    running = make_engine(tmp_path, {"remote": {"url": upstream.url, "key_file": key_file(tmp_path, mode=0o644),
                                                 "models": ["Qwen3-14B-Q4_K_M"]}})
     try:
         status, payload = error_of(lambda: chat(running, QWEN))
@@ -201,7 +201,7 @@ def test_a_key_file_other_users_can_read_is_refused(tmp_path, upstream):
 
 def test_the_key_can_come_from_an_environment_variable(tmp_path, upstream, monkeypatch):
     monkeypatch.setenv(KEY_ENV, GOOD_KEY)
-    running = make_engine(tmp_path, {"friend": {"url": upstream.url, "key_env": KEY_ENV}})
+    running = make_engine(tmp_path, {"remote": {"url": upstream.url, "key_env": KEY_ENV}})
     try:
         reply = chat(running, QWEN)
     finally:
@@ -211,9 +211,9 @@ def test_the_key_can_come_from_an_environment_variable(tmp_path, upstream, monke
 
 def test_a_missing_environment_variable_says_which(tmp_path, upstream, monkeypatch):
     monkeypatch.delenv(KEY_ENV, raising=False)
-    running = make_engine(tmp_path, {"friend": {"url": upstream.url, "key_env": KEY_ENV, "models": ["x"]}})
+    running = make_engine(tmp_path, {"remote": {"url": upstream.url, "key_env": KEY_ENV, "models": ["x"]}})
     try:
-        status, payload = error_of(lambda: chat(running, "remote/friend/x"))
+        status, payload = error_of(lambda: chat(running, "remote/remote/x"))
     finally:
         running.close()
     assert status == 500 and f"${KEY_ENV} is not set" in payload["error"]
@@ -225,7 +225,7 @@ def test_listed_models_in_the_config_skip_asking_the_server(tmp_path, upstream):
         names = [model["name"] for model in http_json(f"{running.url}/api/tags")["models"] if model["name"].startswith("remote/")]
     finally:
         running.close()
-    assert names == ["remote/friend/only-this"] and upstream.listings == 0
+    assert names == ["remote/remote/only-this"] and upstream.listings == 0
 
 
 def test_the_model_list_is_asked_for_once_a_minute_not_on_every_listing(engine, upstream):
@@ -237,14 +237,14 @@ def test_the_model_list_is_asked_for_once_a_minute_not_on_every_listing(engine, 
 
 def test_thinking_switches_reach_the_remote_server_only_when_it_is_marked_as_thinking(tmp_path, upstream):
     plain = make_engine(tmp_path / "plain", remote_settings(upstream, tmp_path, models=["m"]))
-    thinking = make_engine(tmp_path / "thinking", {"friend": {"url": upstream.url, "key_file": key_file(tmp_path),
+    thinking = make_engine(tmp_path / "thinking", {"remote": {"url": upstream.url, "key_file": key_file(tmp_path),
                                                               "models": ["m"], "capabilities": ["tools", "thinking"]}})
     try:
-        chat(plain, "remote/friend/m", think=False)
+        chat(plain, "remote/remote/m", think=False)
         without = upstream.requests[-1]["body"]
-        chat(thinking, "remote/friend/m", think=True)
+        chat(thinking, "remote/remote/m", think=True)
         with_switch = upstream.requests[-1]["body"]
-        status, payload = error_of(lambda: chat(plain, "remote/friend/m", think=True))
+        status, payload = error_of(lambda: chat(plain, "remote/remote/m", think=True))
     finally:
         plain.close()
         thinking.close()
@@ -253,7 +253,7 @@ def test_thinking_switches_reach_the_remote_server_only_when_it_is_marked_as_thi
     assert status == 400 and "does not support thinking" in payload["error"]
 
 
-@pytest.mark.parametrize("model", ["remote/nobody/x", "remote/friend/not-there"])
+@pytest.mark.parametrize("model", ["remote/nobody/x", "remote/remote/not-there"])
 def test_an_unknown_remote_model_is_a_404(engine, model):
     status, payload = error_of(lambda: chat(engine, model))
     assert status == 404 and "not found" in payload["error"]
@@ -273,7 +273,7 @@ def test_remote_models_are_not_embedded_rendered_pulled_or_deleted(engine):
 
 def test_the_key_never_reaches_the_engine_log(tmp_path, upstream, caplog):
     caplog.set_level(logging.DEBUG)
-    running = make_engine(tmp_path, {"friend": {"url": upstream.url, "key_file": key_file(tmp_path, "sf_wrong_and_secret")},
+    running = make_engine(tmp_path, {"remote": {"url": upstream.url, "key_file": key_file(tmp_path, "sf_wrong_and_secret")},
                                      "other": {"url": upstream.url, "key_file": key_file(tmp_path, file_name="other.key")}})
     try:
         http_json(f"{running.url}/api/tags")
@@ -286,17 +286,17 @@ def test_the_key_never_reaches_the_engine_log(tmp_path, upstream, caplog):
 
 
 @pytest.mark.parametrize("settings, words", [
-    ({"friend": {"url": "https://x.example/v1", "key": "sf_inline"}}, "never put the key in the config"),
-    ({"friend": {"url": "https://x.example/v1", "api_key": "sf_inline"}}, "never put the key in the config"),
-    ({"Friend": {"url": "https://x.example/v1"}}, "lower case"),
-    ({"friend": {"url": "ftp://x.example/v1"}}, "http:// or https://"),
-    ({"friend": {"url": "https://user:pass@x.example/v1"}}, "no user, password"),
-    ({"friend": {"key_file": "/k"}}, "url is required"),
-    ({"friend": {"url": "https://x.example/v1", "key_file": "/k", "key_env": "K"}}, "not both"),
-    ({"friend": {"url": "https://x.example/v1", "capabilities": ["embedding"]}}, "capabilities"),
-    ({"friend": {"url": "https://x.example/v1", "timeout_seconds": 0}}, "timeout_seconds"),
-    ({"friend": {"url": "https://x.example/v1", "colour": "red"}}, "unknown settings colour"),
-    (["friend"], "remote_models must be an object"),
+    ({"remote": {"url": "https://x.example/v1", "key": "sf_inline"}}, "never put the key in the config"),
+    ({"remote": {"url": "https://x.example/v1", "api_key": "sf_inline"}}, "never put the key in the config"),
+    ({"Remote": {"url": "https://x.example/v1"}}, "lower case"),
+    ({"remote": {"url": "ftp://x.example/v1"}}, "http:// or https://"),
+    ({"remote": {"url": "https://user:pass@x.example/v1"}}, "no user, password"),
+    ({"remote": {"key_file": "/k"}}, "url is required"),
+    ({"remote": {"url": "https://x.example/v1", "key_file": "/k", "key_env": "K"}}, "not both"),
+    ({"remote": {"url": "https://x.example/v1", "capabilities": ["embedding"]}}, "capabilities"),
+    ({"remote": {"url": "https://x.example/v1", "timeout_seconds": 0}}, "timeout_seconds"),
+    ({"remote": {"url": "https://x.example/v1", "colour": "red"}}, "unknown settings colour"),
+    (["remote"], "remote_models must be an object"),
 ])
 def test_bad_remote_settings_are_refused_when_the_config_loads(settings, words):
     with pytest.raises(ValueError, match=words):
@@ -305,24 +305,24 @@ def test_bad_remote_settings_are_refused_when_the_config_loads(settings, words):
 
 def test_a_config_file_with_remote_models_loads(tmp_path):
     path = tmp_path / "engine.json"
-    path.write_text(json.dumps({"remote_models": {"friend": {"url": "https://x.example/v1", "key_file": "/srv/k"}}}))
-    assert load_config(str(path)).remote_models["friend"]["key_file"] == "/srv/k"
+    path.write_text(json.dumps({"remote_models": {"remote": {"url": "https://x.example/v1", "key_file": "/srv/k"}}}))
+    assert load_config(str(path)).remote_models["remote"]["key_file"] == "/srv/k"
 
 
 def test_write_config_adds_the_sites_remote_models(tmp_path):
     remotes = tmp_path / "remote-models.json"
-    remotes.write_text(json.dumps({"friend": {"url": "https://x.example/v1", "key_file": "/srv/k"}}))
+    remotes.write_text(json.dumps({"remote": {"url": "https://x.example/v1", "key_file": "/srv/k"}}))
     target = tmp_path / "engine.json"
     finished = subprocess.run([sys.executable, str(REPO / "tools" / "write_config.py"), str(REPO / "deploy" / "engine.json"),
                                str(target), "--trainer-url", "", "--remote-models", str(remotes)],
                               capture_output=True, text=True, timeout=60)
     assert finished.returncode == 0, finished.stderr
-    assert json.loads(target.read_text())["remote_models"] == {"friend": {"url": "https://x.example/v1", "key_file": "/srv/k"}}
+    assert json.loads(target.read_text())["remote_models"] == {"remote": {"url": "https://x.example/v1", "key_file": "/srv/k"}}
 
 
 def test_write_config_refuses_remote_models_with_a_key_in_them(tmp_path):
     remotes = tmp_path / "remote-models.json"
-    remotes.write_text(json.dumps({"friend": {"url": "https://x.example/v1", "key": "sf_inline"}}))
+    remotes.write_text(json.dumps({"remote": {"url": "https://x.example/v1", "key": "sf_inline"}}))
     target = tmp_path / "engine.json"
     finished = subprocess.run([sys.executable, str(REPO / "tools" / "write_config.py"), str(REPO / "deploy" / "engine.json"),
                                str(target), "--trainer-url", "", "--remote-models", str(remotes)],
@@ -374,7 +374,7 @@ def test_listed_models_of_an_unreachable_server_are_unavailable(tmp_path):
         listed = tags_by_name(running)
     finally:
         running.close()
-    assert listed["remote/friend/only-this"]["available"] is False
+    assert listed["remote/remote/only-this"]["available"] is False
 
 
 def test_the_servers_are_checked_on_a_timer(tmp_path, upstream):
@@ -393,7 +393,7 @@ def test_the_servers_are_checked_on_a_timer(tmp_path, upstream):
 def test_an_offline_model_is_a_clear_503(tmp_path, upstream):
     running = make_engine(tmp_path, remote_settings(upstream, tmp_path, models=[OFFLINE_MODEL]))
     try:
-        status, payload = error_of(lambda: chat(running, f"remote/friend/{OFFLINE_MODEL}"))
+        status, payload = error_of(lambda: chat(running, f"remote/remote/{OFFLINE_MODEL}"))
     finally:
         running.close()
     assert status == 503 and "is offline right now" in payload["error"]
@@ -413,7 +413,7 @@ def test_a_check_failure_is_logged_once_not_every_minute(tmp_path, caplog):
 
 
 def test_while_a_server_is_offline_the_model_list_waits_for_the_timer_not_for_it(engine, upstream, monkeypatch):
-    remote = engine.engine.remotes.by_name["friend"]
+    remote = engine.engine.remotes.by_name["remote"]
     tags_by_name(engine)
     monkeypatch.setattr(remote, "list_failure", remote_module.RemoteError(502, "down"))
     monkeypatch.setattr(remote, "listed_at", time.monotonic() - 3600)
@@ -422,7 +422,7 @@ def test_while_a_server_is_offline_the_model_list_waits_for_the_timer_not_for_it
     assert upstream.listings == before and listed[QWEN]["available"] is False
 
 
-CONNECTION_IDS = ["0123456789ab/Friend-Model", "abcdef012345/Other:Q8", "0123456789ab/Same", "abcdef012345/Same"]
+CONNECTION_IDS = ["0123456789ab/Model", "abcdef012345/Other:Q8", "0123456789ab/Same", "abcdef012345/Same"]
 
 
 @pytest.fixture
@@ -437,32 +437,32 @@ def starfire_like(tmp_path):
 def test_connection_ids_are_left_out_of_names_when_the_model_is_unique(starfire_like):
     running, _ = starfire_like
     names = sorted(name for name in tags_by_name(running) if name.startswith("remote/"))
-    assert names == ["remote/starfire/friend-model", "remote/starfire/other-q8",
+    assert names == ["remote/starfire/model", "remote/starfire/other-q8",
                      "remote/starfire/same-012345", "remote/starfire/same-abcdef"]
 
 
 def test_a_short_name_chats_with_the_full_connection_id(starfire_like):
     running, server = starfire_like
-    chat(running, "remote/starfire/friend-model")
+    chat(running, "remote/starfire/model")
     chat(running, "remote/starfire/same-abcdef")
-    assert [sent["body"]["model"] for sent in server.requests] == ["0123456789ab/Friend-Model", "abcdef012345/Same"]
+    assert [sent["body"]["model"] for sent in server.requests] == ["0123456789ab/Model", "abcdef012345/Same"]
 
 
 def test_the_full_connection_id_name_also_works(starfire_like):
     running, server = starfire_like
-    chat(running, "remote/starfire/0123456789ab-friend-model")
-    assert server.requests[-1]["body"]["model"] == "0123456789ab/Friend-Model"
+    chat(running, "remote/starfire/0123456789ab-model")
+    assert server.requests[-1]["body"]["model"] == "0123456789ab/Model"
 
 
 def test_a_model_the_server_got_from_this_engine_s_remotes_is_never_listed_again():
     answer = {"data": [
         {"id": "0123456789ab/remote/starfire/qwen3-14b"},
         {"id": "0123456789ab/qwen3:14b"},
-        {"id": "remote/starfire/friend-big"},
-        {"id": "fedcba987654/friend-big"}]}
+        {"id": "remote/starfire/model-b"},
+        {"id": "fedcba987654/model-b"}]}
     listed = remote_module.listed_models(answer)
     assert sorted(upstream for upstream, _available in listed.values()) == [
-        "0123456789ab/qwen3:14b", "fedcba987654/friend-big"]
+        "0123456789ab/qwen3:14b", "fedcba987654/model-b"]
 
 
 def test_a_remote_model_relayed_under_any_prefix_shape_is_never_listed_again():

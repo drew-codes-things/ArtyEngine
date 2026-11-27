@@ -179,7 +179,7 @@ LEAKED = "Yes, 14 orange stars.</think>14"
 @pytest.mark.parametrize("keep_thinking, thinking", [(True, "Yes, 14 orange stars."), (False, None)])
 def test_reasoning_leaked_into_a_reply_is_moved_or_dropped(keep_thinking, thinking):
     completion = {"choices": [{"finish_reason": "stop", "message": {"content": LEAKED}}]}
-    reply = translate.chat_reply("mimo-v2.6:9b", completion, 0, 0, keep_thinking=keep_thinking,
+    reply = translate.chat_reply("looker-v2:9b", completion, 0, 0, keep_thinking=keep_thinking,
                                  splitter=translate.LeakSplitter())
     assert reply["message"]["content"] == "14"
     assert reply["message"].get("thinking") == thinking
@@ -187,7 +187,7 @@ def test_reasoning_leaked_into_a_reply_is_moved_or_dropped(keep_thinking, thinki
 
 def stream_of(pieces, can_leak=True, keep_thinking=True, reasoning_first=False):
     splitter = translate.LeakSplitter() if can_leak else None
-    stream = translate.StreamTranslator("mimo-v2.6:9b", 0.0, 0.0, keep_thinking=keep_thinking, splitter=splitter)
+    stream = translate.StreamTranslator("looker-v2:9b", 0.0, 0.0, keep_thinking=keep_thinking, splitter=splitter)
     chunks = []
     if reasoning_first:
         chunks.append(stream.feed({"choices": [{"delta": {"reasoning_content": "plan"}}]}))
@@ -269,7 +269,7 @@ def test_a_model_that_cannot_leak_streams_think_tags_as_it_wrote_them():
 
 
 def leaker_reply(text, keep_thinking, finish="stop", reasoning="", piece_size=None, named_leaker=False):
-    stream = translate.StreamTranslator("mimo-v2.6:9b", 0.0, 0.0, keep_thinking=keep_thinking,
+    stream = translate.StreamTranslator("looker-v2:9b", 0.0, 0.0, keep_thinking=keep_thinking,
                                         splitter=translate.LeakSplitter(named_leaker=named_leaker))
     chunks = stream.feed({"choices": [{"delta": {"reasoning_content": reasoning}}]}) if reasoning else []
     pieces = re.findall(r"\s*\S+\s*|\s+", text) if piece_size is None else [text[index:index + piece_size]
@@ -279,7 +279,7 @@ def leaker_reply(text, keep_thinking, finish="stop", reasoning="", piece_size=No
     chunks += stream.feed({"choices": [{"delta": {}, "finish_reason": finish}]}) + stream.finish_chunks()
     streamed = ("".join(chunk["message"].get("content", "") for chunk in chunks),
                 "".join(chunk["message"].get("thinking", "") for chunk in chunks))
-    message = translate.chat_reply("mimo-v2.6:9b", {"choices": [{"finish_reason": finish, "message": {
+    message = translate.chat_reply("looker-v2:9b", {"choices": [{"finish_reason": finish, "message": {
         "content": text, **({"reasoning_content": reasoning} if reasoning else {})}}]}, 0, 0,
         keep_thinking=keep_thinking, splitter=translate.LeakSplitter(named_leaker=named_leaker))["message"]
     return streamed, (message["content"], message.get("thinking", ""))

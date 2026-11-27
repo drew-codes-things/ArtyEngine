@@ -41,8 +41,8 @@
 ## The shipped config
 
 The shipped `deploy/engine.json` is Arty's setup, not these defaults: a 24576 context, models kept loaded
-(`default_keep_alive` `-1`), n-gram speculation for `qwen3:14b` and `mimo-v2.6:9b`, the Qwen3-0.6B draft listed
-as an internal model, `mimo-v2.6:9b` as a thinking leaker, and `gpu_backend` `cuda`.
+(`default_keep_alive` `-1`), n-gram speculation for `qwen3:14b`, the Qwen3-0.6B draft listed as an internal model,
+no thinking leakers, and `gpu_backend` `cuda`.
 
 ## Choosing a GPU backend
 
@@ -69,9 +69,9 @@ answers `load` or `unload` straight away.
 
 ```json
 "remote_models": {
-  "friend": {
+  "remote": {
     "url": "https://models.example.com/v1",
-    "key_file": "/srv/ai/arty-engine/secrets/friend.key",
+    "key_file": "/srv/ai/arty-engine/secrets/remote.key",
     "capabilities": ["tools"],
     "timeout_seconds": 300
   }

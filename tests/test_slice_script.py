@@ -82,6 +82,7 @@ def marker_command(environment):
 
 def test_a_slice_holds_training_off_from_before_the_unload_until_after_the_reload(slice_world):
     recorder, environment, folder = slice_world
+    (folder / "site.env").write_text("ARTY_MAIN_MODEL=big-main:35b\n")
     finished = run_slice(environment, *marker_command(environment))
     assert finished.returncode == 0, finished.stdout + finished.stderr
     controller_paths = [path for _, path, _ in recorder.calls("controller")]
@@ -171,11 +172,20 @@ def test_the_settings_are_shown_without_taking_the_gpu(slice_world):
 
 def test_a_slice_puts_back_the_main_model_the_site_names(slice_world):
     recorder, environment, folder = slice_world
-    (folder / "site.env").write_text("ARTY_MAIN_MODEL=mimo-v2.6:9b\n")
+    (folder / "site.env").write_text("ARTY_MAIN_MODEL=looker-v2:9b\n")
     finished = run_slice(environment, "true")
     assert finished.returncode == 0, finished.stdout + finished.stderr
     reloads = [body for method, path, body in recorder.calls("engine") if body and "keep_alive" not in body]
-    assert reloads == [{"model": "mimo-v2.6:9b"}]
+    assert reloads == [{"model": "looker-v2:9b"}]
+
+
+def test_a_slice_without_a_main_model_setting_reloads_no_model_at_all(slice_world):
+    recorder, environment, folder = slice_world
+    finished = run_slice(environment, "true")
+    assert finished.returncode == 0, finished.stdout + finished.stderr
+    reloads = [body for method, path, body in recorder.calls("engine") if body and "keep_alive" not in body]
+    assert reloads == [] and "qwen3:14b" not in finished.stdout
+    assert "no ARTY_MAIN_MODEL" in finished.stdout
 
 
 def test_show_settings_names_the_engine_and_reload_ports(slice_world):

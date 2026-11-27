@@ -82,8 +82,8 @@ def test_migrated_models_keep_their_parts_sizes_and_times(old_store, tmp_path):
     assert qwen3.details["parameter_size"] == "14.8B" and qwen3.params == {"temperature": 0.6}
     assert qwen3.size == sum(layer["size"] for layer in qwen3.manifest["layers"]) + qwen3.manifest["config"]["size"]
     assert int(qwen3.modified_at.timestamp() * 1e9) == pytest.approx(OLD_TIME_NS, abs=1000)
-    mimo = store.get("mimo-v2.6:9b")
-    assert mimo.projector_path is not None and mimo.projector_path.is_file() and "vision" in mimo.capabilities
+    looker = store.get("looker-v2:9b")
+    assert looker.projector_path is not None and looker.projector_path.is_file() and "vision" in looker.capabilities
     vision = store.get("qwen2.5vl:7b")
     assert not vision.runnable and vision.system == "You are helpful."
     assert "not supported by ArtyEngine" in vision.unrunnable_reason

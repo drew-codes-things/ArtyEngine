@@ -168,7 +168,7 @@ def test_the_switch_drops_nothing_when_the_site_names_nothing(tmp_path):
 
 
 def test_the_switch_moves_arty_over_before_it_fails_on_the_controller(tmp_path):
-    finished = run_engine_switch(tmp_path, 3)
+    finished = run_engine_switch(tmp_path, 3, "ARTY_MAIN_MODEL=big-main:35b\n")
     assert finished.returncode != 0
     assert "brain-through-engine.conf" in calls(tmp_path) and "keep_alive" in calls(tmp_path)
     assert "trainer-controller is not running" in finished.stderr.rstrip().splitlines()[-1]
@@ -207,9 +207,16 @@ def test_an_engine_that_does_not_answer_ends_with_where_arty_stands(tmp_path):
 
 
 def test_a_main_model_that_does_not_load_after_the_move_is_named_last(tmp_path):
-    finished = run_engine_switch(tmp_path, 0, ct_refuses="keep_alive")
+    finished = run_engine_switch(tmp_path, 0, "ARTY_MAIN_MODEL=big-main:35b\n", ct_refuses="keep_alive")
     assert finished.returncode != 0
-    assert "Arty now uses the engine" in last_line(finished) and "qwen3:14b" in last_line(finished)
+    assert "Arty now uses the engine" in last_line(finished) and "big-main:35b" in last_line(finished)
+
+
+def test_without_a_main_model_setting_the_switch_loads_no_model_at_all(tmp_path):
+    finished = run_engine_switch(tmp_path, 0)
+    assert finished.returncode == 0, finished.stdout + finished.stderr
+    assert "keep_alive" not in calls(tmp_path) and "qwen3:14b" not in finished.stdout + finished.stderr
+    assert "no ARTY_MAIN_MODEL" in finished.stdout
 
 
 def test_a_config_that_cannot_be_written_says_nothing_was_started_or_moved(tmp_path):

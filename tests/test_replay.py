@@ -60,7 +60,7 @@ def test_render_only_returns_the_template_the_runner_rendered(engine):
 
 
 def test_render_only_counts_images(engine):
-    shown = http_json(f"{engine.url}/api/chat", {"model": "mimo:9b", "stream": False, "_debug_render_only": True,
+    shown = http_json(f"{engine.url}/api/chat", {"model": "looker:9b", "stream": False, "_debug_render_only": True,
                                                  "messages": [{"role": "user", "content": "what", "images": ["iVBORw0KGgo="]}]})
     assert shown["_debug_info"] == {"rendered_template": RENDERED, "image_count": 1}
     assert upstream(engine, "/apply-template")[-1]["messages"][0]["content"][1]["type"] == "image_url"
@@ -106,6 +106,6 @@ def test_the_brains_empty_reply_replay_gets_what_the_model_wrote(engine):
 
 
 def test_raw_images_are_still_refused_clearly(engine):
-    status, body = error_of(lambda: http_json(f"{engine.url}/api/generate", {"model": "mimo:9b", "prompt": "x", "raw": True,
+    status, body = error_of(lambda: http_json(f"{engine.url}/api/generate", {"model": "looker:9b", "prompt": "x", "raw": True,
                                                                                "images": ["iVBORw0KGgo="], "stream": False}))
     assert status == 501 and "images" in body["error"]

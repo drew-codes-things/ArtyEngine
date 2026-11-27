@@ -132,7 +132,7 @@ def engine(tmp_path):
 
 def test_tags_lists_every_model(engine):
     models = http_json(f"{engine.url}/api/tags")["models"]
-    assert {model["name"] for model in models} >= {"qwen3:14b", "mimo:9b", "nomic-embed-text:latest"}
+    assert {model["name"] for model in models} >= {"qwen3:14b", "looker:9b", "nomic-embed-text:latest"}
     assert all(set(model) == {"name", "model", "modified_at", "size", "digest", "details", "capabilities"} for model in models)
 
 
@@ -251,9 +251,9 @@ def test_json_nested_too_deep_is_a_400(engine, body):
 @pytest.mark.parametrize("images", [5, "abc", {"a": 1}])
 def test_images_that_are_not_a_list_are_a_400(engine, images):
     message = {"role": "user", "content": "x", "images": images}
-    status, body = chat_answer(engine, model="mimo:9b", messages=[message])
+    status, body = chat_answer(engine, model="looker:9b", messages=[message])
     assert status == 400 and "images" in body["error"]
-    status, body = error_of(lambda: http_json(f"{engine.url}/api/generate", {"model": "mimo:9b", "stream": False, "prompt": "x", "images": images}))
+    status, body = error_of(lambda: http_json(f"{engine.url}/api/generate", {"model": "looker:9b", "stream": False, "prompt": "x", "images": images}))
     assert status == 400 and "images" in body["error"]
     assert engine.upstream_requests() == []
 
@@ -437,8 +437,8 @@ def streamed_lines(engine, path, body):
 @pytest.mark.parametrize("think, thinking", [(None, "Yes, 14 orange stars."), (False, "")])
 def test_leaked_reasoning_never_reaches_chat_or_generate_as_content(engine, think, thinking):
     extra = {} if think is None else {"think": think}
-    chat = {"model": "mimo:9b", "messages": [{"role": "user", "content": LEAK_PROMPT}], **extra}
-    generate = {"model": "mimo:9b", "prompt": LEAK_PROMPT, **extra}
+    chat = {"model": "looker:9b", "messages": [{"role": "user", "content": LEAK_PROMPT}], **extra}
+    generate = {"model": "looker:9b", "prompt": LEAK_PROMPT, **extra}
     reply = http_json(f"{engine.url}/api/chat", {**chat, "stream": False})
     assert reply["message"]["content"] == "14" and reply["message"].get("thinking", "") == thinking
     assert http_json(f"{engine.url}/api/generate", {**generate, "stream": False})["response"] == "14"
@@ -480,8 +480,8 @@ def test_think_tags_in_the_answer_of_a_model_that_cannot_leak_arrive_intact(engi
 
 def leaker_answers(engine, prompt, think, stream):
     extra = {} if think is None else {"think": think}
-    chat = {"model": "mimo:9b", "messages": [{"role": "user", "content": prompt}], **extra}
-    generate = {"model": "mimo:9b", "prompt": prompt, **extra}
+    chat = {"model": "looker:9b", "messages": [{"role": "user", "content": prompt}], **extra}
+    generate = {"model": "looker:9b", "prompt": prompt, **extra}
     if not stream:
         reply = http_json(f"{engine.url}/api/chat", {**chat, "stream": False})
         response = http_json(f"{engine.url}/api/generate", {**generate, "stream": False})["response"]
@@ -520,7 +520,7 @@ def test_a_think_tag_after_a_leaker_s_answer_started_is_logged(engine, caplog):
     assert "think tag" not in caplog.text
     content, _, _ = leaker_answers(engine, LATE_TAG_PROMPT, False, True)
     assert content == "Two rows."
-    assert "mimo:9b" in caplog.text and "think tag" in caplog.text
+    assert "looker:9b" in caplog.text and "think tag" in caplog.text
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -529,7 +529,7 @@ def test_a_tagless_reply_cut_by_the_length_limit_is_delivered_and_logged(engine,
     content, thinking, response = leaker_answers(engine, TAGLESS_CUT_PROMPT, False, stream)
     expected = "".join(word + " " for word in UNLISTED_OPENER_REASONING.split(" "))
     assert content == expected and response == expected and thinking == ""
-    assert "mimo:9b stopped at the length limit before any think tag" in caplog.text
+    assert "looker:9b stopped at the length limit before any think tag" in caplog.text
 
 
 @pytest.mark.parametrize("stream", [False, True])
@@ -554,7 +554,7 @@ def test_a_template_only_leaker_s_answer_is_left_alone_after_the_runner_s_reason
 @pytest.mark.parametrize("think", [None, False])
 def test_a_named_leaker_s_reply_after_the_runner_s_reasoning_is_the_same_streamed_and_not(tmp_path, think, caplog):
     caplog.set_level("INFO")
-    running = RunningEngine(tmp_path, REPLIES, default_keep_alive="-1", thinking_leakers=["mimo:9b"])
+    running = RunningEngine(tmp_path, REPLIES, default_keep_alive="-1", thinking_leakers=["looker:9b"])
     try:
         plain = leaker_answers(running, REASONED_CODE_PROMPT, think, False)
         streamed = leaker_answers(running, REASONED_CODE_PROMPT, think, True)
@@ -562,7 +562,7 @@ def test_a_named_leaker_s_reply_after_the_runner_s_reasoning_is_the_same_streame
         running.close()
     assert streamed == plain
     assert plain[0] == 'return re.sub(r"", "", text, flags=re.DOTALL)'
-    assert "mimo:9b wrote 2 think tag(s)" in caplog.text
+    assert "looker:9b wrote 2 think tag(s)" in caplog.text
     assert "leak caught" not in caplog.text
 
 
@@ -573,7 +573,7 @@ def test_a_reply_cut_inside_reasoning_that_follows_its_first_words_keeps_only_th
     content, thinking, response = leaker_answers(engine, CUT_MID_TAG_PROMPT, think, stream)
     assert content == "Okay.\n" and response == "Okay.\n"
     assert thinking == ("" if think is False else UNLISTED_OPENER_REASONING)
-    assert "mimo:9b wrote 1 think tag(s) after its answer had started" in caplog.text
+    assert "looker:9b wrote 1 think tag(s) after its answer had started" in caplog.text
 
 
 def test_every_reply_with_a_caught_leak_is_logged_and_counted_at_the_normal_level(engine, caplog):
@@ -583,21 +583,21 @@ def test_every_reply_with_a_caught_leak_is_logged_and_counted_at_the_normal_leve
     assert "leak caught" not in caplog.text
     leaker_answers(engine, BLANK_LINES_PROMPT, False, False)
     leaker_answers(engine, BLANK_LINES_PROMPT, False, True)
-    caught = [record for record in caplog.records if record.getMessage().startswith("leak caught: mimo:9b")]
+    caught = [record for record in caplog.records if record.getMessage().startswith("leak caught: looker:9b")]
     assert [record.levelname for record in caught] == ["INFO"] * 4
     assert all("moved to thinking: text before the first closing tag: 1 move(s), 21 characters" in record.getMessage()
                for record in caught)
     assert [record.getMessage().split("(")[-1] for record in caught] == [
-        f"{count} replies of mimo:9b with a caught leak since the engine started)" for count in range(1, 5)]
+        f"{count} replies of looker:9b with a caught leak since the engine started)" for count in range(1, 5)]
 
 
 def test_a_caught_leak_is_counted_when_the_runner_fails_after_it(engine, caplog):
     caplog.set_level("INFO")
-    lines = streamed_lines(engine, "/api/chat", {"model": "mimo:9b", "think": False,
+    lines = streamed_lines(engine, "/api/chat", {"model": "looker:9b", "think": False,
                                                  "messages": [{"role": "user", "content": BROKEN_AFTER_LEAK_PROMPT}]})
     assert "the runner fell over" in lines[-1]["error"]
-    assert engine.engine.replies_with_leaks["mimo:9b"] == 1
-    assert "leak caught: mimo:9b" in caplog.text
+    assert engine.engine.replies_with_leaks["looker:9b"] == 1
+    assert "leak caught: looker:9b" in caplog.text
 
 
 def leaks_counted_within(engine, model_name: str, seconds: float) -> int:
@@ -608,14 +608,14 @@ def leaks_counted_within(engine, model_name: str, seconds: float) -> int:
 
 
 def test_a_caught_leak_is_counted_when_the_reader_hangs_up(engine):
-    body = json.dumps({"model": "mimo:9b", "think": False, "stream": True,
+    body = json.dumps({"model": "looker:9b", "think": False, "stream": True,
                        "messages": [{"role": "user", "content": LONG_AFTER_LEAK_PROMPT}]}).encode()
     port = engine.http.server_address[1]
     with socket.create_connection(("127.0.0.1", port), timeout=30) as reader:
         reader.sendall(f"POST /api/chat HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nContent-Type: application/json\r\n"
                        f"Content-Length: {len(body)}\r\n\r\n".encode() + body)
         assert len(reader.recv(HANG_UP_AFTER_BYTES)) > 0
-    assert leaks_counted_within(engine, "mimo:9b", COUNT_WAIT_SECONDS) == 1
+    assert leaks_counted_within(engine, "looker:9b", COUNT_WAIT_SECONDS) == 1
 
 
 LEAK_LINE_LIMIT = 500
@@ -626,7 +626,7 @@ def test_the_leak_line_stays_short_however_many_blocks_a_reply_has(engine, caplo
     splitter = translate.LeakSplitter()
     splitter.feed("x</think>a" + " <think>b</think>" * 3000)
     splitter.finish("stop")
-    engine.engine.report_leak_signs("mimo:9b", splitter)
+    engine.engine.report_leak_signs("looker:9b", splitter)
     line = next(record.getMessage() for record in caplog.records if record.getMessage().startswith("leak caught"))
     assert "a tagged block in the answer: 3000 move(s), 3000 characters" in line and len(line) < LEAK_LINE_LIMIT
 
@@ -638,7 +638,7 @@ def count_when_sent(engine, monkeypatch, method_name: str, is_last) -> list[int]
 
     def spying(self, *arguments):
         if is_last(arguments):
-            seen.append(engine.engine.replies_with_leaks["mimo:9b"])
+            seen.append(engine.engine.replies_with_leaks["looker:9b"])
         return original(self, *arguments)
 
     monkeypatch.setattr(handler, method_name, spying)
@@ -653,7 +653,7 @@ def test_a_plain_reply_is_counted_before_it_is_sent(engine, monkeypatch):
 
 def test_a_stream_is_counted_before_its_last_line_is_sent(engine, monkeypatch):
     seen = count_when_sent(engine, monkeypatch, "_stream_line", lambda arguments: arguments[0].get("done") is True)
-    streamed_lines(engine, "/api/chat", {"model": "mimo:9b", "think": False,
+    streamed_lines(engine, "/api/chat", {"model": "looker:9b", "think": False,
                                          "messages": [{"role": "user", "content": BLANK_LINES_PROMPT}]})
     assert seen == [1]
 

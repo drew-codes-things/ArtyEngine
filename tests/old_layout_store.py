@@ -65,11 +65,11 @@ def build_old_store(root: Path) -> Path:
     _link(root, SHORT_HOST, "library", "qwen3", "14b", qwen3_digest)
     older_copy = {**qwen3, "layers": qwen3["layers"] + [{"mediaType": DOCKER_MANIFEST, "digest": qwen3_digest, "size": 1}]}
     _file(root, "manifests", REGISTRY_HOST, "library", "qwen3", "14b", older_copy)
-    mimo = _old_manifest(root, VISION_TEXT, {"blk.0.w": (10, 10)}, projector={"general.architecture": "clip"})
+    looker = _old_manifest(root, VISION_TEXT, {"blk.0.w": (10, 10)}, projector={"general.architecture": "clip"})
     listing = {"schemaVersion": 2, "mediaType": f"{VENDOR}.manifest.list.v2+json", "manifests": [
-        {"mediaType": DOCKER_MANIFEST, "digest": _blob(root, json.dumps(mimo).encode()), "runner": "native", "format": "gguf"},
+        {"mediaType": DOCKER_MANIFEST, "digest": _blob(root, json.dumps(looker).encode()), "runner": "native", "format": "gguf"},
         {"mediaType": DOCKER_MANIFEST, "digest": "sha256:" + "0" * 64, "runner": "other", "format": "safetensors"}]}
-    _link(root, SHORT_HOST, "library", "mimo-v2.6", "9b", _blob(root, json.dumps(listing).encode()))
+    _link(root, SHORT_HOST, "library", "looker-v2", "9b", _blob(root, json.dumps(listing).encode()))
     vision = _old_manifest(root, INLINE_VISION, {"blk.0.w": (10, 10), "v.blk.0.w": (10, 10)}, system="You are helpful.")
     _link(root, SHORT_HOST, "library", "qwen2.5vl", "7b", _blob(root, json.dumps(vision).encode()))
     _file(root, "manifests", REGISTRY_HOST, "library", "nomic-embed-text", "latest", _old_manifest(root, EMBED, {"blk.0.w": (10, 10)}))
@@ -81,7 +81,7 @@ def build_old_store(root: Path) -> Path:
     return root
 
 
-EXPECTED_NAMES = {"qwen3:14b", "mimo-v2.6:9b", "qwen2.5vl:7b", "nomic-embed-text:latest", "hf.co/Someone/Tiny-GGUF:Q8_0",
+EXPECTED_NAMES = {"qwen3:14b", "looker-v2:9b", "qwen2.5vl:7b", "nomic-embed-text:latest", "hf.co/Someone/Tiny-GGUF:Q8_0",
                   "someone/custom:1"}
 
 

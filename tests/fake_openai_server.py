@@ -4,7 +4,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 GOOD_KEY = "sf_test_0123456789abcdef"
-LISTED_MODELS = ["Qwen3-14B-Q4_K_M", "friend/Big-Model:Q8"]
+LISTED_MODELS = ["Qwen3-14B-Q4_K_M", "remote-a/model:Q8"]
 LIMITED_MODEL = "limited"
 FORBIDDEN_MODEL = "forbidden"
 SLOW_MODEL = "slow"

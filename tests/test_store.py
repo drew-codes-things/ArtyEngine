@@ -21,7 +21,7 @@ def store(tmp_path):
 
 
 def test_lists_every_model_in_the_catalog(store):
-    assert sorted(store.names()) == ["mimo:9b", "nomic-embed-text:latest", "qwen2.5vl:7b", "qwen3:14b", "untemplated:latest"]
+    assert sorted(store.names()) == ["looker:9b", "nomic-embed-text:latest", "qwen2.5vl:7b", "qwen3:14b", "untemplated:latest"]
 
 
 def test_short_and_full_names_find_the_same_model(store):
@@ -38,12 +38,12 @@ def test_digest_is_the_manifest_digest_and_size_counts_layers_and_config(store):
 
 def test_capabilities_come_from_the_template_and_projector(store):
     assert store.get("qwen3:14b").capabilities == ["completion", "tools", "thinking"]
-    assert store.get("mimo:9b").capabilities == ["completion", "vision", "tools", "thinking"]
+    assert store.get("looker:9b").capabilities == ["completion", "vision", "tools", "thinking"]
     assert store.get("nomic-embed-text").capabilities == ["embedding"]
 
 
 def test_a_vision_model_runs_with_its_projector(store):
-    model = store.get("mimo:9b")
+    model = store.get("looker:9b")
     assert model.projector_path is not None and model.projector_path.exists()
     assert model.runnable
 
@@ -75,8 +75,8 @@ def test_details_match_the_tags_shape(store):
 
 
 def test_parameter_size_is_the_one_stored_with_the_model(tmp_path):
-    add_model(tmp_path, "mimo-v2.6", "9b", QWEN3, {"token_embd.weight": (4, 4)}, config_fields={"model_type": "9.0B"})
-    assert ModelStore([tmp_path]).get("mimo-v2.6:9b").details["parameter_size"] == "9.0B"
+    add_model(tmp_path, "looker-v2", "9b", QWEN3, {"token_embd.weight": (4, 4)}, config_fields={"model_type": "9.0B"})
+    assert ModelStore([tmp_path]).get("looker-v2:9b").details["parameter_size"] == "9.0B"
 
 
 @pytest.mark.parametrize("name", ["", "../etc/passwd:1", "a/b/c/d:e", "bad name"])

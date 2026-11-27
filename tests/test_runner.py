@@ -108,19 +108,19 @@ def test_budget_unloads_the_least_recently_used_idle_model(tmp_path):
     pool, store, launcher = make_pool(tmp_path, budget=150)
     first, _ = pool.acquire(store.get("qwen3:14b"), 1024)
     pool.release(first, FOREVER)
-    second, _ = pool.acquire(store.get("mimo:9b"), 1024)
+    second, _ = pool.acquire(store.get("looker:9b"), 1024)
     pool.release(second, FOREVER)
-    assert [runner.name for runner in pool.loaded()] == ["mimo:9b"]
+    assert [runner.name for runner in pool.loaded()] == ["looker:9b"]
     assert launcher.launched[0].returncode == -15
     pool.shutdown()
 
 
 def test_both_models_stay_when_they_fit(tmp_path):
     pool, store, _ = make_pool(tmp_path, budget=100000)
-    for name in ("qwen3:14b", "mimo:9b"):
+    for name in ("qwen3:14b", "looker:9b"):
         runner, _ = pool.acquire(store.get(name), 1024)
         pool.release(runner, FOREVER)
-    assert sorted(runner.name for runner in pool.loaded()) == ["mimo:9b", "qwen3:14b"]
+    assert sorted(runner.name for runner in pool.loaded()) == ["looker:9b", "qwen3:14b"]
     pool.shutdown()
 
 
@@ -129,7 +129,7 @@ def test_the_pool_holds_a_model_only_while_its_runner_is_running(tmp_path):
     assert not pool.holds("qwen3:14b")
     runner, _ = pool.acquire(store.get("qwen3:14b"), None)
     pool.release(runner, FOREVER)
-    assert pool.holds("qwen3:14b") and not pool.holds("mimo:9b")
+    assert pool.holds("qwen3:14b") and not pool.holds("looker:9b")
     launcher.launched[0].returncode = 1
     assert not pool.holds("qwen3:14b")
     pool.shutdown()
@@ -154,7 +154,7 @@ def test_arguments_for_a_chat_model(tmp_path):
 
 def test_vision_model_gets_its_projector(tmp_path):
     pool, store, _ = make_pool(tmp_path)
-    model = store.get("mimo:9b")
+    model = store.get("looker:9b")
     arguments = build_arguments(pool.config, pool.plan(model, None), 1)
     assert arguments[arguments.index("--mmproj") + 1] == str(model.projector_path)
 
@@ -190,7 +190,7 @@ def test_tool_definitions_are_written_without_spaces(tmp_path):
 
 def test_compact_tool_definitions_keep_the_template_s_own_tojson_arguments(tmp_path):
     pool, store, _ = make_pool(tmp_path)
-    template = pool.plan(store.get("mimo:9b"), None).template_file.read_text()
+    template = pool.plan(store.get("looker:9b"), None).template_file.read_text()
     assert '(tool | tojson(ensure_ascii=False, separators=(",", ":")))' in template
 
 
@@ -434,7 +434,7 @@ def test_the_pool_reads_card_memory_the_backend_s_way(tmp_path, monkeypatch):
     pool.shutdown()
 
 
-@pytest.mark.parametrize("name, leaks", [("qwen3:14b", False), ("untemplated", False), ("mimo:9b", True), ("nomic-embed-text", False)])
+@pytest.mark.parametrize("name, leaks", [("qwen3:14b", False), ("untemplated", False), ("looker:9b", True), ("nomic-embed-text", False)])
 def test_whether_a_model_can_leak_thinking_is_read_from_its_template_at_load(tmp_path, name, leaks):
     pool, store, launcher = make_pool(tmp_path)
     runner, _ = pool.acquire(store.get(name), None)
@@ -451,7 +451,7 @@ def test_a_model_named_as_a_leaker_holds_its_content_though_its_template_reads_t
     pool.shutdown()
 
 
-@pytest.mark.parametrize("value", ["mimo:9b", [5], None])
+@pytest.mark.parametrize("value", ["looker:9b", [5], None])
 def test_thinking_leakers_must_be_a_list_of_names(value):
     with pytest.raises(ValueError, match="thinking_leakers"):
         Config(thinking_leakers=value)
@@ -459,9 +459,9 @@ def test_thinking_leakers_must_be_a_list_of_names(value):
 
 def test_a_thinking_leaker_name_that_matches_no_model_is_warned_about(tmp_path, caplog):
     caplog.set_level("WARNING")
-    make_pool(tmp_path, thinking_leakers=["mimo:9b", "mimo-v2.6"])
-    assert "mimo-v2.6:latest" in caplog.text and "thinking_leakers" in caplog.text
-    assert "mimo:9b" not in caplog.text
+    make_pool(tmp_path, thinking_leakers=["looker:9b", "looker-v2"])
+    assert "looker-v2:latest" in caplog.text and "thinking_leakers" in caplog.text
+    assert "looker:9b" not in caplog.text
 
 
 UPSTREAM_WORD = "ll" + "ama"
@@ -505,7 +505,7 @@ def test_the_model_log_on_disk_is_written_scrubbed(tmp_path):
 def test_each_runner_gets_its_own_key_from_a_private_file_that_is_gone_after_the_load(tmp_path):
     pool, store, launcher = make_pool(tmp_path)
     first, _ = pool.acquire(store.get("qwen3:14b"), None)
-    second, _ = pool.acquire(store.get("mimo:9b"), None)
+    second, _ = pool.acquire(store.get("looker:9b"), None)
     key_files = [Path(process.arguments[process.arguments.index("--api-key-file") + 1]) for process in launcher.launched]
     assert first.api_key and second.api_key and first.api_key != second.api_key
     assert [process.api_key for process in launcher.launched] == [first.api_key, second.api_key]

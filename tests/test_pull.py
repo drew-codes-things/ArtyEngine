@@ -325,12 +325,14 @@ def test_an_installed_short_name_is_not_downloaded_again(tmp_path, fake_hf):
 
 def test_the_shipped_short_names_point_at_hugging_face_and_cover_what_arty_pulls():
     names = pull.load_short_names()
-    assert {"qwen3:14b", "mimo-v2.6:9b", "nomic-embed-text:latest"} <= set(names)
+    assert {"qwen3:14b", "qwen2.5vl:7b", "nomic-embed-text:latest"} <= set(names)
+    assert "mimo-v2.6:9b" not in names
+    assert not [short for short in names if short.startswith("trial-") or "-abl" in short]
     for short, entry in names.items():
         assert parse_name(short).host == "local" and parse_name(entry.source).host in pull.HF_HOSTS
         assert parse_name(entry.source).tag != "latest"
         assert len(entry.model_sha256) == 64 and int(entry.model_sha256, 16) >= 0
-    assert all(len(names[name].projector_sha256 or "") == 64 for name in ("mimo-v2.6:9b", "qwen2.5vl:7b"))
+    assert all(len(names[name].projector_sha256 or "") == 64 for name in ("qwen2.5vl:7b",))
 
 
 def test_a_short_name_list_pointing_elsewhere_is_refused(tmp_path):

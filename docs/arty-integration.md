@@ -21,7 +21,7 @@ copied from `deploy/site.env.example`:
 | `ARTY_CONTROLLER_OLDER_SETTINGS` | Optional: older names of the controller's `arty_engine_url` setting, space separated, which the switch removes |
 | `ARTY_ENGINE_ALLOWED_HOSTS`, `ARTY_ENGINE_ALLOWED_ORIGINS` | Space separated names for the config's `allowed_hosts` and `allowed_origins` (such as the `Host` a proxy passes) |
 | `ARTY_ENGINE_MODEL_ROOTS` | Folders, separated by spaces, written into the installed config's `model_roots` (other engine stores read in place); empty means the engine's own store only |
-| `ARTY_MAIN_MODEL` | The model loaded after a switch, `qwen3:14b` by default |
+| `ARTY_MAIN_MODEL` | The model loaded after a switch or a GPU slice: set it to Arty's main model. Unset, nothing is loaded and Arty's first request loads its own main model |
 
 The script stops before changing anything when a setting it needs is missing. When a controller is set, the switch
 writes it into the installed `engine.json` as `trainer_url`, with the allowed hosts and origins and the model roots

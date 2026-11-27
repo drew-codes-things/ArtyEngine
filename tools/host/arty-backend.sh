@@ -4,7 +4,7 @@ HERE=$(cd "$(dirname "$0")" && pwd)
 SITE=${ARTY_ENGINE_SITE:-$(cd "$HERE/../../.." && pwd)/site.env}
 [ ! -f "$SITE" ] || . "$SITE"
 CT=${ARTY_CT:-}
-MAIN_MODEL=${ARTY_MAIN_MODEL:-qwen3:14b}
+MAIN_MODEL=${ARTY_MAIN_MODEL:-}
 CONTROLLER_URL=${ARTY_CONTROLLER_URL:-}
 CONTROLLER_SETTINGS=${ARTY_CONTROLLER_SETTINGS:-}
 CONTROLLER_PYTHON=${ARTY_CONTROLLER_PYTHON:-}
@@ -206,6 +206,10 @@ systemctl restart tool-hub brain'
 }
 
 load_main_model() {
+  if [ -z "$MAIN_MODEL" ]; then
+    echo "no ARTY_MAIN_MODEL in $SITE, so no model was loaded; Arty's first request loads its own main model"
+    return 0
+  fi
   in_ct "curl -sf -m 600 localhost:11438/api/generate -d '{\"model\":\"$MAIN_MODEL\",\"keep_alive\":-1}' >/dev/null"
 }
 
